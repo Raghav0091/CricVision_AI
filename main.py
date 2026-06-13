@@ -207,8 +207,8 @@ if page == "Dashboard":
     show_dashboard()
 
 elif page == "Live Session":
-    st.warning("Live camera session is disabled on Streamlit Cloud for now.")
-    st.info("Use Video Analysis to upload cricket clips from your phone.")
+    from Backends.src.ui.live_session import show_live_session_page
+    show_live_session_page()
 
 
 elif page == "Video Analysis":
