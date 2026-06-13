@@ -1,0 +1,16 @@
+streamlit
+streamlit-webrtc
+opencv-python-headless
+ultralytics
+numpy
+pandas
+pillow
+av
+supabase
+python-dotenv
+plotly
+scikit-learn
+matplotlib
+imageio-ffmpeg
+torch
+torchvision
