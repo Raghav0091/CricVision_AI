@@ -6,7 +6,7 @@ numpy
 pandas
 pillow
 av
-supabase
+
 python-dotenv
 plotly
 scikit-learn
