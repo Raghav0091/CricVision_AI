@@ -7,8 +7,9 @@ pandas
 pillow
 av
 
-python-dotenv
+
 plotly
+
 scikit-learn
 matplotlib
 imageio-ffmpeg
