@@ -1,11 +1,6 @@
 import streamlit as st
 
-from Backends.src.ui.dashboard import show_dashboard
-from Backends.src.ui.live_session import show_live_session_page
-from Backends.src.ui.datasets_page import show_datasets_page
-from Backends.src.ui.training_page import show_training_page
-from Backends.src.ui.results_page import show_results_page
-from Backends.src.ui.video_analysis import show_video_analysis_page
+
 
 st.set_page_config(
     page_title="CricVision AI",
@@ -208,19 +203,26 @@ page = st.sidebar.radio(
 )
 
 if page == "Dashboard":
+    from Backends.src.ui.dashboard import show_dashboard
     show_dashboard()
 
 elif page == "Live Session":
-    show_live_session_page()
+    st.warning("Live camera session is disabled on Streamlit Cloud for now.")
+    st.info("Use Video Analysis to upload cricket clips from your phone.")
+
 
 elif page == "Video Analysis":
+    from Backends.src.ui.video_analysis import show_video_analysis_page
     show_video_analysis_page()
 
 elif page == "Datasets":
+    from Backends.src.ui.datasets_page import show_datasets_page
     show_datasets_page()
 
 elif page == "Training":
+    from Backends.src.ui.training_page import show_training_page
     show_training_page()
 
 elif page == "Results":
+    from Backends.src.ui.results_page import show_results_page
     show_results_page()
