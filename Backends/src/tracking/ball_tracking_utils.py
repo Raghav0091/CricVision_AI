@@ -28,6 +28,11 @@ def interpolate_missing_positions(ball_positions):
     if positions_df.empty:
         return []
 
+    positions_df[["x", "y"]] = positions_df[["x", "y"]].apply(
+        pd.to_numeric,
+        errors="coerce",
+    )
+
     positions_df[["x", "y"]] = positions_df[["x", "y"]].interpolate(
         method="linear",
         limit=MAX_INTERPOLATION_GAP,
@@ -52,6 +57,11 @@ def smooth_trajectory(trajectory_points, window_size=5):
 
     if trajectory_df.empty:
         return []
+
+    trajectory_df[["x", "y"]] = trajectory_df[["x", "y"]].apply(
+        pd.to_numeric,
+        errors="coerce",
+    )
 
     window_size = max(1, int(window_size))
     trajectory_df[["x", "y"]] = (
