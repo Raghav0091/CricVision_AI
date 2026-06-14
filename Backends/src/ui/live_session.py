@@ -23,6 +23,7 @@ CRICKET_OBJECTS_MODEL_PATH = Path("Models/cricket_objects/best.pt")
 EXTERNAL_BALL_MODEL_PATH = Path("Models/cricket_objects/best_external.pt")
 BALL_MODEL_PATH = Path("Models/ball_detector/best.pt")
 REVIEW_FRAMES_DIR = Path("outputs/review_frames")
+ENSEMBLE_MODEL_NAME = "Ensemble: All Ball Models + Stumps"
 
 LOW_CONFIDENCE_REVIEW_THRESHOLD = 0.35
 MIN_TRAJECTORY_POINTS_FOR_BOUNCE = 8
@@ -36,9 +37,22 @@ DEFAULT_RECORDING_FPS = 25
 
 def get_live_model_options():
     return {
-        "Ball + Stump Detector": CRICKET_OBJECTS_MODEL_PATH,
-        "External Ball Model": EXTERNAL_BALL_MODEL_PATH,
-        "Old Ball Detector": BALL_MODEL_PATH,
+        "Ball + Stump Detector": {
+            "path": CRICKET_OBJECTS_MODEL_PATH,
+            "ensemble": False,
+        },
+        "Old Ball Detector": {
+            "path": BALL_MODEL_PATH,
+            "ensemble": False,
+        },
+        "External Ball Model": {
+            "path": EXTERNAL_BALL_MODEL_PATH,
+            "ensemble": False,
+        },
+        ENSEMBLE_MODEL_NAME: {
+            "path": None,
+            "ensemble": True,
+        },
     }
 
 
@@ -308,6 +322,7 @@ def process_recorded_delivery(
     confidence,
     image_size,
     model_path=CRICKET_OBJECTS_MODEL_PATH,
+    use_ensemble=False,
     fps=DEFAULT_RECORDING_FPS,
 ):
     import cv2
@@ -320,8 +335,10 @@ def process_recorded_delivery(
         get_box_center,
         get_nearest_stump_detections,
         has_enough_ball_movement,
+        load_ensemble_models,
         load_yolo_model,
         map_model_classes,
+        run_ensemble_detection,
     )
 
     if not frames:
@@ -330,15 +347,28 @@ def process_recorded_delivery(
             "error": "No frames were recorded. Click Start Delivery Recording before bowling.",
         }
 
-    model = load_yolo_model(str(model_path))
+    model = None
+    ensemble_models = []
 
-    if model is None:
-        return {
-            "success": False,
-            "error": f"Model not found: {model_path}",
-        }
+    if use_ensemble:
+        ensemble_models = load_ensemble_models()
 
-    class_names = map_model_classes(model)
+        if not ensemble_models:
+            return {
+                "success": False,
+                "error": "No ensemble models were found. Add at least one configured model file.",
+            }
+    else:
+        model = load_yolo_model(str(model_path))
+
+        if model is None:
+            return {
+                "success": False,
+                "error": f"Model not found: {model_path}",
+            }
+
+        class_names = map_model_classes(model)
+
     height, width = frames[0].shape[:2]
 
     with TemporaryDirectory() as temp_dir:
@@ -387,21 +417,33 @@ def process_recorded_delivery(
         status_text = st.empty()
 
         for frame_index, frame in enumerate(frames):
-            results = model.predict(
-                source=frame,
-                conf=min(confidence, 0.10),
-                imgsz=image_size,
-                verbose=False,
-            )
-
-            result = results[0]
             annotated_frame = frame.copy()
-            ball_detections, low_confidence_ball_detections, stump_detections = collect_detections(
-                result,
-                class_names,
-                get_box_center,
-                confidence,
-            )
+            low_confidence_ball_detections = []
+
+            if use_ensemble:
+                ensemble_result = run_ensemble_detection(
+                    frame,
+                    ensemble_models,
+                    confidence,
+                    image_size,
+                )
+                ball_detections = ensemble_result["ball_detections"]
+                stump_detections = ensemble_result["stump_detections"]
+            else:
+                results = model.predict(
+                    source=frame,
+                    conf=min(confidence, 0.10),
+                    imgsz=image_size,
+                    verbose=False,
+                )
+
+                result = results[0]
+                ball_detections, low_confidence_ball_detections, stump_detections = collect_detections(
+                    result,
+                    class_names,
+                    get_box_center,
+                    confidence,
+                )
 
             if low_confidence_ball_detections:
                 low_confidence_ball_frames += 1
@@ -852,6 +894,7 @@ def show_live_session_page():
                             str(CRICKET_OBJECTS_MODEL_PATH),
                         )
                     ),
+                    use_ensemble=analysis_settings.get("use_ensemble", False),
                 )
 
         st.session_state.live_pending_analysis = False
@@ -873,15 +916,28 @@ def show_live_session_page():
         "Choose detection model",
         list(model_options.keys()),
     )
-    selected_model_path = model_options[selected_model_name]
+    selected_model = model_options[selected_model_name]
+    selected_model_path = selected_model["path"]
+    use_ensemble = selected_model.get("ensemble", False)
 
-    if not selected_model_path.exists():
+    if not use_ensemble and not selected_model_path.exists():
         st.error(f"Model not found: {selected_model_path}")
         st.info("Make sure the selected model file exists in the correct Models folder.")
         return
 
     st.success(f"Model ready: {selected_model_name}")
-    st.caption(f"Model path: {selected_model_path}")
+    if use_ensemble:
+        from Backends.src.ui.video_analysis import get_available_ensemble_model_names
+
+        active_model_names = get_available_ensemble_model_names()
+
+        if active_model_names:
+            st.caption("Active ensemble models: " + ", ".join(active_model_names))
+        else:
+            st.warning("No configured ensemble model files were found.")
+    else:
+        st.caption(f"Model path: {selected_model_path}")
+
     st.info("If selected model does not include stumps, line detection may be Unknown.")
 
     controls_col, guidance_col = st.columns([1, 1])
@@ -995,6 +1051,7 @@ def show_live_session_page():
             "confidence": confidence,
             "image_size": image_size,
             "model_path": str(selected_model_path),
+            "use_ensemble": use_ensemble,
         }
         st.session_state.live_status_message = (
             "Delivery captured. Camera session ended. Refresh or click Start New Delivery to record again."

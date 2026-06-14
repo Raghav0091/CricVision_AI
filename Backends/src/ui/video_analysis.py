@@ -26,6 +26,7 @@ BALL_MODEL_PATH = Path("Models/ball_detector/best.pt")
 CRICKET_OBJECTS_MODEL_PATH = Path("Models/cricket_objects/best.pt")
 EXTERNAL_BALL_MODEL_PATH = Path("Models/cricket_objects/best_external.pt")
 OUTPUT_DIR = Path("outputs/video_analysis")
+ENSEMBLE_MODEL_NAME = "Ensemble: All Ball Models + Stumps"
 
 
 @st.cache_resource
@@ -43,13 +44,48 @@ def get_model_options():
         "Ball + Stump Detector": {
             "path": CRICKET_OBJECTS_MODEL_PATH,
         },
-        "External Ball Model": {
-            "path": EXTERNAL_BALL_MODEL_PATH,
-        },
         "Old Ball Detector": {
             "path": BALL_MODEL_PATH,
         },
+        "External Ball Model": {
+            "path": EXTERNAL_BALL_MODEL_PATH,
+        },
+        ENSEMBLE_MODEL_NAME: {
+            "path": None,
+            "ensemble": True,
+        },
     }
+
+
+def get_ensemble_model_configs():
+    return [
+        {
+            "name": "Ball + Stump Detector",
+            "path": CRICKET_OBJECTS_MODEL_PATH,
+            "use_ball": True,
+            "use_stump": True,
+        },
+        {
+            "name": "Old Ball Detector",
+            "path": BALL_MODEL_PATH,
+            "use_ball": True,
+            "use_stump": False,
+        },
+        {
+            "name": "External Ball Model",
+            "path": EXTERNAL_BALL_MODEL_PATH,
+            "use_ball": True,
+            "use_stump": False,
+        },
+    ]
+
+
+def get_available_ensemble_model_names():
+    return [
+        config["name"]
+        for config in get_ensemble_model_configs()
+        if config["path"].exists()
+    ]
 
 
 def get_model_names(model):
@@ -80,6 +116,147 @@ def map_model_classes(model):
             class_names[int(class_id)] = "stump"
 
     return class_names
+
+
+def calculate_iou(box1, box2):
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
+
+    intersection_width = max(0, x2 - x1)
+    intersection_height = max(0, y2 - y1)
+    intersection_area = intersection_width * intersection_height
+
+    if intersection_area <= 0:
+        return 0
+
+    box1_area = max(0, box1[2] - box1[0]) * max(0, box1[3] - box1[1])
+    box2_area = max(0, box2[2] - box2[0]) * max(0, box2[3] - box2[1])
+    union_area = box1_area + box2_area - intersection_area
+
+    if union_area <= 0:
+        return 0
+
+    return intersection_area / union_area
+
+
+def non_max_suppression_custom(detections, iou_threshold=0.4):
+    kept_detections = []
+    sorted_detections = sorted(
+        detections,
+        key=lambda item: item["confidence"],
+        reverse=True,
+    )
+
+    while sorted_detections:
+        best_detection = sorted_detections.pop(0)
+        kept_detections.append(best_detection)
+        sorted_detections = [
+            detection
+            for detection in sorted_detections
+            if calculate_iou(best_detection["box"], detection["box"]) < iou_threshold
+        ]
+
+    return kept_detections
+
+
+def collect_model_detections(
+    result,
+    class_names,
+    confidence,
+    model_name,
+    get_box_center,
+    ball_confidence=None,
+):
+    ball_detections = []
+    stump_detections = []
+
+    if result.boxes is None or len(result.boxes) == 0:
+        return ball_detections, stump_detections
+
+    for box in result.boxes:
+        class_id = int(box.cls[0].cpu().numpy())
+        class_name = class_names.get(class_id)
+
+        if class_name is None:
+            continue
+
+        detection_confidence = float(box.conf[0].cpu().numpy())
+
+        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+        detection = {
+            "class_id": class_id,
+            "class_name": class_name,
+            "confidence": detection_confidence,
+            "box": (x1, y1, x2, y2),
+            "center": get_box_center(x1, y1, x2, y2),
+            "model_name": model_name,
+        }
+
+        if class_name == "ball":
+            if detection_confidence >= (ball_confidence or confidence):
+                ball_detections.append(detection)
+        elif class_name == "stump":
+            if detection_confidence >= confidence:
+                stump_detections.append(detection)
+
+    return ball_detections, stump_detections
+
+
+def load_ensemble_models():
+    models = []
+
+    for config in get_ensemble_model_configs():
+        if not config["path"].exists():
+            continue
+
+        model = load_yolo_model(str(config["path"]))
+
+        if model is None:
+            continue
+
+        models.append(
+            {
+                **config,
+                "model": model,
+                "class_names": map_model_classes(model),
+            }
+        )
+
+    return models
+
+
+def run_ensemble_detection(frame, models, confidence, imgsz):
+    combined_ball_detections = []
+    combined_stump_detections = []
+
+    for model_config in models:
+        results = model_config["model"].predict(
+            source=frame,
+            conf=confidence,
+            imgsz=imgsz,
+            verbose=False,
+        )
+        ball_detections, stump_detections = collect_model_detections(
+            results[0],
+            model_config["class_names"],
+            confidence,
+            model_config["name"],
+            get_box_center,
+        )
+
+        if model_config["use_ball"]:
+            combined_ball_detections.extend(ball_detections)
+
+        if model_config["use_stump"]:
+            combined_stump_detections.extend(stump_detections)
+
+    return {
+        "ball_detections": non_max_suppression_custom(combined_ball_detections),
+        "stump_detections": combined_stump_detections,
+    }
 
 
 def draw_label(frame, text, x, y, color):
@@ -216,16 +393,36 @@ def show_cricket_delivery_report(result):
         st.warning("Warnings:\n" + "\n".join(f"- {warning}" for warning in warnings))
 
 
-def process_video(video_path, output_path, model_path, class_names=None, confidence=0.25, imgsz=640):
-    model = load_yolo_model(str(model_path))
+def process_video(
+    video_path,
+    output_path,
+    model_path,
+    class_names=None,
+    confidence=0.25,
+    imgsz=640,
+    use_ensemble=False,
+):
+    model = None
+    ensemble_models = []
 
-    if model is None:
-        return {
-            "success": False,
-            "error": f"Model not found: {model_path}",
-        }
+    if use_ensemble:
+        ensemble_models = load_ensemble_models()
 
-    class_names = map_model_classes(model)
+        if not ensemble_models:
+            return {
+                "success": False,
+                "error": "No ensemble models were found. Add at least one configured model file.",
+            }
+    else:
+        model = load_yolo_model(str(model_path))
+
+        if model is None:
+            return {
+                "success": False,
+                "error": f"Model not found: {model_path}",
+            }
+
+        class_names = map_model_classes(model)
 
     cap = cv2.VideoCapture(str(video_path))
 
@@ -304,49 +501,34 @@ def process_video(video_path, output_path, model_path, class_names=None, confide
         if not success:
             break
 
-        results = model.predict(
-            source=frame,
-            conf=confidence,
-            imgsz=imgsz,
-            verbose=False,
-        )
-
-        result = results[0]
         annotated_frame = frame.copy()
 
-        ball_detections = []
-        stump_detections = []
-
-        if result.boxes is not None and len(result.boxes) > 0:
-            for box in result.boxes:
-                class_id = int(box.cls[0].cpu().numpy())
-                conf = float(box.conf[0].cpu().numpy())
-
-                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-
-                class_name = class_names.get(class_id)
-
-                if class_name is None:
-                    continue
-
-                center = get_box_center(x1, y1, x2, y2)
-
-                detection = {
-                    "class_id": class_id,
-                    "class_name": class_name,
-                    "confidence": conf,
-                    "box": (x1, y1, x2, y2),
-                    "center": center,
-                }
-
-                if class_name == "ball":
-                    if conf >= min_ball_confidence_for_tracking:
-                        ball_detections.append(detection)
-                        confidence_values.append(conf)
-
-                elif class_name == "stump":
-                    stump_detections.append(detection)
+        if use_ensemble:
+            ensemble_result = run_ensemble_detection(
+                frame,
+                ensemble_models,
+                confidence,
+                imgsz,
+            )
+            ball_detections = ensemble_result["ball_detections"]
+            stump_detections = ensemble_result["stump_detections"]
+            confidence_values.extend(item["confidence"] for item in ball_detections)
+        else:
+            results = model.predict(
+                source=frame,
+                conf=confidence,
+                imgsz=imgsz,
+                verbose=False,
+            )
+            ball_detections, stump_detections = collect_model_detections(
+                results[0],
+                class_names,
+                confidence,
+                "Selected Model",
+                get_box_center,
+                ball_confidence=min_ball_confidence_for_tracking,
+            )
+            confidence_values.extend(item["confidence"] for item in ball_detections)
 
         if ball_detections:
             ball_detected_frames += 1
@@ -673,14 +855,24 @@ def show_video_analysis_page():
 
     selected_model = model_options[selected_model_name]
     selected_model_path = selected_model["path"]
+    use_ensemble = selected_model.get("ensemble", False)
 
-    if not selected_model_path.exists():
+    if not use_ensemble and not selected_model_path.exists():
         st.error(f"Model not found: {selected_model_path}")
         st.info("Make sure your model file is inside the correct Models folder.")
         st.stop()
 
     st.success(f"Loaded model: {selected_model_name}")
-    st.caption(f"Model path: {selected_model_path}")
+    if use_ensemble:
+        active_model_names = get_available_ensemble_model_names()
+
+        if active_model_names:
+            st.caption("Active ensemble models: " + ", ".join(active_model_names))
+        else:
+            st.warning("No configured ensemble model files were found.")
+    else:
+        st.caption(f"Model path: {selected_model_path}")
+
     st.info("If selected model does not include stumps, line detection may be Unknown.")
 
     uploaded_video = st.file_uploader(
@@ -735,6 +927,7 @@ def show_video_analysis_page():
                     model_path=selected_model_path,
                     confidence=confidence,
                     imgsz=image_size,
+                    use_ensemble=use_ensemble,
                 )
 
             if not result["success"]:
