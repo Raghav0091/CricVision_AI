@@ -8,6 +8,13 @@ import imageio_ffmpeg
 import streamlit as st
 from ultralytics import YOLO
 
+from Backends.src.tracking.ball_tracking_utils import (
+    calculate_tracking_quality,
+    detect_bounce_by_direction_change,
+    interpolate_missing_positions,
+    smooth_trajectory,
+)
+
 
 BALL_MODEL_PATH = Path("Models/ball_detector/best.pt")
 CRICKET_OBJECTS_MODEL_PATH = Path("Models/cricket_objects/best.pt")
@@ -88,20 +95,15 @@ def choose_main_ball(ball_detections, previous_center=None):
 
 
 def estimate_bounce_point(trajectory_points, min_points=6):
-    """
-    Basic bounce/pitch estimate.
-
-    In image coordinates:
-    - x increases left to right
-    - y increases top to bottom
-
-    So the pitch/bounce point is estimated as the lowest visible ball point.
-    """
-
-    if len(trajectory_points) < min_points:
+    if len([point for point in trajectory_points if point is not None]) < min_points:
         return None
 
-    return max(trajectory_points, key=lambda point: point[1])
+    bounce_result = detect_bounce_by_direction_change(trajectory_points)
+
+    if bounce_result is None:
+        return None
+
+    return bounce_result["point"]
 
 
 def convert_to_browser_mp4(input_path, output_path):
@@ -129,6 +131,23 @@ def convert_to_browser_mp4(input_path, output_path):
     )
 
     return output_path
+
+
+def get_nearest_stump_detections(stump_detections_by_frame, frame_index):
+    if frame_index is None or not stump_detections_by_frame:
+        return []
+
+    frame_index = min(frame_index, len(stump_detections_by_frame) - 1)
+
+    for detections in reversed(stump_detections_by_frame[: frame_index + 1]):
+        if detections:
+            return detections
+
+    for detections in stump_detections_by_frame[frame_index + 1 :]:
+        if detections:
+            return detections
+
+    return []
 
 
 def process_video(video_path, output_path, model_path, class_names, confidence=0.25, imgsz=640):
@@ -186,6 +205,8 @@ def process_video(video_path, output_path, model_path, class_names, confidence=0
     confidence_values = []
 
     trajectory_points = []
+    ball_positions = []
+    stump_detections_by_frame = []
     max_trajectory_points = 35
 
     previous_ball_center = None
@@ -263,6 +284,8 @@ def process_video(video_path, output_path, model_path, class_names, confidence=0
             stump_detected_frames += 1
             total_stump_detections += len(stump_detections)
 
+        stump_detections_by_frame.append(stump_detections)
+
         for detection in ball_detections:
             x1, y1, x2, y2 = detection["box"]
             conf = detection["confidence"]
@@ -318,28 +341,44 @@ def process_video(video_path, output_path, model_path, class_names, confidence=0
             missing_ball_frames = 0
 
             previous_ball_center = main_ball["center"]
-            trajectory_points.append(previous_ball_center)
+            ball_positions.append(previous_ball_center)
 
-            if len(trajectory_points) > max_trajectory_points:
-                trajectory_points.pop(0)
+            smoothed_positions = smooth_trajectory(ball_positions)
+            display_trajectory_points = []
 
-            bounce_point = None
+            for point in reversed(smoothed_positions):
+                if point is None:
+                    if display_trajectory_points:
+                        break
+                    continue
+                display_trajectory_points.append(point)
+
+            trajectory_points = list(reversed(display_trajectory_points))[-max_trajectory_points:]
+            interpolated_positions = interpolate_missing_positions(ball_positions)
+            usable_trajectory_points = [
+                point for point in interpolated_positions if point is not None
+            ]
+            bounce_result = None
 
             if (
-                len(trajectory_points) >= min_track_points_for_bounce
-                and has_enough_ball_movement(trajectory_points, min_movement_distance)
+                len(usable_trajectory_points) >= min_track_points_for_bounce
+                and has_enough_ball_movement(usable_trajectory_points, min_movement_distance)
             ):
-                bounce_point = estimate_bounce_point(trajectory_points)
+                bounce_result = detect_bounce_by_direction_change(ball_positions)
 
-            if bounce_point is not None and estimated_bounce_point is None:
+            if bounce_result is not None and estimated_bounce_point is None:
                 
-                estimated_bounce_point = bounce_point
+                estimated_bounce_point = bounce_result["point"]
                 
-                estimated_bounce_frame = frame_index
+                estimated_bounce_frame = bounce_result["frame_index"]
+                bounce_stump_detections = get_nearest_stump_detections(
+                    stump_detections_by_frame,
+                    estimated_bounce_frame,
+                )
 
                 estimated_line = estimate_line_from_stumps(
                     estimated_bounce_point,
-                    stump_detections
+                    bounce_stump_detections
                 )
 
                 estimated_length = estimate_length_from_bounce(
@@ -349,11 +388,24 @@ def process_video(video_path, output_path, model_path, class_names, confidence=0
 
 
         else:
+            ball_positions.append(None)
             missing_ball_frames += 1
 
             if missing_ball_frames >= max_missing_ball_frames:
                 trajectory_points.clear()
                 previous_ball_center = None
+            else:
+                smoothed_positions = smooth_trajectory(ball_positions)
+                display_trajectory_points = []
+
+                for point in reversed(smoothed_positions):
+                    if point is None:
+                        if display_trajectory_points:
+                            break
+                        continue
+                    display_trajectory_points.append(point)
+
+                trajectory_points = list(reversed(display_trajectory_points))[-max_trajectory_points:]
 
         for i in range(1, len(trajectory_points)):
             cv2.line(
@@ -512,6 +564,8 @@ def process_video(video_path, output_path, model_path, class_names, confidence=0
     if confidence_values:
         average_confidence = sum(confidence_values) / len(confidence_values)
 
+    tracking_quality = calculate_tracking_quality(ball_positions, frame_index)
+
     return {
         "success": True,
         "output_path": output_path,
@@ -521,6 +575,8 @@ def process_video(video_path, output_path, model_path, class_names, confidence=0
         "total_ball_detections": total_ball_detections,
         "total_stump_detections": total_stump_detections,
         "ball_detection_rate": ball_detection_rate,
+        "ball_tracking_rate": tracking_quality["tracking_rate"],
+        "interpolated_ball_frames": tracking_quality["interpolated_frames"],
         "stump_detection_rate": stump_detection_rate,
         "average_ball_confidence": average_confidence,
         "estimated_bounce_point": estimated_bounce_point,
@@ -653,18 +709,22 @@ def show_video_analysis_page():
             col6.metric("Total Stump Detections", result["total_stump_detections"])
             col7.metric("Avg Ball Confidence", f"{result['average_ball_confidence']:.2f}")
 
+            col8, col9 = st.columns(2)
+            col8.metric("Ball Tracking Rate", f"{result.get('ball_tracking_rate', 0):.1f}%")
+            col9.metric("Interpolated Ball Frames", result.get("interpolated_ball_frames", 0))
+
             st.subheader("Bounce / Pitch Estimate")
 
             if result["estimated_bounce_point"] is not None:
                 bx, by = result["estimated_bounce_point"]
 
-                col8, col9, col10, col11, col12 = st.columns(5)
+                col10, col11, col12, col13, col14 = st.columns(5)
 
-                col8.metric("Bounce Frame", result["estimated_bounce_frame"])
-                col9.metric("Bounce X", bx)
-                col10.metric("Bounce Y", by)
-                col11.metric("Estimated Line", result["estimated_line"])
-                col12.metric("Estimated Length", result["estimated_length"])
+                col10.metric("Bounce Frame", result["estimated_bounce_frame"])
+                col11.metric("Bounce X", bx)
+                col12.metric("Bounce Y", by)
+                col13.metric("Estimated Line", result["estimated_line"])
+                col14.metric("Estimated Length", result["estimated_length"])
                 
                 st.success("Estimated bounce/pitch point found.")
             else:

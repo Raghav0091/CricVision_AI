@@ -5,17 +5,26 @@ from tempfile import TemporaryDirectory
 
 import streamlit as st
 
+from Backends.src.tracking.ball_tracking_utils import (
+    calculate_tracking_quality,
+    detect_bounce_by_direction_change,
+    interpolate_missing_positions,
+    smooth_trajectory,
+)
+
 
 CRICKET_OBJECTS_MODEL_PATH = Path("Models/cricket_objects/best.pt")
+REVIEW_FRAMES_DIR = Path("outputs/review_frames")
 
 CLASS_NAMES = {
     0: "ball",
     1: "stump",
 }
 
-MIN_TRACKING_CONFIDENCE = 0.35
+LOW_CONFIDENCE_REVIEW_THRESHOLD = 0.35
 MIN_TRAJECTORY_POINTS_FOR_BOUNCE = 8
 MIN_MOVEMENT_DISTANCE = 40
+SHORT_MISSING_BALL_SMOOTHING_FRAMES = 8
 MAX_MISSING_BALL_FRAMES = 12
 MAX_TRAJECTORY_POINTS = 35
 MAX_RECORDED_FRAMES = 450
@@ -95,10 +104,11 @@ def write_video(frames, output_path, fps=DEFAULT_RECORDING_FPS):
 
 def collect_detections(result, class_names, get_box_center, ball_confidence):
     ball_detections = []
+    low_confidence_ball_detections = []
     stump_detections = []
 
     if result.boxes is None or len(result.boxes) == 0:
-        return ball_detections, stump_detections
+        return ball_detections, low_confidence_ball_detections, stump_detections
 
     for box in result.boxes:
         class_id = int(box.cls[0].cpu().numpy())
@@ -116,12 +126,109 @@ def collect_detections(result, class_names, get_box_center, ball_confidence):
             "center": get_box_center(x1, y1, x2, y2),
         }
 
-        if class_name == "ball" and confidence >= ball_confidence:
-            ball_detections.append(detection)
+        if class_name == "ball":
+            if confidence >= ball_confidence:
+                ball_detections.append(detection)
+            if 0.10 <= confidence < LOW_CONFIDENCE_REVIEW_THRESHOLD:
+                low_confidence_ball_detections.append(detection)
         elif class_name == "stump":
             stump_detections.append(detection)
 
-    return ball_detections, stump_detections
+    return ball_detections, low_confidence_ball_detections, stump_detections
+
+
+def get_point_distance(point_a, point_b):
+    ax, ay = point_a
+    bx, by = point_b
+    return ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
+
+
+def predict_next_ball_center(trajectory_points, previous_ball_center):
+    if len(trajectory_points) >= 2:
+        previous_x, previous_y = trajectory_points[-2]
+        last_x, last_y = trajectory_points[-1]
+        return last_x + (last_x - previous_x), last_y + (last_y - previous_y)
+
+    return previous_ball_center
+
+
+def choose_continuous_ball(ball_detections, trajectory_points, previous_ball_center, frame_shape):
+    if not ball_detections:
+        return None
+
+    if previous_ball_center is None:
+        return max(ball_detections, key=lambda item: item["confidence"])
+
+    height, width = frame_shape[:2]
+    frame_diagonal = (width**2 + height**2) ** 0.5
+    max_reasonable_jump = max(45, frame_diagonal * 0.18)
+    predicted_center = predict_next_ball_center(trajectory_points, previous_ball_center)
+
+    def continuity_score(item):
+        center = item["center"]
+        distance_from_previous = get_point_distance(center, previous_ball_center)
+        distance_from_prediction = get_point_distance(center, predicted_center)
+        return distance_from_prediction + (distance_from_previous * 0.35) - (item["confidence"] * 80)
+
+    nearest_detection = min(ball_detections, key=continuity_score)
+    nearest_distance = get_point_distance(nearest_detection["center"], previous_ball_center)
+
+    if len(trajectory_points) >= 3 and nearest_distance > max_reasonable_jump:
+        return None
+
+    return nearest_detection
+
+
+def save_low_confidence_review_frame(frame, detections, timestamp, frame_index):
+    if not detections:
+        return
+
+    import cv2
+
+    REVIEW_FRAMES_DIR.mkdir(parents=True, exist_ok=True)
+    review_frame = frame.copy()
+
+    for detection in detections:
+        x1, y1, x2, y2 = detection["box"]
+        center_x, center_y = detection["center"]
+        confidence = detection["confidence"]
+        cv2.rectangle(review_frame, (x1, y1), (x2, y2), (0, 165, 255), 2)
+        cv2.circle(review_frame, (center_x, center_y), 4, (0, 165, 255), -1)
+        label_y = max(y1, 25)
+        cv2.rectangle(
+            review_frame,
+            (x1, label_y - 24),
+            (x1 + 140, label_y),
+            (0, 120, 220),
+            -1,
+        )
+        cv2.putText(
+            review_frame,
+            f"low ball {confidence:.2f}",
+            (x1 + 5, label_y - 6),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (255, 255, 255),
+            2,
+        )
+
+    cv2.imwrite(str(REVIEW_FRAMES_DIR / f"low_conf_ball_{timestamp}_{frame_index:04d}.jpg"), review_frame)
+
+
+def stop_webrtc_context_if_possible(webrtc_context):
+    if webrtc_context is None:
+        return
+
+    try:
+        stop_method = getattr(webrtc_context, "stop", None)
+        if callable(stop_method):
+            stop_method()
+
+        state = getattr(webrtc_context, "state", None)
+        if state is not None and hasattr(state, "playing"):
+            state.playing = False
+    except Exception:
+        pass
 
 
 def draw_delivery_dashboard(
@@ -191,13 +298,12 @@ def process_recorded_delivery(
     import cv2
 
     from Backends.src.ui.video_analysis import (
-        choose_main_ball,
         convert_to_browser_mp4,
         draw_label,
-        estimate_bounce_point,
         estimate_length_from_bounce,
         estimate_line_from_stumps,
         get_box_center,
+        get_nearest_stump_detections,
         has_enough_ball_movement,
         load_yolo_model,
     )
@@ -244,10 +350,13 @@ def process_recorded_delivery(
         ball_detected_frames = 0
         stump_detected_frames = 0
         total_ball_detections = 0
+        low_confidence_ball_frames = 0
         total_stump_detections = 0
         confidence_values = []
 
         trajectory_points = []
+        ball_positions = []
+        stump_detections_by_frame = []
         previous_ball_center = None
         missing_ball_frames = 0
         last_stump_detections = []
@@ -263,19 +372,28 @@ def process_recorded_delivery(
         for frame_index, frame in enumerate(frames):
             results = model.predict(
                 source=frame,
-                conf=confidence,
+                conf=min(confidence, 0.10),
                 imgsz=image_size,
                 verbose=False,
             )
 
             result = results[0]
             annotated_frame = frame.copy()
-            ball_detections, stump_detections = collect_detections(
+            ball_detections, low_confidence_ball_detections, stump_detections = collect_detections(
                 result,
                 CLASS_NAMES,
                 get_box_center,
                 confidence,
             )
+
+            if low_confidence_ball_detections:
+                low_confidence_ball_frames += 1
+                save_low_confidence_review_frame(
+                    frame,
+                    low_confidence_ball_detections,
+                    timestamp,
+                    frame_index,
+                )
 
             if ball_detections:
                 ball_detected_frames += 1
@@ -286,6 +404,8 @@ def process_recorded_delivery(
                 stump_detected_frames += 1
                 total_stump_detections += len(stump_detections)
                 last_stump_detections = stump_detections
+
+            stump_detections_by_frame.append(stump_detections)
 
             for detection in ball_detections:
                 x1, y1, x2, y2 = detection["box"]
@@ -315,43 +435,76 @@ def process_recorded_delivery(
                     (255, 100, 0),
                 )
 
-            main_ball = choose_main_ball(ball_detections, previous_ball_center)
+            main_ball = choose_continuous_ball(
+                ball_detections,
+                trajectory_points,
+                previous_ball_center,
+                frame.shape,
+            )
 
             if main_ball is not None:
                 missing_ball_frames = 0
                 previous_ball_center = main_ball["center"]
-                trajectory_points.append(previous_ball_center)
+                ball_positions.append(previous_ball_center)
 
-                if len(trajectory_points) > MAX_TRAJECTORY_POINTS:
-                    trajectory_points.pop(0)
+                smoothed_positions = smooth_trajectory(ball_positions)
+                display_trajectory_points = []
+
+                for point in reversed(smoothed_positions):
+                    if point is None:
+                        if display_trajectory_points:
+                            break
+                        continue
+                    display_trajectory_points.append(point)
+
+                trajectory_points = list(reversed(display_trajectory_points))[-MAX_TRAJECTORY_POINTS:]
+                interpolated_positions = interpolate_missing_positions(ball_positions)
+                usable_trajectory_points = [
+                    point for point in interpolated_positions if point is not None
+                ]
+                bounce_result = None
 
                 if (
                     estimated_bounce_point is None
-                    and len(trajectory_points) >= MIN_TRAJECTORY_POINTS_FOR_BOUNCE
-                    and has_enough_ball_movement(trajectory_points, MIN_MOVEMENT_DISTANCE)
+                    and len(usable_trajectory_points) >= MIN_TRAJECTORY_POINTS_FOR_BOUNCE
+                    and has_enough_ball_movement(usable_trajectory_points, MIN_MOVEMENT_DISTANCE)
                 ):
-                    bounce_point = estimate_bounce_point(
-                        trajectory_points,
-                        MIN_TRAJECTORY_POINTS_FOR_BOUNCE,
-                    )
+                    bounce_result = detect_bounce_by_direction_change(ball_positions)
 
-                    if bounce_point is not None:
-                        estimated_bounce_point = bounce_point
-                        estimated_bounce_frame = frame_index
+                    if bounce_result is not None:
+                        estimated_bounce_point = bounce_result["point"]
+                        estimated_bounce_frame = bounce_result["frame_index"]
+                        bounce_stump_detections = get_nearest_stump_detections(
+                            stump_detections_by_frame,
+                            estimated_bounce_frame,
+                        )
                         estimated_line = estimate_line_from_stumps(
                             estimated_bounce_point,
-                            last_stump_detections,
+                            bounce_stump_detections or last_stump_detections,
                         )
                         estimated_length = estimate_length_from_bounce(
                             estimated_bounce_point,
                             height,
                         )
             else:
+                ball_positions.append(None)
                 missing_ball_frames += 1
 
                 if missing_ball_frames >= MAX_MISSING_BALL_FRAMES:
                     trajectory_points.clear()
                     previous_ball_center = None
+                else:
+                    smoothed_positions = smooth_trajectory(ball_positions)
+                    display_trajectory_points = []
+
+                    for point in reversed(smoothed_positions):
+                        if point is None:
+                            if display_trajectory_points:
+                                break
+                            continue
+                        display_trajectory_points.append(point)
+
+                    trajectory_points = list(reversed(display_trajectory_points))[-MAX_TRAJECTORY_POINTS:]
 
             for point_index in range(1, len(trajectory_points)):
                 cv2.line(
@@ -416,6 +569,8 @@ def process_recorded_delivery(
     if confidence_values:
         average_ball_confidence = sum(confidence_values) / len(confidence_values)
 
+    tracking_quality = calculate_tracking_quality(ball_positions, total_frames)
+
     return {
         "success": True,
         "raw_video_bytes": raw_video_bytes,
@@ -426,14 +581,18 @@ def process_recorded_delivery(
         "ball_detected_frames": ball_detected_frames,
         "stump_detected_frames": stump_detected_frames,
         "total_ball_detections": total_ball_detections,
+        "low_confidence_ball_frames": low_confidence_ball_frames,
         "total_stump_detections": total_stump_detections,
         "ball_detection_rate": ball_detection_rate,
+        "ball_tracking_rate": tracking_quality["tracking_rate"],
+        "interpolated_ball_frames": tracking_quality["interpolated_frames"],
         "stump_detection_rate": stump_detection_rate,
         "average_ball_confidence": average_ball_confidence,
         "estimated_bounce_point": estimated_bounce_point,
         "estimated_bounce_frame": estimated_bounce_frame,
         "estimated_line": estimated_line,
         "estimated_length": estimated_length,
+        "ball_detection_difficult": ball_detection_rate < 35 or low_confidence_ball_frames > 0,
     }
 
 
@@ -449,6 +608,11 @@ def get_quality_label(rate):
 
 def get_coaching_feedback(result):
     feedback = []
+
+    if result.get("ball_detection_difficult"):
+        feedback.append(
+            "Ball was difficult to detect. Try 60 FPS, better lighting, closer camera, and stable recording."
+        )
 
     if result["ball_detection_rate"] < 35:
         feedback.append(
@@ -492,6 +656,11 @@ def show_delivery_report(result):
     col2.metric("Ball Quality", ball_quality, f"{result['ball_detection_rate']:.1f}%")
     col3.metric("Stump Quality", stump_quality, f"{result['stump_detection_rate']:.1f}%")
     col4.metric("Avg Ball Confidence", f"{result['average_ball_confidence']:.2f}")
+
+    if result.get("ball_detection_difficult"):
+        st.warning(
+            "Ball was difficult to detect. Try 60 FPS, better lighting, closer camera, and stable recording."
+        )
 
     st.subheader("Bounce / Pitch Estimate")
 
@@ -540,27 +709,38 @@ def show_analysis_output(result):
     st.subheader("Processed Delivery Clip")
     st.video(result["processed_video_bytes"])
 
+    st.subheader("Analysis Stats")
+    stats_col1, stats_col2, stats_col3, stats_col4 = st.columns(4)
+    stats_col1.metric("Ball Frames", result["ball_detected_frames"])
+    stats_col2.metric("Stump Frames", result["stump_detected_frames"])
+    stats_col3.metric("Ball Detection Rate", f"{result['ball_detection_rate']:.1f}%")
+    stats_col4.metric("Low-Conf Review Frames", result.get("low_confidence_ball_frames", 0))
+
+    stats_col5, stats_col6 = st.columns(2)
+    stats_col5.metric("Ball Tracking Rate", f"{result.get('ball_tracking_rate', 0):.1f}%")
+    stats_col6.metric("Interpolated Ball Frames", result.get("interpolated_ball_frames", 0))
+
     show_delivery_report(result)
 
-    st.subheader("Download Clips")
+    st.download_button(
+        label="Download Processed Delivery Clip",
+        data=result["processed_video_bytes"],
+        file_name=result["processed_file_name"],
+        mime="video/mp4",
+    )
 
-    download_col1, download_col2 = st.columns(2)
 
-    with download_col1:
-        st.download_button(
-            label="Download Processed Delivery Clip",
-            data=result["processed_video_bytes"],
-            file_name=result["processed_file_name"],
-            mime="video/mp4",
-        )
-
-    with download_col2:
-        st.download_button(
-            label="Download Raw Delivery Clip",
-            data=result["raw_video_bytes"],
-            file_name=result["raw_file_name"],
-            mime="video/mp4",
-        )
+def reset_live_delivery_state():
+    st.session_state.live_delivery_recording = False
+    st.session_state.live_recorded_frames = []
+    st.session_state.live_last_result = None
+    st.session_state.live_recording_state = LiveDeliveryRecordingState()
+    st.session_state.live_camera_active = True
+    st.session_state.live_camera_session_ended = False
+    st.session_state.live_pending_analysis = False
+    st.session_state.live_pending_analysis_settings = None
+    st.session_state.live_webrtc_key_suffix += 1
+    st.session_state.live_status_message = "Ready for a new delivery."
 
 
 def initialize_live_session_state():
@@ -569,6 +749,11 @@ def initialize_live_session_state():
         "live_recorded_frames": [],
         "live_last_result": None,
         "live_recording_state": LiveDeliveryRecordingState(),
+        "live_camera_active": True,
+        "live_camera_session_ended": False,
+        "live_pending_analysis": False,
+        "live_pending_analysis_settings": None,
+        "live_webrtc_key_suffix": 0,
         "live_status_message": None,
     }
 
@@ -593,22 +778,62 @@ def show_live_session_page():
     st.success("Model ready: Ball + Stump Detector")
     st.caption(f"Model path: {CRICKET_OBJECTS_MODEL_PATH}")
 
+    analysis_complete = (
+        st.session_state.live_camera_session_ended
+        and st.session_state.live_last_result is not None
+    )
+
+    if st.session_state.live_camera_session_ended and st.session_state.live_pending_analysis:
+        st.info(
+            "Delivery captured. Camera session ended. Refresh or click Start New Delivery to record again."
+        )
+
+        recorded_frames = st.session_state.live_recorded_frames
+        analysis_settings = st.session_state.live_pending_analysis_settings or {}
+
+        if not recorded_frames:
+            st.session_state.live_last_result = {
+                "success": False,
+                "error": "No frames were recorded. Start recording, wait for the camera preview, then bowl.",
+            }
+        else:
+            with st.spinner("Analyzing recorded delivery..."):
+                st.session_state.live_last_result = process_recorded_delivery(
+                    frames=recorded_frames,
+                    confidence=analysis_settings.get("confidence", 0.25),
+                    image_size=analysis_settings.get("image_size", 960),
+                )
+
+        st.session_state.live_pending_analysis = False
+        st.session_state.live_pending_analysis_settings = None
+        st.rerun()
+
+    if analysis_complete:
+        st.info(
+            "Delivery captured. Camera session ended. Refresh or click Start New Delivery to record again."
+        )
+        if st.button("Start New Delivery", type="primary"):
+            reset_live_delivery_state()
+            st.rerun()
+
+        show_analysis_output(st.session_state.live_last_result)
+        return
+
     controls_col, guidance_col = st.columns([1, 1])
 
     with controls_col:
-        confidence = st.number_input(
+        confidence = st.slider(
             "Detection confidence",
-            min_value=0.05,
-            max_value=0.90,
+            min_value=0.10,
+            max_value=0.70,
             value=0.25,
             step=0.05,
-            format="%.2f",
         )
 
         image_size = st.selectbox(
             "Image size",
             options=[640, 768, 960],
-            index=0,
+            index=2,
         )
 
     with guidance_col:
@@ -637,24 +862,29 @@ def show_live_session_page():
         }
     )
 
-    webrtc_context = webrtc_streamer(
-        key="cricvision-live-delivery-recorder",
-        video_processor_factory=create_delivery_recorder_class(
-            st.session_state.live_recording_state
-        ),
-        rtc_configuration=rtc_config,
-        media_stream_constraints={
-            "video": {
-                "width": {"ideal": 1280},
-                "height": {"ideal": 720},
-                "facingMode": "environment",
-            },
-            "audio": False,
-        },
-        async_processing=True,
-    )
+    webrtc_context = None
 
-    recorder = webrtc_context.video_processor
+    if st.session_state.live_camera_active:
+        webrtc_context = webrtc_streamer(
+            key=f"cricvision-live-delivery-recorder-{st.session_state.live_webrtc_key_suffix}",
+            video_processor_factory=create_delivery_recorder_class(
+                st.session_state.live_recording_state
+            ),
+            rtc_configuration=rtc_config,
+            media_stream_constraints={
+                "video": {
+                    "width": {"ideal": 1280},
+                    "height": {"ideal": 720},
+                    "facingMode": "environment",
+                },
+                "audio": False,
+            },
+            async_processing=True,
+        )
+
+    recorder = None
+    if webrtc_context is not None:
+        recorder = webrtc_context.video_processor
     recording_state = st.session_state.live_recording_state
 
     button_col1, button_col2, button_col3 = st.columns([1, 1, 1])
@@ -692,28 +922,21 @@ def show_live_session_page():
         recorded_frames = recording_state.stop_recording()
         st.session_state.live_delivery_recording = False
         st.session_state.live_recorded_frames = recorded_frames
-
-        if not recorded_frames:
-            st.error("No frames were recorded. Start recording, wait for the camera preview, then bowl.")
-        else:
-            with st.spinner("Analyzing recorded delivery..."):
-                result = process_recorded_delivery(
-                    frames=recorded_frames,
-                    confidence=confidence,
-                    image_size=image_size,
-                )
-
-            if not result["success"]:
-                st.error(result["error"])
-            else:
-                st.session_state.live_last_result = result
-                st.success("Delivery analysis completed. See Analysis Output below.")
+        st.session_state.live_camera_active = False
+        st.session_state.live_camera_session_ended = True
+        stop_webrtc_context_if_possible(webrtc_context)
+        st.session_state.live_pending_analysis = True
+        st.session_state.live_pending_analysis_settings = {
+            "confidence": confidence,
+            "image_size": image_size,
+        }
+        st.session_state.live_status_message = (
+            "Delivery captured. Camera session ended. Refresh or click Start New Delivery to record again."
+        )
+        st.rerun()
 
     if clear_clicked:
-        recording_state.clear()
-        st.session_state.live_delivery_recording = False
-        st.session_state.live_recorded_frames = []
-        st.session_state.live_last_result = None
+        reset_live_delivery_state()
         st.session_state.live_status_message = "Recorded delivery cleared."
         st.rerun()
 
