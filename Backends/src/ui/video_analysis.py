@@ -24,6 +24,7 @@ from Backends.src.tracking.ball_tracking_utils import (
 
 BALL_MODEL_PATH = Path("Models/ball_detector/best.pt")
 CRICKET_OBJECTS_MODEL_PATH = Path("Models/cricket_objects/best.pt")
+EXTERNAL_BALL_MODEL_PATH = Path("Models/cricket_objects/best_external.pt")
 OUTPUT_DIR = Path("outputs/video_analysis")
 
 
@@ -41,18 +42,44 @@ def get_model_options():
     return {
         "Ball + Stump Detector": {
             "path": CRICKET_OBJECTS_MODEL_PATH,
-            "classes": {
-                0: "ball",
-                1: "stump",
-            },
+        },
+        "External Ball Model": {
+            "path": EXTERNAL_BALL_MODEL_PATH,
         },
         "Old Ball Detector": {
             "path": BALL_MODEL_PATH,
-            "classes": {
-                0: "ball",
-            },
         },
     }
+
+
+def get_model_names(model):
+    names = getattr(model, "names", {})
+
+    if isinstance(names, dict):
+        return names
+
+    if isinstance(names, (list, tuple)):
+        return {index: name for index, name in enumerate(names)}
+
+    return {}
+
+
+def map_model_classes(model):
+    class_names = {}
+
+    for class_id, raw_name in get_model_names(model).items():
+        normalized_name = str(raw_name).lower()
+
+        if "ball" in normalized_name:
+            class_names[int(class_id)] = "ball"
+        elif (
+            "stump" in normalized_name
+            or "stumps" in normalized_name
+            or "wicket" in normalized_name
+        ):
+            class_names[int(class_id)] = "stump"
+
+    return class_names
 
 
 def draw_label(frame, text, x, y, color):
@@ -189,7 +216,7 @@ def show_cricket_delivery_report(result):
         st.warning("Warnings:\n" + "\n".join(f"- {warning}" for warning in warnings))
 
 
-def process_video(video_path, output_path, model_path, class_names, confidence=0.25, imgsz=640):
+def process_video(video_path, output_path, model_path, class_names=None, confidence=0.25, imgsz=640):
     model = load_yolo_model(str(model_path))
 
     if model is None:
@@ -197,6 +224,8 @@ def process_video(video_path, output_path, model_path, class_names, confidence=0
             "success": False,
             "error": f"Model not found: {model_path}",
         }
+
+    class_names = map_model_classes(model)
 
     cap = cv2.VideoCapture(str(video_path))
 
@@ -296,7 +325,11 @@ def process_video(video_path, output_path, model_path, class_names, confidence=0
                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                 x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
 
-                class_name = class_names.get(class_id, f"class_{class_id}")
+                class_name = class_names.get(class_id)
+
+                if class_name is None:
+                    continue
+
                 center = get_box_center(x1, y1, x2, y2)
 
                 detection = {
@@ -640,7 +673,6 @@ def show_video_analysis_page():
 
     selected_model = model_options[selected_model_name]
     selected_model_path = selected_model["path"]
-    class_names = selected_model["classes"]
 
     if not selected_model_path.exists():
         st.error(f"Model not found: {selected_model_path}")
@@ -649,6 +681,7 @@ def show_video_analysis_page():
 
     st.success(f"Loaded model: {selected_model_name}")
     st.caption(f"Model path: {selected_model_path}")
+    st.info("If selected model does not include stumps, line detection may be Unknown.")
 
     uploaded_video = st.file_uploader(
         "Upload bowling video from phone or camera",
@@ -700,7 +733,6 @@ def show_video_analysis_page():
                     video_path=input_video_path,
                     output_path=raw_output_path,
                     model_path=selected_model_path,
-                    class_names=class_names,
                     confidence=confidence,
                     imgsz=image_size,
                 )

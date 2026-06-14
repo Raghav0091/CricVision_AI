@@ -20,12 +20,9 @@ from Backends.src.tracking.ball_tracking_utils import (
 
 
 CRICKET_OBJECTS_MODEL_PATH = Path("Models/cricket_objects/best.pt")
+EXTERNAL_BALL_MODEL_PATH = Path("Models/cricket_objects/best_external.pt")
+BALL_MODEL_PATH = Path("Models/ball_detector/best.pt")
 REVIEW_FRAMES_DIR = Path("outputs/review_frames")
-
-CLASS_NAMES = {
-    0: "ball",
-    1: "stump",
-}
 
 LOW_CONFIDENCE_REVIEW_THRESHOLD = 0.35
 MIN_TRAJECTORY_POINTS_FOR_BOUNCE = 8
@@ -35,6 +32,14 @@ MAX_MISSING_BALL_FRAMES = 12
 MAX_TRAJECTORY_POINTS = 35
 MAX_RECORDED_FRAMES = 450
 DEFAULT_RECORDING_FPS = 25
+
+
+def get_live_model_options():
+    return {
+        "Ball + Stump Detector": CRICKET_OBJECTS_MODEL_PATH,
+        "External Ball Model": EXTERNAL_BALL_MODEL_PATH,
+        "Old Ball Detector": BALL_MODEL_PATH,
+    }
 
 
 class LiveDeliveryRecordingState:
@@ -119,10 +124,13 @@ def collect_detections(result, class_names, get_box_center, ball_confidence):
     for box in result.boxes:
         class_id = int(box.cls[0].cpu().numpy())
         confidence = float(box.conf[0].cpu().numpy())
-        class_name = class_names.get(class_id, f"class_{class_id}")
+        class_name = class_names.get(class_id)
 
         x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
         x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+
+        if class_name is None:
+            continue
 
         detection = {
             "class_id": class_id,
@@ -299,6 +307,7 @@ def process_recorded_delivery(
     frames,
     confidence,
     image_size,
+    model_path=CRICKET_OBJECTS_MODEL_PATH,
     fps=DEFAULT_RECORDING_FPS,
 ):
     import cv2
@@ -312,6 +321,7 @@ def process_recorded_delivery(
         get_nearest_stump_detections,
         has_enough_ball_movement,
         load_yolo_model,
+        map_model_classes,
     )
 
     if not frames:
@@ -320,14 +330,15 @@ def process_recorded_delivery(
             "error": "No frames were recorded. Click Start Delivery Recording before bowling.",
         }
 
-    model = load_yolo_model(str(CRICKET_OBJECTS_MODEL_PATH))
+    model = load_yolo_model(str(model_path))
 
     if model is None:
         return {
             "success": False,
-            "error": f"Model not found: {CRICKET_OBJECTS_MODEL_PATH}",
+            "error": f"Model not found: {model_path}",
         }
 
+    class_names = map_model_classes(model)
     height, width = frames[0].shape[:2]
 
     with TemporaryDirectory() as temp_dir:
@@ -387,7 +398,7 @@ def process_recorded_delivery(
             annotated_frame = frame.copy()
             ball_detections, low_confidence_ball_detections, stump_detections = collect_detections(
                 result,
-                CLASS_NAMES,
+                class_names,
                 get_box_center,
                 confidence,
             )
@@ -810,14 +821,7 @@ def show_live_session_page():
 
     initialize_live_session_state()
 
-    if not CRICKET_OBJECTS_MODEL_PATH.exists():
-        st.error(f"Model not found: {CRICKET_OBJECTS_MODEL_PATH}")
-        st.info("Make sure the Ball + Stump Detector file exists in Models/cricket_objects/best.pt.")
-        return
-
-    st.success("Model ready: Ball + Stump Detector")
-    st.caption(f"Model path: {CRICKET_OBJECTS_MODEL_PATH}")
-
+    model_options = get_live_model_options()
     analysis_complete = (
         st.session_state.live_camera_session_ended
         and st.session_state.live_last_result is not None
@@ -842,6 +846,12 @@ def show_live_session_page():
                     frames=recorded_frames,
                     confidence=analysis_settings.get("confidence", 0.25),
                     image_size=analysis_settings.get("image_size", 960),
+                    model_path=Path(
+                        analysis_settings.get(
+                            "model_path",
+                            str(CRICKET_OBJECTS_MODEL_PATH),
+                        )
+                    ),
                 )
 
         st.session_state.live_pending_analysis = False
@@ -858,6 +868,21 @@ def show_live_session_page():
 
         show_analysis_output(st.session_state.live_last_result)
         return
+
+    selected_model_name = st.selectbox(
+        "Choose detection model",
+        list(model_options.keys()),
+    )
+    selected_model_path = model_options[selected_model_name]
+
+    if not selected_model_path.exists():
+        st.error(f"Model not found: {selected_model_path}")
+        st.info("Make sure the selected model file exists in the correct Models folder.")
+        return
+
+    st.success(f"Model ready: {selected_model_name}")
+    st.caption(f"Model path: {selected_model_path}")
+    st.info("If selected model does not include stumps, line detection may be Unknown.")
 
     controls_col, guidance_col = st.columns([1, 1])
 
@@ -969,6 +994,7 @@ def show_live_session_page():
         st.session_state.live_pending_analysis_settings = {
             "confidence": confidence,
             "image_size": image_size,
+            "model_path": str(selected_model_path),
         }
         st.session_state.live_status_message = (
             "Delivery captured. Camera session ended. Refresh or click Start New Delivery to record again."
