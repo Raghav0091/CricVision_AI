@@ -8,6 +8,12 @@ import imageio_ffmpeg
 import streamlit as st
 from ultralytics import YOLO
 
+from Backends.src.analysis.cricket_agent import (
+    calculate_detection_quality,
+    detect_analysis_warnings,
+    generate_coaching_feedback,
+    generate_delivery_report,
+)
 from Backends.src.tracking.ball_tracking_utils import (
     calculate_tracking_quality,
     detect_bounce_by_direction_change,
@@ -148,6 +154,39 @@ def get_nearest_stump_detections(stump_detections_by_frame, frame_index):
             return detections
 
     return []
+
+
+def ensure_delivery_report_fields(result):
+    result.setdefault("ball_tracking_rate", result.get("ball_detection_rate", 0))
+    result.setdefault("interpolated_ball_frames", 0)
+    result.setdefault("estimated_line", "Unknown")
+    result.setdefault("estimated_length", "Unknown")
+    result.setdefault("estimated_bounce_point", None)
+    result.setdefault("average_ball_confidence", 0)
+
+
+def show_cricket_delivery_report(result):
+    ensure_delivery_report_fields(result)
+
+    quality = calculate_detection_quality(result)
+    report = generate_delivery_report(result)
+    feedback_items = generate_coaching_feedback(result)
+    warnings = detect_analysis_warnings(result)
+
+    st.subheader("🏏 Delivery Report")
+    st.metric(
+        "Analysis Quality",
+        f"{quality['quality_score']}/100",
+        quality["quality_label"],
+    )
+    st.info(report)
+
+    st.markdown("**Coaching Feedback**")
+    for feedback_item in feedback_items:
+        st.markdown(f"- {feedback_item}")
+
+    if warnings:
+        st.warning("Warnings:\n" + "\n".join(f"- {warning}" for warning in warnings))
 
 
 def process_video(video_path, output_path, model_path, class_names, confidence=0.25, imgsz=640):
@@ -729,6 +768,8 @@ def show_video_analysis_page():
                 st.success("Estimated bounce/pitch point found.")
             else:
                 st.warning("Bounce/pitch point was not found. Try a clearer or longer clip.")
+
+            show_cricket_delivery_report(result)
 
             st.caption(f"Saved output: {result['output_path']}")
 

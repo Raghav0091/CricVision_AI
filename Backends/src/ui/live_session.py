@@ -5,6 +5,12 @@ from tempfile import TemporaryDirectory
 
 import streamlit as st
 
+from Backends.src.analysis.cricket_agent import (
+    calculate_detection_quality,
+    detect_analysis_warnings,
+    generate_coaching_feedback as generate_agent_coaching_feedback,
+    generate_delivery_report,
+)
 from Backends.src.tracking.ball_tracking_utils import (
     calculate_tracking_quality,
     detect_bounce_by_direction_change,
@@ -682,6 +688,39 @@ def show_delivery_report(result):
     st.caption("Clips are prepared in memory. They are not permanently saved unless you download them.")
 
 
+def ensure_delivery_report_fields(result):
+    result.setdefault("ball_tracking_rate", result.get("ball_detection_rate", 0))
+    result.setdefault("interpolated_ball_frames", 0)
+    result.setdefault("estimated_line", "Unknown")
+    result.setdefault("estimated_length", "Unknown")
+    result.setdefault("estimated_bounce_point", None)
+    result.setdefault("average_ball_confidence", 0)
+
+
+def show_cricket_delivery_report(result):
+    ensure_delivery_report_fields(result)
+
+    quality = calculate_detection_quality(result)
+    report = generate_delivery_report(result)
+    feedback_items = generate_agent_coaching_feedback(result)
+    warnings = detect_analysis_warnings(result)
+
+    st.subheader("🏏 Delivery Report")
+    st.metric(
+        "Analysis Quality",
+        f"{quality['quality_score']}/100",
+        quality["quality_label"],
+    )
+    st.info(report)
+
+    st.markdown("**Coaching Feedback**")
+    for feedback_item in feedback_items:
+        st.markdown(f"- {feedback_item}")
+
+    if warnings:
+        st.warning("Warnings:\n" + "\n".join(f"- {warning}" for warning in warnings))
+
+
 def show_analysis_output(result):
     st.subheader("Analysis Output")
 
@@ -721,6 +760,7 @@ def show_analysis_output(result):
     stats_col6.metric("Interpolated Ball Frames", result.get("interpolated_ball_frames", 0))
 
     show_delivery_report(result)
+    show_cricket_delivery_report(result)
 
     st.download_button(
         label="Download Processed Delivery Clip",
