@@ -1,9 +1,13 @@
+from datetime import datetime
 from pathlib import Path
+from threading import Lock
+from tempfile import TemporaryDirectory
 
 import streamlit as st
 
 
 CRICKET_OBJECTS_MODEL_PATH = Path("Models/cricket_objects/best.pt")
+
 CLASS_NAMES = {
     0: "ball",
     1: "stump",
@@ -14,380 +18,572 @@ MIN_TRAJECTORY_POINTS_FOR_BOUNCE = 8
 MIN_MOVEMENT_DISTANCE = 40
 MAX_MISSING_BALL_FRAMES = 12
 MAX_TRAJECTORY_POINTS = 35
+MAX_RECORDED_FRAMES = 450
+DEFAULT_RECORDING_FPS = 25
 
 
-@st.cache_resource
-def load_yolo_model(model_path_str):
-    from ultralytics import YOLO
+class LiveDeliveryRecordingState:
+    def __init__(self):
+        self.frames = []
+        self.recording = False
+        self.lock = Lock()
+        self.max_frames = MAX_RECORDED_FRAMES
 
-    model_path = Path(model_path_str)
+    def start_recording(self):
+        with self.lock:
+            self.frames = []
+            self.recording = True
 
-    if not model_path.exists():
-        return None
+    def stop_recording(self):
+        with self.lock:
+            self.recording = False
+            return [frame.copy() for frame in self.frames]
 
-    return YOLO(str(model_path))
+    def clear(self):
+        with self.lock:
+            self.frames = []
+            self.recording = False
 
+    def append_frame(self, frame):
+        with self.lock:
+            if self.recording and len(self.frames) < self.max_frames:
+                self.frames.append(frame.copy())
 
-def get_box_center(x1, y1, x2, y2):
-    center_x = int((x1 + x2) / 2)
-    center_y = int((y1 + y2) / 2)
-    return center_x, center_y
-
-
-def choose_main_ball(ball_detections, previous_center=None):
-    if not ball_detections:
-        return None
-
-    if previous_center is None:
-        return max(ball_detections, key=lambda item: item["confidence"])
-
-    previous_x, previous_y = previous_center
-
-    def distance_from_previous(item):
-        center_x, center_y = item["center"]
-        return ((center_x - previous_x) ** 2 + (center_y - previous_y) ** 2) ** 0.5
-
-    return min(ball_detections, key=distance_from_previous)
+    def get_frame_count(self):
+        with self.lock:
+            return len(self.frames)
 
 
-def estimate_bounce_point(trajectory_points, min_points=MIN_TRAJECTORY_POINTS_FOR_BOUNCE):
-    if len(trajectory_points) < min_points:
-        return None
-
-    return max(trajectory_points, key=lambda point: point[1])
-
-
-def estimate_line_from_stumps(bounce_point, stump_detections):
-    if bounce_point is None or not stump_detections:
-        return "Unknown"
-
-    bx, _ = bounce_point
-
-    main_stump = max(
-        stump_detections,
-        key=lambda item: item["box"][2] - item["box"][0],
-    )
-
-    x1, _, x2, _ = main_stump["box"]
-    stump_width = x2 - x1
-    margin = int(stump_width * 0.4)
-
-    if bx < x1 - margin:
-        return "Off side"
-    if bx > x2 + margin:
-        return "Leg side"
-    return "Middle"
-
-
-def estimate_length_from_bounce(bounce_point, frame_height):
-    if bounce_point is None or frame_height <= 0:
-        return "Unknown"
-
-    _, by = bounce_point
-    bounce_ratio = by / frame_height
-
-    if bounce_ratio >= 0.82:
-        return "Yorker"
-    if bounce_ratio >= 0.68:
-        return "Full"
-    if bounce_ratio >= 0.48:
-        return "Good Length"
-    return "Short"
-
-
-def has_enough_ball_movement(trajectory_points, min_distance=MIN_MOVEMENT_DISTANCE):
-    if len(trajectory_points) < 2:
-        return False
-
-    start_x, start_y = trajectory_points[0]
-    end_x, end_y = trajectory_points[-1]
-    distance = ((end_x - start_x) ** 2 + (end_y - start_y) ** 2) ** 0.5
-
-    return distance >= min_distance
-
-
-def draw_label(frame, text, x, y, color):
-    import cv2
-
-    y = max(y, 25)
-    label_width = len(text) * 10 + 10
-
-    cv2.rectangle(
-        frame,
-        (x, y - 24),
-        (x + label_width, y),
-        color,
-        -1,
-    )
-
-    cv2.putText(
-        frame,
-        text,
-        (x + 5, y - 6),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.55,
-        (255, 255, 255),
-        2,
-    )
-
-
-def create_live_processor_class(confidence, image_size):
+def create_delivery_recorder_class(recording_state):
     import av
-    import cv2
     from streamlit_webrtc import VideoProcessorBase
 
-    class LiveCricketAnalysisProcessor(VideoProcessorBase):
+    class DeliveryRecorder(VideoProcessorBase):
         def __init__(self):
-            self.model = load_yolo_model(str(CRICKET_OBJECTS_MODEL_PATH))
-            self.confidence = confidence
-            self.image_size = image_size
-            self.frame_index = 0
-            self.trajectory_points = []
-            self.previous_ball_center = None
-            self.missing_ball_frames = 0
-            self.last_stump_detections = []
-            self.estimated_bounce_point = None
-            self.estimated_bounce_frame = None
-            self.estimated_line = "Unknown"
-            self.estimated_length = "Unknown"
+            self.recording_state = recording_state
 
         def recv(self, frame):
             image = frame.to_ndarray(format="bgr24")
-            frame_height = image.shape[0]
+            self.recording_state.append_frame(image)
 
-            if self.model is None:
-                self._draw_missing_model_message(image)
-                return av.VideoFrame.from_ndarray(image, format="bgr24")
+            return av.VideoFrame.from_ndarray(image, format="bgr24")
 
-            annotated_frame = self._process_frame(image, frame_height)
-            self.frame_index += 1
+    return DeliveryRecorder
 
-            return av.VideoFrame.from_ndarray(annotated_frame, format="bgr24")
 
-        def _process_frame(self, image, frame_height):
-            results = self.model.predict(
-                source=image,
-                conf=self.confidence,
-                imgsz=self.image_size,
+def write_video(frames, output_path, fps=DEFAULT_RECORDING_FPS):
+    import cv2
+
+    if not frames:
+        return False
+
+    height, width = frames[0].shape[:2]
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+
+    if not writer.isOpened():
+        return False
+
+    for frame in frames:
+        writer.write(frame)
+
+    writer.release()
+    return True
+
+
+def collect_detections(result, class_names, get_box_center, ball_confidence):
+    ball_detections = []
+    stump_detections = []
+
+    if result.boxes is None or len(result.boxes) == 0:
+        return ball_detections, stump_detections
+
+    for box in result.boxes:
+        class_id = int(box.cls[0].cpu().numpy())
+        confidence = float(box.conf[0].cpu().numpy())
+        class_name = class_names.get(class_id, f"class_{class_id}")
+
+        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+
+        detection = {
+            "class_id": class_id,
+            "class_name": class_name,
+            "confidence": confidence,
+            "box": (x1, y1, x2, y2),
+            "center": get_box_center(x1, y1, x2, y2),
+        }
+
+        if class_name == "ball" and confidence >= ball_confidence:
+            ball_detections.append(detection)
+        elif class_name == "stump":
+            stump_detections.append(detection)
+
+    return ball_detections, stump_detections
+
+
+def draw_delivery_dashboard(
+    frame,
+    frame_index,
+    total_frames,
+    ball_count,
+    stump_count,
+    trajectory_points,
+    missing_ball_frames,
+    estimated_bounce_frame,
+    estimated_line,
+    estimated_length,
+):
+    import cv2
+
+    panel_x = 15
+    panel_y = 15
+    panel_w = 470
+    panel_h = 240
+
+    overlay = frame.copy()
+    cv2.rectangle(
+        overlay,
+        (panel_x, panel_y),
+        (panel_x + panel_w, panel_y + panel_h),
+        (0, 0, 0),
+        -1,
+    )
+    cv2.addWeighted(overlay, 0.65, frame, 0.35, 0, frame)
+
+    bounce_text = "Not found"
+    if estimated_bounce_frame is not None:
+        bounce_text = f"Frame {estimated_bounce_frame}"
+
+    dashboard_lines = [
+        (f"Frame: {frame_index}/{total_frames}", (255, 255, 255)),
+        (f"Balls in frame: {ball_count}", (0, 255, 255)),
+        (f"Stumps in frame: {stump_count}", (255, 160, 0)),
+        (
+            f"Trajectory: {len(trajectory_points)} | Missing: {missing_ball_frames}",
+            (0, 255, 255),
+        ),
+        (f"Bounce: {bounce_text}", (0, 0, 255)),
+        (f"Line: {estimated_line}", (255, 255, 0)),
+        (f"Length: {estimated_length}", (0, 255, 0)),
+    ]
+
+    for index, (text, color) in enumerate(dashboard_lines):
+        cv2.putText(
+            frame,
+            text,
+            (panel_x + 15, panel_y + 30 + index * 28),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            color,
+            2,
+        )
+
+
+def process_recorded_delivery(
+    frames,
+    confidence,
+    image_size,
+    fps=DEFAULT_RECORDING_FPS,
+):
+    import cv2
+
+    from Backends.src.ui.video_analysis import (
+        choose_main_ball,
+        convert_to_browser_mp4,
+        draw_label,
+        estimate_bounce_point,
+        estimate_length_from_bounce,
+        estimate_line_from_stumps,
+        get_box_center,
+        has_enough_ball_movement,
+        load_yolo_model,
+    )
+
+    if not frames:
+        return {
+            "success": False,
+            "error": "No frames were recorded. Click Start Delivery Recording before bowling.",
+        }
+
+    model = load_yolo_model(str(CRICKET_OBJECTS_MODEL_PATH))
+
+    if model is None:
+        return {
+            "success": False,
+            "error": f"Model not found: {CRICKET_OBJECTS_MODEL_PATH}",
+        }
+
+    height, width = frames[0].shape[:2]
+
+    with TemporaryDirectory() as temp_dir:
+        temp_dir_path = Path(temp_dir)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        raw_temp_path = temp_dir_path / f"raw_delivery_{timestamp}.mp4"
+        processed_raw_path = temp_dir_path / f"processed_delivery_{timestamp}_raw.mp4"
+        processed_browser_path = temp_dir_path / f"processed_delivery_{timestamp}.mp4"
+
+        if not write_video(frames, raw_temp_path, fps=fps):
+            return {
+                "success": False,
+                "error": "Could not prepare raw delivery clip for download.",
+            }
+
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(str(processed_raw_path), fourcc, fps, (width, height))
+
+        if not writer.isOpened():
+            return {
+                "success": False,
+                "error": "Could not create processed delivery video.",
+            }
+
+        total_frames = len(frames)
+        ball_detected_frames = 0
+        stump_detected_frames = 0
+        total_ball_detections = 0
+        total_stump_detections = 0
+        confidence_values = []
+
+        trajectory_points = []
+        previous_ball_center = None
+        missing_ball_frames = 0
+        last_stump_detections = []
+
+        estimated_bounce_point = None
+        estimated_bounce_frame = None
+        estimated_line = "Unknown"
+        estimated_length = "Unknown"
+
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        for frame_index, frame in enumerate(frames):
+            results = model.predict(
+                source=frame,
+                conf=confidence,
+                imgsz=image_size,
                 verbose=False,
             )
 
             result = results[0]
-            annotated_frame = image.copy()
-            ball_detections, stump_detections = self._collect_detections(result)
-
-            if stump_detections:
-                self.last_stump_detections = stump_detections
-
-            self._draw_detections(annotated_frame, ball_detections, stump_detections)
-            main_ball = choose_main_ball(ball_detections, self.previous_ball_center)
-            self._update_tracking(main_ball, frame_height)
-            self._draw_trajectory(annotated_frame)
-            self._draw_bounce_point(annotated_frame)
-            self._draw_dashboard(
-                annotated_frame,
-                ball_count=len(ball_detections),
-                stump_count=len(stump_detections),
-                main_ball=main_ball,
+            annotated_frame = frame.copy()
+            ball_detections, stump_detections = collect_detections(
+                result,
+                CLASS_NAMES,
+                get_box_center,
+                confidence,
             )
 
-            return annotated_frame
+            if ball_detections:
+                ball_detected_frames += 1
+                total_ball_detections += len(ball_detections)
+                confidence_values.extend(item["confidence"] for item in ball_detections)
 
-        def _collect_detections(self, result):
-            ball_detections = []
-            stump_detections = []
+            if stump_detections:
+                stump_detected_frames += 1
+                total_stump_detections += len(stump_detections)
+                last_stump_detections = stump_detections
 
-            if result.boxes is None or len(result.boxes) == 0:
-                return ball_detections, stump_detections
-
-            for box in result.boxes:
-                class_id = int(box.cls[0].cpu().numpy())
-                box_confidence = float(box.conf[0].cpu().numpy())
-                class_name = CLASS_NAMES.get(class_id, f"class_{class_id}")
-
-                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-
-                detection = {
-                    "class_id": class_id,
-                    "class_name": class_name,
-                    "confidence": box_confidence,
-                    "box": (x1, y1, x2, y2),
-                    "center": get_box_center(x1, y1, x2, y2),
-                }
-
-                if class_name == "ball":
-                    if box_confidence >= MIN_TRACKING_CONFIDENCE:
-                        ball_detections.append(detection)
-                elif class_name == "stump":
-                    stump_detections.append(detection)
-
-            return ball_detections, stump_detections
-
-        def _draw_detections(self, frame, ball_detections, stump_detections):
             for detection in ball_detections:
                 x1, y1, x2, y2 = detection["box"]
                 center_x, center_y = detection["center"]
-                box_confidence = detection["confidence"]
+                detection_confidence = detection["confidence"]
 
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
-                cv2.circle(frame, (center_x, center_y), 5, (0, 255, 255), -1)
-                draw_label(frame, f"ball {box_confidence:.2f}", x1, y1, (0, 180, 180))
+                cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
+                cv2.circle(annotated_frame, (center_x, center_y), 5, (0, 255, 255), -1)
+                draw_label(
+                    annotated_frame,
+                    f"ball {detection_confidence:.2f}",
+                    x1,
+                    y1,
+                    (0, 180, 180),
+                )
 
             for detection in stump_detections:
                 x1, y1, x2, y2 = detection["box"]
-                box_confidence = detection["confidence"]
+                detection_confidence = detection["confidence"]
 
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 100, 0), 2)
-                draw_label(frame, f"stump {box_confidence:.2f}", x1, y1, (255, 100, 0))
+                cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (255, 100, 0), 2)
+                draw_label(
+                    annotated_frame,
+                    f"stump {detection_confidence:.2f}",
+                    x1,
+                    y1,
+                    (255, 100, 0),
+                )
 
-        def _update_tracking(self, main_ball, frame_height):
-            if main_ball is None:
-                self.missing_ball_frames += 1
+            main_ball = choose_main_ball(ball_detections, previous_ball_center)
 
-                if self.missing_ball_frames >= MAX_MISSING_BALL_FRAMES:
-                    self.trajectory_points.clear()
-                    self.previous_ball_center = None
-                    self.estimated_bounce_point = None
-                    self.estimated_bounce_frame = None
-                    self.estimated_line = "Unknown"
-                    self.estimated_length = "Unknown"
+            if main_ball is not None:
+                missing_ball_frames = 0
+                previous_ball_center = main_ball["center"]
+                trajectory_points.append(previous_ball_center)
 
-                return
+                if len(trajectory_points) > MAX_TRAJECTORY_POINTS:
+                    trajectory_points.pop(0)
 
-            self.missing_ball_frames = 0
-            self.previous_ball_center = main_ball["center"]
-            self.trajectory_points.append(main_ball["center"])
+                if (
+                    estimated_bounce_point is None
+                    and len(trajectory_points) >= MIN_TRAJECTORY_POINTS_FOR_BOUNCE
+                    and has_enough_ball_movement(trajectory_points, MIN_MOVEMENT_DISTANCE)
+                ):
+                    bounce_point = estimate_bounce_point(
+                        trajectory_points,
+                        MIN_TRAJECTORY_POINTS_FOR_BOUNCE,
+                    )
 
-            if len(self.trajectory_points) > MAX_TRAJECTORY_POINTS:
-                self.trajectory_points.pop(0)
+                    if bounce_point is not None:
+                        estimated_bounce_point = bounce_point
+                        estimated_bounce_frame = frame_index
+                        estimated_line = estimate_line_from_stumps(
+                            estimated_bounce_point,
+                            last_stump_detections,
+                        )
+                        estimated_length = estimate_length_from_bounce(
+                            estimated_bounce_point,
+                            height,
+                        )
+            else:
+                missing_ball_frames += 1
 
-            if self.estimated_bounce_point is not None:
-                return
+                if missing_ball_frames >= MAX_MISSING_BALL_FRAMES:
+                    trajectory_points.clear()
+                    previous_ball_center = None
 
-            has_track = len(self.trajectory_points) >= MIN_TRAJECTORY_POINTS_FOR_BOUNCE
-            has_movement = has_enough_ball_movement(
-                self.trajectory_points,
-                MIN_MOVEMENT_DISTANCE,
-            )
-
-            if not has_track or not has_movement:
-                return
-
-            bounce_point = estimate_bounce_point(
-                self.trajectory_points,
-                MIN_TRAJECTORY_POINTS_FOR_BOUNCE,
-            )
-
-            if bounce_point is None:
-                return
-
-            stump_context = self.last_stump_detections
-            self.estimated_bounce_point = bounce_point
-            self.estimated_bounce_frame = self.frame_index
-            self.estimated_line = estimate_line_from_stumps(bounce_point, stump_context)
-            self.estimated_length = estimate_length_from_bounce(bounce_point, frame_height)
-
-        def _draw_trajectory(self, frame):
-            if len(self.trajectory_points) < 2:
-                return
-
-            for index in range(1, len(self.trajectory_points)):
+            for point_index in range(1, len(trajectory_points)):
                 cv2.line(
-                    frame,
-                    self.trajectory_points[index - 1],
-                    self.trajectory_points[index],
+                    annotated_frame,
+                    trajectory_points[point_index - 1],
+                    trajectory_points[point_index],
                     (0, 255, 255),
                     3,
                 )
 
-        def _draw_bounce_point(self, frame):
-            if self.estimated_bounce_point is None:
-                return
+            if estimated_bounce_point is not None:
+                bx, by = estimated_bounce_point
 
-            bx, by = self.estimated_bounce_point
-
-            cv2.circle(frame, (bx, by), 10, (0, 0, 255), -1)
-            cv2.circle(frame, (bx, by), 16, (255, 255, 255), 2)
-
-            cv2.putText(
-                frame,
-                f"Bounce Frame: {self.estimated_bounce_frame}",
-                (bx + 15, max(by - 15, 25)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 0, 255),
-                2,
-            )
-
-        def _draw_dashboard(self, frame, ball_count, stump_count, main_ball):
-            panel_x = 15
-            panel_y = 15
-            panel_w = 470
-            panel_h = 240
-
-            overlay = frame.copy()
-            cv2.rectangle(
-                overlay,
-                (panel_x, panel_y),
-                (panel_x + panel_w, panel_y + panel_h),
-                (0, 0, 0),
-                -1,
-            )
-            cv2.addWeighted(overlay, 0.65, frame, 0.35, 0, frame)
-
-            bounce_text = "Not found"
-            if self.estimated_bounce_frame is not None:
-                bounce_text = f"Frame {self.estimated_bounce_frame}"
-
-            confidence_text = "None"
-            if main_ball is not None:
-                confidence_text = f"{main_ball['confidence']:.2f}"
-
-            dashboard_lines = [
-                (f"Frame: {self.frame_index}", (255, 255, 255)),
-                (f"Balls in frame: {ball_count}", (0, 255, 255)),
-                (f"Stumps in frame: {stump_count}", (255, 160, 0)),
-                (
-                    f"Trajectory: {len(self.trajectory_points)} | Missing: {self.missing_ball_frames}",
-                    (0, 255, 255),
-                ),
-                (f"Main ball confidence: {confidence_text}", (255, 255, 255)),
-                (f"Bounce: {bounce_text}", (0, 0, 255)),
-                (f"Line: {self.estimated_line}", (255, 255, 0)),
-                (f"Length: {self.estimated_length}", (0, 255, 0)),
-            ]
-
-            for index, (text, color) in enumerate(dashboard_lines):
+                cv2.circle(annotated_frame, (bx, by), 10, (0, 0, 255), -1)
+                cv2.circle(annotated_frame, (bx, by), 16, (255, 255, 255), 2)
                 cv2.putText(
-                    frame,
-                    text,
-                    (panel_x + 15, panel_y + 30 + index * 26),
+                    annotated_frame,
+                    f"Bounce Frame: {estimated_bounce_frame}",
+                    (bx + 15, max(by - 15, 25)),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.62,
-                    color,
+                    0.6,
+                    (0, 0, 255),
                     2,
                 )
 
-        def _draw_missing_model_message(self, frame):
-            cv2.putText(
-                frame,
-                f"Model not found: {CRICKET_OBJECTS_MODEL_PATH}",
-                (30, 50),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (0, 0, 255),
-                2,
+            draw_delivery_dashboard(
+                annotated_frame,
+                frame_index=frame_index,
+                total_frames=total_frames,
+                ball_count=len(ball_detections),
+                stump_count=len(stump_detections),
+                trajectory_points=trajectory_points,
+                missing_ball_frames=missing_ball_frames,
+                estimated_bounce_frame=estimated_bounce_frame,
+                estimated_line=estimated_line,
+                estimated_length=estimated_length,
             )
 
-    return LiveCricketAnalysisProcessor
+            writer.write(annotated_frame)
+            progress_bar.progress(min((frame_index + 1) / total_frames, 1.0))
+            status_text.text(f"Analyzing delivery frame {frame_index + 1}/{total_frames}")
+
+        writer.release()
+        progress_bar.empty()
+        status_text.empty()
+
+        try:
+            convert_to_browser_mp4(processed_raw_path, processed_browser_path)
+        except Exception as error:
+            return {
+                "success": False,
+                "error": f"Video conversion failed: {error}",
+            }
+
+        raw_video_bytes = raw_temp_path.read_bytes()
+        processed_video_bytes = processed_browser_path.read_bytes()
+
+    ball_detection_rate = (ball_detected_frames / total_frames) * 100
+    stump_detection_rate = (stump_detected_frames / total_frames) * 100
+    average_ball_confidence = 0
+
+    if confidence_values:
+        average_ball_confidence = sum(confidence_values) / len(confidence_values)
+
+    return {
+        "success": True,
+        "raw_video_bytes": raw_video_bytes,
+        "processed_video_bytes": processed_video_bytes,
+        "raw_file_name": f"raw_delivery_{timestamp}.mp4",
+        "processed_file_name": f"processed_delivery_{timestamp}.mp4",
+        "total_frames": total_frames,
+        "ball_detected_frames": ball_detected_frames,
+        "stump_detected_frames": stump_detected_frames,
+        "total_ball_detections": total_ball_detections,
+        "total_stump_detections": total_stump_detections,
+        "ball_detection_rate": ball_detection_rate,
+        "stump_detection_rate": stump_detection_rate,
+        "average_ball_confidence": average_ball_confidence,
+        "estimated_bounce_point": estimated_bounce_point,
+        "estimated_bounce_frame": estimated_bounce_frame,
+        "estimated_line": estimated_line,
+        "estimated_length": estimated_length,
+    }
+
+
+def get_quality_label(rate):
+    if rate >= 70:
+        return "Good"
+    if rate >= 35:
+        return "Fair"
+    if rate > 0:
+        return "Low"
+    return "Not detected"
+
+
+def get_coaching_feedback(result):
+    feedback = []
+
+    if result["ball_detection_rate"] < 35:
+        feedback.append(
+            "Ball tracking was limited. Use stronger lighting, a stable landscape camera, and keep the full pitch in frame."
+        )
+    else:
+        feedback.append("Ball tracking quality is usable for a first delivery review.")
+
+    if result["stump_detection_rate"] < 35:
+        feedback.append(
+            "Stumps were not consistently visible. Keep the camera behind the bowler and pointed toward the batter's stumps."
+        )
+
+    if result["estimated_bounce_point"] is None:
+        feedback.append(
+            "Bounce point was not found. Record a slightly longer clip with the ball visible before and after pitching."
+        )
+    elif result["estimated_length"] == "Yorker":
+        feedback.append("Excellent attacking length if intentional. Watch that it does not drift into a full toss.")
+    elif result["estimated_length"] == "Full":
+        feedback.append("Full length detected. Useful for swing, but keep checking line control.")
+    elif result["estimated_length"] == "Good Length":
+        feedback.append("Good length detected. This is a strong default area for testing the batter.")
+    elif result["estimated_length"] == "Short":
+        feedback.append("Short length detected. Use it as a variation and make sure it rises enough to challenge the batter.")
+
+    if result["estimated_line"] != "Unknown":
+        feedback.append(f"Line estimate: {result['estimated_line']}. Use this with your intended target line.")
+
+    return feedback
+
+
+def show_delivery_report(result):
+    st.subheader("Delivery Report")
+
+    ball_quality = get_quality_label(result["ball_detection_rate"])
+    stump_quality = get_quality_label(result["stump_detection_rate"])
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Frames", result["total_frames"])
+    col2.metric("Ball Quality", ball_quality, f"{result['ball_detection_rate']:.1f}%")
+    col3.metric("Stump Quality", stump_quality, f"{result['stump_detection_rate']:.1f}%")
+    col4.metric("Avg Ball Confidence", f"{result['average_ball_confidence']:.2f}")
+
+    st.subheader("Bounce / Pitch Estimate")
+
+    if result["estimated_bounce_point"] is not None:
+        bx, by = result["estimated_bounce_point"]
+        col5, col6, col7, col8, col9 = st.columns(5)
+        col5.metric("Bounce Frame", result["estimated_bounce_frame"])
+        col6.metric("Bounce X", bx)
+        col7.metric("Bounce Y", by)
+        col8.metric("Line", result["estimated_line"])
+        col9.metric("Length", result["estimated_length"])
+    else:
+        st.warning("Bounce/pitch point was not found for this delivery.")
+
+    st.subheader("Coaching Feedback")
+    for feedback_item in get_coaching_feedback(result):
+        st.write(f"- {feedback_item}")
+
+    st.caption("Clips are prepared in memory. They are not permanently saved unless you download them.")
+
+
+def show_analysis_output(result):
+    st.subheader("Analysis Output")
+
+    if result is None:
+        st.info(
+            "No delivery has been analyzed yet. The outcome, processed clip, and download buttons appear here after Done / Analyze Delivery."
+        )
+        return
+
+    if not result["success"]:
+        st.error(result["error"])
+        return
+
+    outcome_col1, outcome_col2, outcome_col3 = st.columns(3)
+    outcome_col1.metric("Line", result["estimated_line"])
+    outcome_col2.metric("Length", result["estimated_length"])
+
+    bounce_text = "Not found"
+    if result["estimated_bounce_point"] is not None:
+        bx, by = result["estimated_bounce_point"]
+        bounce_text = f"({bx}, {by})"
+
+    outcome_col3.metric("Bounce Point", bounce_text)
+
+    st.subheader("Processed Delivery Clip")
+    st.video(result["processed_video_bytes"])
+
+    show_delivery_report(result)
+
+    st.subheader("Download Clips")
+
+    download_col1, download_col2 = st.columns(2)
+
+    with download_col1:
+        st.download_button(
+            label="Download Processed Delivery Clip",
+            data=result["processed_video_bytes"],
+            file_name=result["processed_file_name"],
+            mime="video/mp4",
+        )
+
+    with download_col2:
+        st.download_button(
+            label="Download Raw Delivery Clip",
+            data=result["raw_video_bytes"],
+            file_name=result["raw_file_name"],
+            mime="video/mp4",
+        )
+
+
+def initialize_live_session_state():
+    defaults = {
+        "live_delivery_recording": False,
+        "live_recorded_frames": [],
+        "live_last_result": None,
+        "live_recording_state": LiveDeliveryRecordingState(),
+        "live_status_message": None,
+    }
+
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
 
 def show_live_session_page():
     st.title("Live Cricket Analysis")
     st.markdown(
-        "Real-time camera preview with cricket ball, stump, trajectory, bounce, line, and length overlays."
+        "Record one clean delivery from the live camera, then analyze it after the ball is bowled."
     )
+
+    initialize_live_session_state()
 
     if not CRICKET_OBJECTS_MODEL_PATH.exists():
         st.error(f"Model not found: {CRICKET_OBJECTS_MODEL_PATH}")
@@ -400,12 +596,13 @@ def show_live_session_page():
     controls_col, guidance_col = st.columns([1, 1])
 
     with controls_col:
-        confidence = st.slider(
+        confidence = st.number_input(
             "Detection confidence",
             min_value=0.05,
             max_value=0.90,
             value=0.25,
             step=0.05,
+            format="%.2f",
         )
 
         image_size = st.selectbox(
@@ -416,11 +613,15 @@ def show_live_session_page():
 
     with guidance_col:
         st.warning(
-            "Live detection is experimental. Results depend heavily on camera angle, lighting, distance, and network latency."
+            "Live preview stays clean. Detection boxes and trajectory are drawn only after you click Done / Analyze Delivery."
         )
         st.info(
-            "Phone users: open this Streamlit app in your phone browser, allow camera access, use landscape mode, and place the phone behind the bowler facing the batter."
+            "Phone users: open this Streamlit app in your phone browser, allow camera access, use landscape mode, and use the back camera behind the bowler."
         )
+
+    if st.session_state.live_status_message:
+        st.info(st.session_state.live_status_message)
+        st.session_state.live_status_message = None
 
     try:
         from streamlit_webrtc import RTCConfiguration, webrtc_streamer
@@ -436,15 +637,11 @@ def show_live_session_page():
         }
     )
 
-    processor_class = create_live_processor_class(confidence, image_size)
-
-    st.caption(
-        "Tracking guardrails: ball confidence >= 0.35, at least 8 trajectory points, at least 40px movement, and reset after 12 missed frames."
-    )
-
     webrtc_context = webrtc_streamer(
-        key="cricvision-live-cricket-analysis",
-        video_processor_factory=processor_class,
+        key="cricvision-live-delivery-recorder",
+        video_processor_factory=create_delivery_recorder_class(
+            st.session_state.live_recording_state
+        ),
         rtc_configuration=rtc_config,
         media_stream_constraints={
             "video": {
@@ -457,6 +654,76 @@ def show_live_session_page():
         async_processing=True,
     )
 
-    if webrtc_context.video_processor:
-        webrtc_context.video_processor.confidence = confidence
-        webrtc_context.video_processor.image_size = image_size
+    recorder = webrtc_context.video_processor
+    recording_state = st.session_state.live_recording_state
+
+    button_col1, button_col2, button_col3 = st.columns([1, 1, 1])
+
+    with button_col1:
+        start_clicked = st.button(
+            "Start Delivery Recording",
+            type="primary",
+            disabled=recording_state.recording,
+        )
+
+    with button_col2:
+        done_clicked = st.button(
+            "Done / Analyze Delivery",
+            disabled=not recording_state.recording,
+        )
+
+    with button_col3:
+        clear_clicked = st.button(
+            "Clear Delivery",
+            disabled=recording_state.recording,
+        )
+
+    if start_clicked:
+        recording_state.start_recording()
+        st.session_state.live_delivery_recording = True
+        st.session_state.live_recorded_frames = []
+        st.session_state.live_last_result = None
+        st.session_state.live_status_message = (
+            "Recording started. Bowl one delivery, then click Done / Analyze Delivery."
+        )
+        st.rerun()
+
+    if done_clicked:
+        recorded_frames = recording_state.stop_recording()
+        st.session_state.live_delivery_recording = False
+        st.session_state.live_recorded_frames = recorded_frames
+
+        if not recorded_frames:
+            st.error("No frames were recorded. Start recording, wait for the camera preview, then bowl.")
+        else:
+            with st.spinner("Analyzing recorded delivery..."):
+                result = process_recorded_delivery(
+                    frames=recorded_frames,
+                    confidence=confidence,
+                    image_size=image_size,
+                )
+
+            if not result["success"]:
+                st.error(result["error"])
+            else:
+                st.session_state.live_last_result = result
+                st.success("Delivery analysis completed. See Analysis Output below.")
+
+    if clear_clicked:
+        recording_state.clear()
+        st.session_state.live_delivery_recording = False
+        st.session_state.live_recorded_frames = []
+        st.session_state.live_last_result = None
+        st.session_state.live_status_message = "Recorded delivery cleared."
+        st.rerun()
+
+    recorded_count = recording_state.get_frame_count()
+
+    if recording_state.recording:
+        st.info(f"Recording delivery... captured {recorded_count} frames.")
+    elif recorder is not None:
+        st.caption("Live preview is clean. Click Start Delivery Recording when you are ready to bowl.")
+    else:
+        st.info("Start the camera stream to enable delivery recording.")
+
+    show_analysis_output(st.session_state.live_last_result)
