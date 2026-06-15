@@ -12,8 +12,10 @@ from Backends.src.analysis.cricket_agent import (
     generate_delivery_report,
 )
 from Backends.src.tracking.ball_tracking_utils import (
+    BallKalmanTracker,
     calculate_tracking_quality,
     detect_bounce_by_direction_change,
+    get_tracking_quality_label,
     interpolate_missing_positions,
     smooth_trajectory,
 )
@@ -33,6 +35,20 @@ MAX_MISSING_BALL_FRAMES = 12
 MAX_TRAJECTORY_POINTS = 35
 MAX_RECORDED_FRAMES = 450
 DEFAULT_RECORDING_FPS = 25
+DETECTION_PRESETS = {
+    "Fast Bowling Mode": {
+        "imgsz": 960,
+        "confidence": 0.15,
+    },
+    "Balanced Mode": {
+        "imgsz": 768,
+        "confidence": 0.25,
+    },
+    "High Precision Mode": {
+        "imgsz": 960,
+        "confidence": 0.35,
+    },
+}
 
 
 def get_live_model_options():
@@ -323,6 +339,7 @@ def process_recorded_delivery(
     image_size,
     model_path=CRICKET_OBJECTS_MODEL_PATH,
     use_ensemble=False,
+    show_pitch_roi=False,
     fps=DEFAULT_RECORDING_FPS,
 ):
     import cv2
@@ -330,6 +347,8 @@ def process_recorded_delivery(
     from Backends.src.ui.video_analysis import (
         convert_to_browser_mp4,
         draw_label,
+        draw_pitch_roi,
+        draw_search_roi,
         estimate_length_from_bounce,
         estimate_line_from_stumps,
         get_box_center,
@@ -339,6 +358,9 @@ def process_recorded_delivery(
         load_yolo_model,
         map_model_classes,
         run_ensemble_detection,
+        run_local_redetection,
+        run_pitch_roi_detection,
+        save_review_frame,
     )
 
     if not frames:
@@ -349,6 +371,15 @@ def process_recorded_delivery(
 
     model = None
     ensemble_models = []
+    stump_model = load_yolo_model(str(CRICKET_OBJECTS_MODEL_PATH))
+
+    if stump_model is None:
+        return {
+            "success": False,
+            "error": f"Stump model not found: {CRICKET_OBJECTS_MODEL_PATH}",
+        }
+
+    stump_class_names = map_model_classes(stump_model)
 
     if use_ensemble:
         ensemble_models = load_ensemble_models()
@@ -400,11 +431,20 @@ def process_recorded_delivery(
         low_confidence_ball_frames = 0
         total_stump_detections = 0
         confidence_values = []
+        review_frame_count = 0
+        full_frame_detection_time_total = 0
+        roi_detection_time_total = 0
+        roi_detected_frames = 0
+        tracker_recoveries = 0
+        kalman_predicted_frames = 0
+        last_roi_size = "Full frame"
 
         trajectory_points = []
         ball_positions = []
         stump_detections_by_frame = []
+        previous_roi_box = None
         previous_ball_center = None
+        kalman_tracker = BallKalmanTracker(max_missing_frames=10)
         missing_ball_frames = 0
         last_stump_detections = []
 
@@ -419,42 +459,89 @@ def process_recorded_delivery(
         for frame_index, frame in enumerate(frames):
             annotated_frame = frame.copy()
             low_confidence_ball_detections = []
+            recovered_this_frame = False
 
-            if use_ensemble:
-                ensemble_result = run_ensemble_detection(
-                    frame,
-                    ensemble_models,
-                    confidence,
-                    image_size,
-                )
-                ball_detections = ensemble_result["ball_detections"]
-                stump_detections = ensemble_result["stump_detections"]
-            else:
-                results = model.predict(
-                    source=frame,
-                    conf=min(confidence, 0.10),
-                    imgsz=image_size,
-                    verbose=False,
-                )
+            detection_result = run_pitch_roi_detection(
+                frame,
+                stump_model=stump_model,
+                stump_class_names=stump_class_names,
+                confidence=confidence,
+                imgsz=image_size,
+                previous_roi=previous_roi_box,
+                ball_model=model,
+                ball_class_names=class_names if not use_ensemble else None,
+                ensemble_models=ensemble_models,
+                use_ensemble=use_ensemble,
+                ball_confidence=confidence,
+            )
+            ball_detections = detection_result["ball_detections"]
+            stump_detections = detection_result["stump_detections"]
+            low_confidence_ball_detections = detection_result.get(
+                "low_confidence_ball_detections",
+                [],
+            )
+            full_frame_detection_time_total += detection_result["full_frame_time_ms"]
+            roi_detection_time_total += detection_result["roi_time_ms"]
 
-                result = results[0]
-                ball_detections, low_confidence_ball_detections, stump_detections = collect_detections(
-                    result,
-                    class_names,
-                    get_box_center,
-                    confidence,
-                )
+            if detection_result.get("used_roi"):
+                previous_roi_box = detection_result["roi_box"]
+                roi_detected_frames += 1
+                roi_x1, roi_y1, roi_x2, roi_y2 = detection_result["roi_box"]
+                last_roi_size = f"{roi_x2 - roi_x1}x{roi_y2 - roi_y1}"
+
+            if show_pitch_roi:
+                draw_pitch_roi(annotated_frame, detection_result.get("roi_box"))
 
             if low_confidence_ball_detections:
                 low_confidence_ball_frames += 1
-                save_low_confidence_review_frame(
+
+                if review_frame_count < 80:
+                    save_review_frame(
+                        frame,
+                        timestamp,
+                        frame_index,
+                        "low_confidence",
+                        low_confidence_ball_detections,
+                        source="live_session",
+                    )
+                    review_frame_count += 1
+
+            if not ball_detections:
+                search_center = previous_ball_center or kalman_tracker.last_prediction
+                recovery_result = run_local_redetection(
                     frame,
-                    low_confidence_ball_detections,
-                    timestamp,
-                    frame_index,
+                    search_center,
+                    confidence,
+                    image_size,
+                    missing_ball_frames + 1,
+                    ball_model=model,
+                    ball_class_names=class_names if not use_ensemble else None,
+                    ensemble_models=ensemble_models,
+                    use_ensemble=use_ensemble,
                 )
 
-            if ball_detections:
+                if show_pitch_roi:
+                    draw_search_roi(annotated_frame, recovery_result.get("search_roi"))
+
+                if recovery_result["recovered"]:
+                    ball_detections = recovery_result["ball_detections"]
+                    recovered_this_frame = True
+                    tracker_recoveries += 1
+                    ball_detected_frames += 1
+                    total_ball_detections += len(ball_detections)
+                    confidence_values.extend(item["confidence"] for item in ball_detections)
+                elif review_frame_count < 80:
+                    save_review_frame(
+                        frame,
+                        timestamp,
+                        frame_index,
+                        "missed_ball",
+                        source="live_session",
+                        note="No ball detection passed the selected confidence threshold.",
+                    )
+                    review_frame_count += 1
+
+            if ball_detections and not recovered_this_frame:
                 ball_detected_frames += 1
                 total_ball_detections += len(ball_detections)
                 confidence_values.extend(item["confidence"] for item in ball_detections)
@@ -504,6 +591,7 @@ def process_recorded_delivery(
             if main_ball is not None:
                 missing_ball_frames = 0
                 previous_ball_center = main_ball["center"]
+                kalman_tracker.update(previous_ball_center)
                 ball_positions.append(previous_ball_center)
 
                 smoothed_positions = smooth_trajectory(ball_positions)
@@ -546,10 +634,28 @@ def process_recorded_delivery(
                             height,
                         )
             else:
-                ball_positions.append(None)
                 missing_ball_frames += 1
+                predicted_center = kalman_tracker.predict()
+
+                if predicted_center is not None and missing_ball_frames <= 10:
+                    ball_positions.append(predicted_center)
+                    previous_ball_center = predicted_center
+                    kalman_predicted_frames += 1
+                else:
+                    ball_positions.append(None)
 
                 if missing_ball_frames >= MAX_MISSING_BALL_FRAMES:
+                    kalman_tracker.reset()
+                    if review_frame_count < 80:
+                        save_review_frame(
+                            frame,
+                            timestamp,
+                            frame_index,
+                            "poor_tracking",
+                            source="live_session",
+                            note=f"Ball missing for {missing_ball_frames} consecutive frames.",
+                        )
+                        review_frame_count += 1
                     trajectory_points.clear()
                     previous_ball_center = None
                 else:
@@ -629,6 +735,41 @@ def process_recorded_delivery(
         average_ball_confidence = sum(confidence_values) / len(confidence_values)
 
     tracking_quality = calculate_tracking_quality(ball_positions, total_frames)
+    overall_tracking_quality = get_tracking_quality_label(
+        tracking_quality["tracking_rate"],
+        tracking_quality["interpolated_frames"],
+        kalman_predicted_frames,
+    )
+    average_full_frame_detection_time = 0
+    average_roi_detection_time = 0
+
+    if total_frames > 0:
+        average_full_frame_detection_time = full_frame_detection_time_total / total_frames
+
+    if roi_detected_frames > 0:
+        average_roi_detection_time = roi_detection_time_total / roi_detected_frames
+
+    if frames and estimated_bounce_point is None and review_frame_count < 80:
+        save_review_frame(
+            frames[-1],
+            timestamp,
+            total_frames - 1,
+            "bounce_unknown",
+            source="live_session",
+            note="Analysis finished without a bounce estimate.",
+        )
+        review_frame_count += 1
+
+    if frames and (estimated_line == "Unknown" or estimated_length == "Unknown") and review_frame_count < 80:
+        save_review_frame(
+            frames[-1],
+            timestamp,
+            total_frames - 1,
+            "line_length_unknown",
+            source="live_session",
+            note=f"Line={estimated_line}; Length={estimated_length}.",
+        )
+        review_frame_count += 1
 
     return {
         "success": True,
@@ -645,13 +786,21 @@ def process_recorded_delivery(
         "ball_detection_rate": ball_detection_rate,
         "ball_tracking_rate": tracking_quality["tracking_rate"],
         "interpolated_ball_frames": tracking_quality["interpolated_frames"],
+        "kalman_predicted_frames": kalman_predicted_frames,
+        "tracker_recoveries": tracker_recoveries,
+        "overall_tracking_quality": overall_tracking_quality,
         "stump_detection_rate": stump_detection_rate,
         "average_ball_confidence": average_ball_confidence,
+        "full_frame_detection_time_ms": average_full_frame_detection_time,
+        "roi_detection_time_ms": average_roi_detection_time,
+        "roi_detected_frames": roi_detected_frames,
+        "last_roi_size": last_roi_size,
         "estimated_bounce_point": estimated_bounce_point,
         "estimated_bounce_frame": estimated_bounce_frame,
         "estimated_line": estimated_line,
         "estimated_length": estimated_length,
         "ball_detection_difficult": ball_detection_rate < 35 or low_confidence_ball_frames > 0,
+        "review_frame_count": review_frame_count,
     }
 
 
@@ -748,6 +897,9 @@ def ensure_delivery_report_fields(result):
     result.setdefault("estimated_length", "Unknown")
     result.setdefault("estimated_bounce_point", None)
     result.setdefault("average_ball_confidence", 0)
+    result.setdefault("kalman_predicted_frames", 0)
+    result.setdefault("tracker_recoveries", 0)
+    result.setdefault("overall_tracking_quality", "Poor")
 
 
 def show_cricket_delivery_report(result):
@@ -808,9 +960,31 @@ def show_analysis_output(result):
     stats_col3.metric("Ball Detection Rate", f"{result['ball_detection_rate']:.1f}%")
     stats_col4.metric("Low-Conf Review Frames", result.get("low_confidence_ball_frames", 0))
 
-    stats_col5, stats_col6 = st.columns(2)
+    stats_col5, stats_col6, stats_col7, stats_col8 = st.columns(4)
     stats_col5.metric("Ball Tracking Rate", f"{result.get('ball_tracking_rate', 0):.1f}%")
     stats_col6.metric("Interpolated Ball Frames", result.get("interpolated_ball_frames", 0))
+    stats_col7.metric("Kalman Predicted Frames", result.get("kalman_predicted_frames", 0))
+    stats_col8.metric("Overall Tracking Quality", result.get("overall_tracking_quality", "Poor"))
+    st.metric("Review Frames", result.get("review_frame_count", 0))
+
+    timing_col1, timing_col2, timing_col3 = st.columns(3)
+    timing_col1.metric(
+        "Full Frame Detection Time",
+        f"{result.get('full_frame_detection_time_ms', 0):.1f} ms",
+    )
+    timing_col2.metric(
+        "ROI Detection Time",
+        f"{result.get('roi_detection_time_ms', 0):.1f} ms",
+    )
+    timing_col3.metric("ROI Frames", result.get("roi_detected_frames", 0))
+
+    with st.expander("Debug Panel"):
+        st.write(f"Active model: {result.get('active_model', 'Unknown')}")
+        st.write(f"Active preset: {result.get('active_preset', 'Unknown')}")
+        st.write(f"ROI size: {result.get('last_roi_size', 'Full frame')}")
+        st.write(f"Ball detections: {result.get('total_ball_detections', 0)}")
+        st.write(f"Tracker recoveries: {result.get('tracker_recoveries', 0)}")
+        st.write(f"Average confidence: {result.get('average_ball_confidence', 0):.2f}")
 
     show_delivery_report(result)
     show_cricket_delivery_report(result)
@@ -821,6 +995,22 @@ def show_analysis_output(result):
         file_name=result["processed_file_name"],
         mime="video/mp4",
     )
+
+    if st.button("Export Review Frames for Training"):
+        from Backends.src.ui.video_analysis import create_review_frames_zip
+
+        zip_path, file_count = create_review_frames_zip()
+
+        if file_count == 0:
+            st.warning("No review frames are available yet.")
+        else:
+            with open(zip_path, "rb") as zip_file:
+                st.download_button(
+                    label="Download Review Frames ZIP",
+                    data=zip_file,
+                    file_name=zip_path.name,
+                    mime="application/zip",
+                )
 
 
 def reset_live_delivery_state():
@@ -895,6 +1085,15 @@ def show_live_session_page():
                         )
                     ),
                     use_ensemble=analysis_settings.get("use_ensemble", False),
+                    show_pitch_roi=analysis_settings.get("show_pitch_roi", False),
+                )
+                st.session_state.live_last_result["active_model"] = analysis_settings.get(
+                    "model_name",
+                    "Unknown",
+                )
+                st.session_state.live_last_result["active_preset"] = analysis_settings.get(
+                    "preset_name",
+                    "Unknown",
                 )
 
         st.session_state.live_pending_analysis = False
@@ -943,19 +1142,20 @@ def show_live_session_page():
     controls_col, guidance_col = st.columns([1, 1])
 
     with controls_col:
-        confidence = st.slider(
-            "Detection confidence",
-            min_value=0.10,
-            max_value=0.70,
-            value=0.25,
-            step=0.05,
+        preset_name = st.selectbox(
+            "Detection preset",
+            list(DETECTION_PRESETS.keys()),
+            index=1,
+        )
+        active_preset = DETECTION_PRESETS[preset_name]
+        confidence = active_preset["confidence"]
+        image_size = active_preset["imgsz"]
+
+        st.caption(
+            f"Active preset: {preset_name} | imgsz={image_size} | confidence={confidence:.2f}"
         )
 
-        image_size = st.selectbox(
-            "Image size",
-            options=[640, 768, 960],
-            index=2,
-        )
+        show_pitch_roi = st.checkbox("Show Pitch ROI", value=False)
 
     with guidance_col:
         st.warning(
@@ -1052,6 +1252,9 @@ def show_live_session_page():
             "image_size": image_size,
             "model_path": str(selected_model_path),
             "use_ensemble": use_ensemble,
+            "show_pitch_roi": show_pitch_roi,
+            "model_name": selected_model_name,
+            "preset_name": preset_name,
         }
         st.session_state.live_status_message = (
             "Delivery captured. Camera session ended. Refresh or click Start New Delivery to record again."

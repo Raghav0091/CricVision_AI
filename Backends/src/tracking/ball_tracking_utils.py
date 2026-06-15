@@ -4,6 +4,7 @@ import pandas as pd
 MAX_INTERPOLATION_GAP = 8
 EDGE_FILL_LIMIT = 2
 MIN_BOUNCE_POINTS = 6
+MAX_KALMAN_MISSING_FRAMES = 10
 
 
 def _point_to_xy(point):
@@ -150,3 +151,68 @@ def calculate_tracking_quality(trajectory_points, total_frames):
         "usable_frames": usable_frames,
         "tracking_rate": (usable_frames / total_frames) * 100,
     }
+
+
+class BallKalmanTracker:
+    def __init__(self, max_missing_frames=MAX_KALMAN_MISSING_FRAMES):
+        self.max_missing_frames = max_missing_frames
+        self.reset()
+
+    def reset(self):
+        self.initialized = False
+        self.state = None
+        self.missing_frames = 0
+        self.last_prediction = None
+
+    def update(self, measurement):
+        x, y = _point_to_xy(measurement)
+
+        if x is None or y is None:
+            return self.predict()
+
+        if not self.initialized:
+            self.state = [x, y, 0.0, 0.0]
+            self.initialized = True
+        else:
+            predicted_x = self.state[0] + self.state[2]
+            predicted_y = self.state[1] + self.state[3]
+            measured_vx = x - self.state[0]
+            measured_vy = y - self.state[1]
+            self.state = [
+                (x * 0.75) + (predicted_x * 0.25),
+                (y * 0.75) + (predicted_y * 0.25),
+                (measured_vx * 0.65) + (self.state[2] * 0.35),
+                (measured_vy * 0.65) + (self.state[3] * 0.35),
+            ]
+
+        self.missing_frames = 0
+        self.last_prediction = _to_int_point(self.state[0], self.state[1])
+        return self.last_prediction
+
+    def predict(self):
+        if not self.initialized or self.state is None:
+            return None
+
+        self.missing_frames += 1
+
+        if self.missing_frames > self.max_missing_frames:
+            self.reset()
+            return None
+
+        damping = max(0.45, 1 - (self.missing_frames * 0.06))
+        self.state[0] += self.state[2] * damping
+        self.state[1] += self.state[3] * damping
+        self.state[2] *= damping
+        self.state[3] *= damping
+        self.last_prediction = _to_int_point(self.state[0], self.state[1])
+        return self.last_prediction
+
+
+def get_tracking_quality_label(tracking_rate, interpolated_frames=0, kalman_predicted_frames=0):
+    if tracking_rate >= 85 and kalman_predicted_frames <= 3:
+        return "Excellent"
+    if tracking_rate >= 70:
+        return "Good"
+    if tracking_rate >= 45:
+        return "Medium"
+    return "Poor"

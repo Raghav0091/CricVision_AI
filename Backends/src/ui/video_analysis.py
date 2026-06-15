@@ -1,5 +1,8 @@
 import tempfile
 import subprocess
+import csv
+import zipfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -15,8 +18,10 @@ from Backends.src.analysis.cricket_agent import (
     generate_delivery_report,
 )
 from Backends.src.tracking.ball_tracking_utils import (
+    BallKalmanTracker,
     calculate_tracking_quality,
     detect_bounce_by_direction_change,
+    get_tracking_quality_label,
     interpolate_missing_positions,
     smooth_trajectory,
 )
@@ -26,7 +31,25 @@ BALL_MODEL_PATH = Path("Models/ball_detector/best.pt")
 CRICKET_OBJECTS_MODEL_PATH = Path("Models/cricket_objects/best.pt")
 EXTERNAL_BALL_MODEL_PATH = Path("Models/cricket_objects/best_external.pt")
 OUTPUT_DIR = Path("outputs/video_analysis")
+REVIEW_FRAMES_DIR = Path("outputs/review_frames")
+REVIEW_FRAMES_CSV = REVIEW_FRAMES_DIR / "review_frames.csv"
 ENSEMBLE_MODEL_NAME = "Ensemble: All Ball Models + Stumps"
+LOW_CONFIDENCE_REVIEW_THRESHOLD = 0.35
+MAX_REVIEW_FRAMES_PER_ANALYSIS = 80
+DETECTION_PRESETS = {
+    "Fast Bowling Mode": {
+        "imgsz": 960,
+        "confidence": 0.15,
+    },
+    "Balanced Mode": {
+        "imgsz": 768,
+        "confidence": 0.25,
+    },
+    "High Precision Mode": {
+        "imgsz": 960,
+        "confidence": 0.35,
+    },
+}
 
 
 @st.cache_resource
@@ -161,6 +184,15 @@ def non_max_suppression_custom(detections, iou_threshold=0.4):
     return kept_detections
 
 
+def run_single_model_detection(frame, model, confidence, imgsz):
+    return model.predict(
+        source=frame,
+        conf=confidence,
+        imgsz=imgsz,
+        verbose=False,
+    )[0]
+
+
 def collect_model_detections(
     result,
     class_names,
@@ -205,6 +237,148 @@ def collect_model_detections(
     return ball_detections, stump_detections
 
 
+def collect_low_confidence_ball_detections(result, class_names, model_name, get_box_center):
+    low_confidence_detections = []
+
+    if result.boxes is None or len(result.boxes) == 0:
+        return low_confidence_detections
+
+    for box in result.boxes:
+        class_id = int(box.cls[0].cpu().numpy())
+
+        if class_names.get(class_id) != "ball":
+            continue
+
+        confidence = float(box.conf[0].cpu().numpy())
+
+        if not 0.10 <= confidence < LOW_CONFIDENCE_REVIEW_THRESHOLD:
+            continue
+
+        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+        low_confidence_detections.append(
+            {
+                "class_id": class_id,
+                "class_name": "ball",
+                "confidence": confidence,
+                "box": (x1, y1, x2, y2),
+                "center": get_box_center(x1, y1, x2, y2),
+                "model_name": model_name,
+            }
+        )
+
+    return low_confidence_detections
+
+
+def offset_detection_coordinates(detections, offset_x, offset_y):
+    adjusted_detections = []
+
+    for detection in detections:
+        x1, y1, x2, y2 = detection["box"]
+        center_x, center_y = detection["center"]
+        adjusted_detection = {
+            **detection,
+            "box": (
+                x1 + offset_x,
+                y1 + offset_y,
+                x2 + offset_x,
+                y2 + offset_y,
+            ),
+            "center": (center_x + offset_x, center_y + offset_y),
+        }
+        adjusted_detections.append(adjusted_detection)
+
+    return adjusted_detections
+
+
+def estimate_pitch_roi(frame_shape, stump_detections, previous_roi=None):
+    height, width = frame_shape[:2]
+
+    if not stump_detections:
+        return previous_roi
+
+    main_stump = max(
+        stump_detections,
+        key=lambda item: (item["box"][2] - item["box"][0]) * (item["box"][3] - item["box"][1]),
+    )
+    x1, y1, x2, y2 = main_stump["box"]
+    stump_center_x = int((x1 + x2) / 2)
+    stump_width = max(x2 - x1, 1)
+    stump_height = max(y2 - y1, 1)
+
+    corridor_width = int(
+        min(
+            width * 0.90,
+            max(stump_width * 10, stump_height * 4, width * 0.38),
+        )
+    )
+    roi_x1 = max(0, stump_center_x - corridor_width // 2)
+    roi_x2 = min(width, stump_center_x + corridor_width // 2)
+
+    if roi_x2 - roi_x1 < width * 0.25:
+        extra = int((width * 0.25 - (roi_x2 - roi_x1)) / 2)
+        roi_x1 = max(0, roi_x1 - extra)
+        roi_x2 = min(width, roi_x2 + extra)
+
+    roi_y1 = max(0, int(min(y1 - height * 0.18, height * 0.20)))
+    roi_y2 = height
+
+    if roi_y2 - roi_y1 < height * 0.45:
+        roi_y1 = max(0, int(height * 0.35))
+
+    return int(roi_x1), int(roi_y1), int(roi_x2), int(roi_y2)
+
+
+def crop_frame_to_roi(frame, roi_box):
+    if roi_box is None:
+        return frame, (0, 0), None
+
+    x1, y1, x2, y2 = roi_box
+
+    if x2 <= x1 or y2 <= y1:
+        return frame, (0, 0), None
+
+    return frame[y1:y2, x1:x2], (x1, y1), roi_box
+
+
+def create_local_search_roi(frame_shape, center, missing_frames=1):
+    if center is None:
+        return None
+
+    height, width = frame_shape[:2]
+    center_x, center_y = center
+    window_size = int(max(96, min(width, height) * 0.18) * (1 + min(missing_frames, 6) * 0.12))
+    half_window = window_size // 2
+
+    x1 = max(0, int(center_x - half_window))
+    y1 = max(0, int(center_y - half_window))
+    x2 = min(width, int(center_x + half_window))
+    y2 = min(height, int(center_y + half_window))
+
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    return x1, y1, x2, y2
+
+
+def draw_pitch_roi(frame, roi_box):
+    if roi_box is None:
+        return
+
+    x1, y1, x2, y2 = roi_box
+    cv2.rectangle(frame, (x1, y1), (x2, y2), (80, 255, 80), 2)
+    draw_label(frame, "Pitch ROI", x1, y1, (40, 160, 40))
+
+
+def draw_search_roi(frame, roi_box):
+    if roi_box is None:
+        return
+
+    x1, y1, x2, y2 = roi_box
+    cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 80, 220), 2)
+    draw_label(frame, "Recovery ROI", x1, y1, (150, 40, 130))
+
+
 def load_ensemble_models():
     models = []
 
@@ -228,23 +402,66 @@ def load_ensemble_models():
     return models
 
 
-def run_ensemble_detection(frame, models, confidence, imgsz):
+def resolve_ensemble_models(model_paths=None):
+    if model_paths is None:
+        return load_ensemble_models()
+
+    models = []
+
+    for config in get_ensemble_model_configs():
+        if config["path"] not in model_paths and str(config["path"]) not in model_paths:
+            continue
+
+        if not config["path"].exists():
+            continue
+
+        model = load_yolo_model(str(config["path"]))
+
+        if model is None:
+            continue
+
+        models.append(
+            {
+                **config,
+                "model": model,
+                "class_names": map_model_classes(model),
+            }
+        )
+
+    return models
+
+
+def run_ensemble_detection(frame, model_paths, confidence, imgsz):
+    models = model_paths
+
+    if models is None or not models or not isinstance(models[0], dict):
+        models = resolve_ensemble_models(models)
+
     combined_ball_detections = []
     combined_stump_detections = []
+    low_confidence_ball_detections = []
 
     for model_config in models:
-        results = model_config["model"].predict(
-            source=frame,
-            conf=confidence,
-            imgsz=imgsz,
-            verbose=False,
+        result = run_single_model_detection(
+            frame,
+            model_config["model"],
+            min(confidence, 0.10),
+            imgsz,
         )
         ball_detections, stump_detections = collect_model_detections(
-            results[0],
+            result,
             model_config["class_names"],
             confidence,
             model_config["name"],
             get_box_center,
+        )
+        low_confidence_ball_detections.extend(
+            collect_low_confidence_ball_detections(
+                result,
+                model_config["class_names"],
+                model_config["name"],
+                get_box_center,
+            )
         )
 
         if model_config["use_ball"]:
@@ -256,7 +473,253 @@ def run_ensemble_detection(frame, models, confidence, imgsz):
     return {
         "ball_detections": non_max_suppression_custom(combined_ball_detections),
         "stump_detections": combined_stump_detections,
+        "low_confidence_ball_detections": non_max_suppression_custom(
+            low_confidence_ball_detections
+        ),
     }
+
+
+def run_pitch_roi_detection(
+    frame,
+    stump_model,
+    stump_class_names,
+    confidence,
+    imgsz,
+    previous_roi=None,
+    ball_model=None,
+    ball_class_names=None,
+    ensemble_models=None,
+    use_ensemble=False,
+    ball_confidence=None,
+):
+    full_frame_start = time.perf_counter()
+    stump_result = run_single_model_detection(
+        frame,
+        stump_model,
+        confidence,
+        imgsz,
+    )
+    _, stump_detections = collect_model_detections(
+        stump_result,
+        stump_class_names,
+        confidence,
+        "Ball + Stump Detector",
+        get_box_center,
+    )
+    full_frame_time_ms = (time.perf_counter() - full_frame_start) * 1000
+
+    roi_box = estimate_pitch_roi(frame.shape, stump_detections, previous_roi)
+    roi_frame, (offset_x, offset_y), active_roi_box = crop_frame_to_roi(frame, roi_box)
+    used_roi = active_roi_box is not None
+
+    roi_start = time.perf_counter()
+
+    if use_ensemble:
+        detection_result = run_ensemble_detection(
+            roi_frame,
+            ensemble_models,
+            confidence,
+            imgsz,
+        )
+        ball_detections = detection_result["ball_detections"]
+        low_confidence_ball_detections = detection_result.get(
+            "low_confidence_ball_detections",
+            [],
+        )
+    else:
+        ball_result = run_single_model_detection(
+            roi_frame,
+            ball_model,
+            min(confidence, 0.10),
+            imgsz,
+        )
+        ball_detections, _ = collect_model_detections(
+            ball_result,
+            ball_class_names,
+            confidence,
+            "Selected Model",
+            get_box_center,
+            ball_confidence=ball_confidence,
+        )
+        low_confidence_ball_detections = collect_low_confidence_ball_detections(
+            ball_result,
+            ball_class_names,
+            "Selected Model",
+            get_box_center,
+        )
+
+    detection_time_ms = (time.perf_counter() - roi_start) * 1000
+
+    if used_roi:
+        ball_detections = offset_detection_coordinates(
+            ball_detections,
+            offset_x,
+            offset_y,
+        )
+        low_confidence_ball_detections = offset_detection_coordinates(
+            low_confidence_ball_detections,
+            offset_x,
+            offset_y,
+        )
+        roi_time_ms = detection_time_ms
+    else:
+        full_frame_time_ms += detection_time_ms
+        roi_time_ms = 0
+
+    return {
+        "ball_detections": non_max_suppression_custom(ball_detections),
+        "stump_detections": stump_detections,
+        "low_confidence_ball_detections": non_max_suppression_custom(
+            low_confidence_ball_detections
+        ),
+        "roi_box": active_roi_box,
+        "full_frame_time_ms": full_frame_time_ms,
+        "roi_time_ms": roi_time_ms,
+        "used_roi": used_roi,
+    }
+
+
+def run_local_redetection(
+    frame,
+    search_center,
+    confidence,
+    imgsz,
+    missing_frames,
+    ball_model=None,
+    ball_class_names=None,
+    ensemble_models=None,
+    use_ensemble=False,
+):
+    search_roi = create_local_search_roi(frame.shape, search_center, missing_frames)
+
+    if search_roi is None:
+        return {
+            "ball_detections": [],
+            "search_roi": None,
+            "recovered": False,
+        }
+
+    search_frame, (offset_x, offset_y), active_search_roi = crop_frame_to_roi(frame, search_roi)
+    recovery_confidence = max(0.08, min(confidence, 0.18))
+
+    if use_ensemble:
+        detection_result = run_ensemble_detection(
+            search_frame,
+            ensemble_models,
+            recovery_confidence,
+            max(imgsz, 960),
+        )
+        ball_detections = detection_result["ball_detections"]
+    else:
+        result = run_single_model_detection(
+            search_frame,
+            ball_model,
+            recovery_confidence,
+            max(imgsz, 960),
+        )
+        ball_detections, _ = collect_model_detections(
+            result,
+            ball_class_names,
+            recovery_confidence,
+            "Local Re-detection",
+            get_box_center,
+            ball_confidence=recovery_confidence,
+        )
+
+    ball_detections = offset_detection_coordinates(ball_detections, offset_x, offset_y)
+
+    return {
+        "ball_detections": non_max_suppression_custom(ball_detections),
+        "search_roi": active_search_roi,
+        "recovered": bool(ball_detections),
+    }
+
+
+def write_review_metadata(row):
+    REVIEW_FRAMES_DIR.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "timestamp",
+        "source",
+        "frame_index",
+        "reason",
+        "file_name",
+        "model_name",
+        "confidence",
+        "bbox",
+        "note",
+    ]
+    write_header = not REVIEW_FRAMES_CSV.exists()
+
+    with open(REVIEW_FRAMES_CSV, "a", newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+
+        if write_header:
+            writer.writeheader()
+
+        writer.writerow(row)
+
+
+def save_review_frame(
+    frame,
+    timestamp,
+    frame_index,
+    reason,
+    detections=None,
+    source="video_analysis",
+    note="",
+):
+    REVIEW_FRAMES_DIR.mkdir(parents=True, exist_ok=True)
+    safe_reason = reason.replace(" ", "_").lower()
+    file_name = f"{safe_reason}_{timestamp}_{frame_index:04d}.jpg"
+    output_path = REVIEW_FRAMES_DIR / file_name
+    review_frame = frame.copy()
+
+    for detection in detections or []:
+        x1, y1, x2, y2 = detection["box"]
+        center_x, center_y = detection["center"]
+        confidence = detection.get("confidence", 0)
+        cv2.rectangle(review_frame, (x1, y1), (x2, y2), (0, 165, 255), 2)
+        cv2.circle(review_frame, (center_x, center_y), 4, (0, 165, 255), -1)
+        draw_label(review_frame, f"{reason} {confidence:.2f}", x1, y1, (0, 120, 220))
+
+    cv2.imwrite(str(output_path), review_frame)
+
+    metadata_detections = detections or [None]
+    for detection in metadata_detections:
+        write_review_metadata(
+            {
+                "timestamp": timestamp,
+                "source": source,
+                "frame_index": frame_index,
+                "reason": reason,
+                "file_name": file_name,
+                "model_name": "" if detection is None else detection.get("model_name", ""),
+                "confidence": "" if detection is None else f"{detection.get('confidence', 0):.4f}",
+                "bbox": "" if detection is None else ",".join(map(str, detection.get("box", ""))),
+                "note": note,
+            }
+        )
+
+    return output_path
+
+
+def create_review_frames_zip():
+    REVIEW_FRAMES_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    zip_path = REVIEW_FRAMES_DIR / f"cricvision_review_frames_{timestamp}.zip"
+    files_to_zip = [
+        path
+        for path in REVIEW_FRAMES_DIR.iterdir()
+        if path.is_file()
+        and path.name != zip_path.name
+        and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".csv"}
+    ]
+
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+        for path in files_to_zip:
+            zip_file.write(path, arcname=path.name)
+
+    return zip_path, len(files_to_zip)
 
 
 def draw_label(frame, text, x, y, color):
@@ -367,6 +830,9 @@ def ensure_delivery_report_fields(result):
     result.setdefault("estimated_length", "Unknown")
     result.setdefault("estimated_bounce_point", None)
     result.setdefault("average_ball_confidence", 0)
+    result.setdefault("kalman_predicted_frames", 0)
+    result.setdefault("tracker_recoveries", 0)
+    result.setdefault("overall_tracking_quality", "Poor")
 
 
 def show_cricket_delivery_report(result):
@@ -401,9 +867,19 @@ def process_video(
     confidence=0.25,
     imgsz=640,
     use_ensemble=False,
+    show_pitch_roi=False,
 ):
     model = None
     ensemble_models = []
+    stump_model = load_yolo_model(str(CRICKET_OBJECTS_MODEL_PATH))
+
+    if stump_model is None:
+        return {
+            "success": False,
+            "error": f"Stump model not found: {CRICKET_OBJECTS_MODEL_PATH}",
+        }
+
+    stump_class_names = map_model_classes(stump_model)
 
     if use_ensemble:
         ensemble_models = load_ensemble_models()
@@ -448,6 +924,7 @@ def process_video(
         }
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
@@ -468,13 +945,24 @@ def process_video(
     total_stump_detections = 0
 
     confidence_values = []
+    low_confidence_ball_frames = 0
+    review_frame_count = 0
+    full_frame_detection_time_total = 0
+    roi_detection_time_total = 0
+    roi_detected_frames = 0
+    tracker_recoveries = 0
+    kalman_predicted_frames = 0
+    last_roi_size = "Full frame"
 
     trajectory_points = []
     ball_positions = []
     stump_detections_by_frame = []
+    last_raw_frame = None
+    previous_roi_box = None
     max_trajectory_points = 35
 
     previous_ball_center = None
+    kalman_tracker = BallKalmanTracker(max_missing_frames=10)
 
     missing_ball_frames = 0
     max_missing_ball_frames = 12
@@ -501,38 +989,93 @@ def process_video(
         if not success:
             break
 
+        last_raw_frame = frame.copy()
         annotated_frame = frame.copy()
+        low_confidence_ball_detections = []
 
-        if use_ensemble:
-            ensemble_result = run_ensemble_detection(
-                frame,
-                ensemble_models,
-                confidence,
-                imgsz,
-            )
-            ball_detections = ensemble_result["ball_detections"]
-            stump_detections = ensemble_result["stump_detections"]
-            confidence_values.extend(item["confidence"] for item in ball_detections)
-        else:
-            results = model.predict(
-                source=frame,
-                conf=confidence,
-                imgsz=imgsz,
-                verbose=False,
-            )
-            ball_detections, stump_detections = collect_model_detections(
-                results[0],
-                class_names,
-                confidence,
-                "Selected Model",
-                get_box_center,
-                ball_confidence=min_ball_confidence_for_tracking,
-            )
-            confidence_values.extend(item["confidence"] for item in ball_detections)
+        detection_result = run_pitch_roi_detection(
+            frame,
+            stump_model=stump_model,
+            stump_class_names=stump_class_names,
+            confidence=confidence,
+            imgsz=imgsz,
+            previous_roi=previous_roi_box,
+            ball_model=model,
+            ball_class_names=class_names,
+            ensemble_models=ensemble_models,
+            use_ensemble=use_ensemble,
+            ball_confidence=min_ball_confidence_for_tracking,
+        )
+        ball_detections = detection_result["ball_detections"]
+        stump_detections = detection_result["stump_detections"]
+        low_confidence_ball_detections = detection_result.get(
+            "low_confidence_ball_detections",
+            [],
+        )
+        full_frame_detection_time_total += detection_result["full_frame_time_ms"]
+        roi_detection_time_total += detection_result["roi_time_ms"]
+
+        if detection_result.get("used_roi"):
+            previous_roi_box = detection_result["roi_box"]
+            roi_detected_frames += 1
+            roi_x1, roi_y1, roi_x2, roi_y2 = detection_result["roi_box"]
+            last_roi_size = f"{roi_x2 - roi_x1}x{roi_y2 - roi_y1}"
+
+        if show_pitch_roi:
+            draw_pitch_roi(annotated_frame, detection_result.get("roi_box"))
+
+        confidence_values.extend(item["confidence"] for item in ball_detections)
+
+        if low_confidence_ball_detections:
+            low_confidence_ball_frames += 1
+
+            if review_frame_count < MAX_REVIEW_FRAMES_PER_ANALYSIS:
+                save_review_frame(
+                    frame,
+                    timestamp,
+                    frame_index,
+                    "low_confidence",
+                    low_confidence_ball_detections,
+                    source="video_analysis",
+                )
+                review_frame_count += 1
 
         if ball_detections:
             ball_detected_frames += 1
             total_ball_detections += len(ball_detections)
+        else:
+            search_center = previous_ball_center or kalman_tracker.last_prediction
+            recovery_result = run_local_redetection(
+                frame,
+                search_center,
+                confidence,
+                imgsz,
+                missing_ball_frames + 1,
+                ball_model=model,
+                ball_class_names=class_names,
+                ensemble_models=ensemble_models,
+                use_ensemble=use_ensemble,
+            )
+
+            if show_pitch_roi:
+                draw_search_roi(annotated_frame, recovery_result.get("search_roi"))
+
+            if recovery_result["recovered"]:
+                ball_detections = recovery_result["ball_detections"]
+                tracker_recoveries += 1
+                ball_detected_frames += 1
+                total_ball_detections += len(ball_detections)
+                confidence_values.extend(item["confidence"] for item in ball_detections)
+            elif review_frame_count < MAX_REVIEW_FRAMES_PER_ANALYSIS:
+                save_review_frame(
+                    frame,
+                    timestamp,
+                    frame_index,
+                    "missed_ball",
+                    source="video_analysis",
+                    note="No ball detection passed the selected confidence threshold.",
+                )
+                review_frame_count += 1
 
         if stump_detections:
             stump_detected_frames += 1
@@ -595,6 +1138,7 @@ def process_video(
             missing_ball_frames = 0
 
             previous_ball_center = main_ball["center"]
+            kalman_tracker.update(previous_ball_center)
             ball_positions.append(previous_ball_center)
 
             smoothed_positions = smooth_trajectory(ball_positions)
@@ -642,10 +1186,28 @@ def process_video(
 
 
         else:
-            ball_positions.append(None)
             missing_ball_frames += 1
+            predicted_center = kalman_tracker.predict()
+
+            if predicted_center is not None and missing_ball_frames <= 10:
+                ball_positions.append(predicted_center)
+                previous_ball_center = predicted_center
+                kalman_predicted_frames += 1
+            else:
+                ball_positions.append(None)
 
             if missing_ball_frames >= max_missing_ball_frames:
+                kalman_tracker.reset()
+                if review_frame_count < MAX_REVIEW_FRAMES_PER_ANALYSIS:
+                    save_review_frame(
+                        frame,
+                        timestamp,
+                        frame_index,
+                        "poor_tracking",
+                        source="video_analysis",
+                        note=f"Ball missing for {missing_ball_frames} consecutive frames.",
+                    )
+                    review_frame_count += 1
                 trajectory_points.clear()
                 previous_ball_center = None
             else:
@@ -819,6 +1381,43 @@ def process_video(
         average_confidence = sum(confidence_values) / len(confidence_values)
 
     tracking_quality = calculate_tracking_quality(ball_positions, frame_index)
+    overall_tracking_quality = get_tracking_quality_label(
+        tracking_quality["tracking_rate"],
+        tracking_quality["interpolated_frames"],
+        kalman_predicted_frames,
+    )
+    average_full_frame_detection_time = 0
+    average_roi_detection_time = 0
+
+    if frame_index > 0:
+        average_full_frame_detection_time = full_frame_detection_time_total / frame_index
+
+    if roi_detected_frames > 0:
+        average_roi_detection_time = roi_detection_time_total / roi_detected_frames
+
+    if last_raw_frame is not None and estimated_bounce_point is None:
+        if review_frame_count < MAX_REVIEW_FRAMES_PER_ANALYSIS:
+            save_review_frame(
+                last_raw_frame,
+                timestamp,
+                max(frame_index - 1, 0),
+                "bounce_unknown",
+                source="video_analysis",
+                note="Analysis finished without a bounce estimate.",
+            )
+            review_frame_count += 1
+
+    if last_raw_frame is not None and (estimated_line == "Unknown" or estimated_length == "Unknown"):
+        if review_frame_count < MAX_REVIEW_FRAMES_PER_ANALYSIS:
+            save_review_frame(
+                last_raw_frame,
+                timestamp,
+                max(frame_index - 1, 0),
+                "line_length_unknown",
+                source="video_analysis",
+                note=f"Line={estimated_line}; Length={estimated_length}.",
+            )
+            review_frame_count += 1
 
     return {
         "success": True,
@@ -827,16 +1426,26 @@ def process_video(
         "ball_detected_frames": ball_detected_frames,
         "stump_detected_frames": stump_detected_frames,
         "total_ball_detections": total_ball_detections,
+        "low_confidence_ball_frames": low_confidence_ball_frames,
         "total_stump_detections": total_stump_detections,
         "ball_detection_rate": ball_detection_rate,
         "ball_tracking_rate": tracking_quality["tracking_rate"],
         "interpolated_ball_frames": tracking_quality["interpolated_frames"],
+        "kalman_predicted_frames": kalman_predicted_frames,
+        "tracker_recoveries": tracker_recoveries,
+        "overall_tracking_quality": overall_tracking_quality,
         "stump_detection_rate": stump_detection_rate,
         "average_ball_confidence": average_confidence,
+        "full_frame_detection_time_ms": average_full_frame_detection_time,
+        "roi_detection_time_ms": average_roi_detection_time,
+        "roi_detected_frames": roi_detected_frames,
+        "last_roi_size": last_roi_size,
         "estimated_bounce_point": estimated_bounce_point,
         "estimated_bounce_frame": estimated_bounce_frame,
         "estimated_line": estimated_line,
         "estimated_length": estimated_length,
+        "review_frame_count": review_frame_count,
+        "review_frames_dir": REVIEW_FRAMES_DIR,
     }
 
 
@@ -880,23 +1489,19 @@ def show_video_analysis_page():
         type=["mp4", "mov", "avi", "mkv"],
     )
 
-    col1, col2 = st.columns(2)
+    preset_name = st.selectbox(
+        "Detection preset",
+        list(DETECTION_PRESETS.keys()),
+        index=1,
+    )
+    active_preset = DETECTION_PRESETS[preset_name]
+    confidence = active_preset["confidence"]
+    image_size = active_preset["imgsz"]
+    st.caption(
+        f"Active preset: {preset_name} | imgsz={image_size} | confidence={confidence:.2f}"
+    )
 
-    with col1:
-        confidence = st.slider(
-            "Detection confidence",
-            min_value=0.05,
-            max_value=0.90,
-            value=0.25,
-            step=0.05,
-        )
-
-    with col2:
-        image_size = st.selectbox(
-            "Image size",
-            options=[640, 768, 960],
-            index=0,
-        )
+    show_pitch_roi = st.checkbox("Show Pitch ROI", value=False)
 
     st.info(
         "For phone videos, use landscape mode if possible. Good lighting and a stable camera will improve tracking."
@@ -928,7 +1533,10 @@ def show_video_analysis_page():
                     confidence=confidence,
                     imgsz=image_size,
                     use_ensemble=use_ensemble,
+                    show_pitch_roi=show_pitch_roi,
                 )
+                result["active_preset"] = preset_name
+                result["active_model"] = selected_model_name
 
             if not result["success"]:
                 st.error(result["error"])
@@ -973,22 +1581,45 @@ def show_video_analysis_page():
             col6.metric("Total Stump Detections", result["total_stump_detections"])
             col7.metric("Avg Ball Confidence", f"{result['average_ball_confidence']:.2f}")
 
-            col8, col9 = st.columns(2)
+            col8, col9, col10, col11 = st.columns(4)
             col8.metric("Ball Tracking Rate", f"{result.get('ball_tracking_rate', 0):.1f}%")
             col9.metric("Interpolated Ball Frames", result.get("interpolated_ball_frames", 0))
+            col10.metric("Kalman Predicted Frames", result.get("kalman_predicted_frames", 0))
+            col11.metric("Overall Tracking Quality", result.get("overall_tracking_quality", "Poor"))
+
+            st.metric("Review Frames", result.get("review_frame_count", 0))
+
+            timing_col1, timing_col2, timing_col3 = st.columns(3)
+            timing_col1.metric(
+                "Full Frame Detection Time",
+                f"{result.get('full_frame_detection_time_ms', 0):.1f} ms",
+            )
+            timing_col2.metric(
+                "ROI Detection Time",
+                f"{result.get('roi_detection_time_ms', 0):.1f} ms",
+            )
+            timing_col3.metric("ROI Frames", result.get("roi_detected_frames", 0))
+
+            with st.expander("Debug Panel"):
+                st.write(f"Active model: {result.get('active_model', selected_model_name)}")
+                st.write(f"Active preset: {result.get('active_preset', preset_name)}")
+                st.write(f"ROI size: {result.get('last_roi_size', 'Full frame')}")
+                st.write(f"Ball detections: {result.get('total_ball_detections', 0)}")
+                st.write(f"Tracker recoveries: {result.get('tracker_recoveries', 0)}")
+                st.write(f"Average confidence: {result.get('average_ball_confidence', 0):.2f}")
 
             st.subheader("Bounce / Pitch Estimate")
 
             if result["estimated_bounce_point"] is not None:
                 bx, by = result["estimated_bounce_point"]
 
-                col10, col11, col12, col13, col14 = st.columns(5)
+                col11, col12, col13, col14, col15 = st.columns(5)
 
-                col10.metric("Bounce Frame", result["estimated_bounce_frame"])
-                col11.metric("Bounce X", bx)
-                col12.metric("Bounce Y", by)
-                col13.metric("Estimated Line", result["estimated_line"])
-                col14.metric("Estimated Length", result["estimated_length"])
+                col11.metric("Bounce Frame", result["estimated_bounce_frame"])
+                col12.metric("Bounce X", bx)
+                col13.metric("Bounce Y", by)
+                col14.metric("Estimated Line", result["estimated_line"])
+                col15.metric("Estimated Length", result["estimated_length"])
                 
                 st.success("Estimated bounce/pitch point found.")
             else:
@@ -1005,6 +1636,20 @@ def show_video_analysis_page():
                     file_name="cricvision_processed_video.mp4",
                     mime="video/mp4",
                 )
+
+            if st.button("Export Review Frames for Training"):
+                zip_path, file_count = create_review_frames_zip()
+
+                if file_count == 0:
+                    st.warning("No review frames are available yet.")
+                else:
+                    with open(zip_path, "rb") as zip_file:
+                        st.download_button(
+                            label="Download Review Frames ZIP",
+                            data=zip_file,
+                            file_name=zip_path.name,
+                            mime="application/zip",
+                        )
                 
 def estimate_line_from_stumps(bounce_point, stump_detections):
     """
