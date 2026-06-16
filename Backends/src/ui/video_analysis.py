@@ -8,6 +8,7 @@ from pathlib import Path
 
 import cv2
 import imageio_ffmpeg
+import numpy as np
 import streamlit as st
 from ultralytics import YOLO
 
@@ -377,6 +378,135 @@ def draw_search_roi(frame, roi_box):
     x1, y1, x2, y2 = roi_box
     cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 80, 220), 2)
     draw_label(frame, "Recovery ROI", x1, y1, (150, 40, 130))
+
+
+def estimate_auto_pitch_corners(frame_shape, stump_detections):
+    if not stump_detections:
+        return None
+
+    height, width = frame_shape[:2]
+    main_stump = max(
+        stump_detections,
+        key=lambda item: (item["box"][2] - item["box"][0]) * (item["box"][3] - item["box"][1]),
+    )
+    x1, y1, x2, y2 = main_stump["box"]
+    stump_center_x = int((x1 + x2) / 2)
+    stump_width = max(x2 - x1, 1)
+
+    top_half_width = max(stump_width * 2.2, width * 0.10)
+    bottom_half_width = max(stump_width * 6.0, width * 0.30)
+    top_y = max(0, int(y2 + height * 0.02))
+    bottom_y = height - 1
+
+    return [
+        (max(0, int(stump_center_x - top_half_width)), top_y),
+        (min(width - 1, int(stump_center_x + top_half_width)), top_y),
+        (max(0, int(stump_center_x - bottom_half_width)), bottom_y),
+        (min(width - 1, int(stump_center_x + bottom_half_width)), bottom_y),
+    ]
+
+
+def compute_pitch_homography(pitch_points):
+    if pitch_points is None or len(pitch_points) != 4:
+        return None
+
+    source_points = np.array(pitch_points, dtype="float32")
+    target_points = np.array(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
+        ],
+        dtype="float32",
+    )
+
+    return cv2.getPerspectiveTransform(source_points, target_points)
+
+
+def transform_point_to_pitch(point, homography):
+    if point is None or homography is None:
+        return None
+
+    points = np.array([[[float(point[0]), float(point[1])]]], dtype="float32")
+    transformed = cv2.perspectiveTransform(points, homography)[0][0]
+    x = min(max(float(transformed[0]), 0.0), 1.0)
+    y = min(max(float(transformed[1]), 0.0), 1.0)
+    return x, y
+
+
+def estimate_line_from_pitch_x(pitch_x):
+    if pitch_x is None:
+        return "Unknown"
+    if pitch_x < 0.38:
+        return "Off side"
+    if pitch_x > 0.62:
+        return "Leg side"
+    return "Middle"
+
+
+def estimate_length_from_pitch_y(pitch_y):
+    if pitch_y is None:
+        return "Unknown"
+    if pitch_y >= 0.84:
+        return "Yorker"
+    if pitch_y >= 0.68:
+        return "Full"
+    if pitch_y >= 0.45:
+        return "Good Length"
+    return "Short"
+
+
+def draw_pitch_map(pitch_point, line_label="Unknown", length_label="Unknown"):
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(3.2, 6))
+    ax.set_xlim(0, 1)
+    ax.set_ylim(1, 0)
+    ax.set_facecolor("#d6b47a")
+    fig.patch.set_facecolor("white")
+
+    length_zones = [
+        (0.00, 0.45, "Short", "#f6c2c2"),
+        (0.45, 0.68, "Good Length", "#fff1a8"),
+        (0.68, 0.84, "Full", "#bfe7c2"),
+        (0.84, 1.00, "Yorker", "#acd7ff"),
+    ]
+
+    for y1, y2, label, color in length_zones:
+        ax.axhspan(y1, y2, color=color, alpha=0.75)
+        ax.text(0.03, (y1 + y2) / 2, label, va="center", ha="left", fontsize=9)
+
+    ax.axvline(0.38, color="#444444", linestyle="--", linewidth=1)
+    ax.axvline(0.62, color="#444444", linestyle="--", linewidth=1)
+    ax.text(0.19, 1.04, "Off", ha="center", fontsize=9)
+    ax.text(0.50, 1.04, "Middle", ha="center", fontsize=9)
+    ax.text(0.81, 1.04, "Leg", ha="center", fontsize=9)
+
+    if pitch_point is not None:
+        ax.scatter(
+            [pitch_point[0]],
+            [pitch_point[1]],
+            s=90,
+            color="#d71920",
+            edgecolor="white",
+            linewidth=1.5,
+            zorder=5,
+        )
+        ax.text(
+            pitch_point[0],
+            max(0, pitch_point[1] - 0.04),
+            f"{line_label} / {length_label}",
+            ha="center",
+            fontsize=8,
+            color="#111111",
+        )
+
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_title("Pitch Map", fontsize=12)
+    fig.tight_layout()
+    return fig
 
 
 def load_ensemble_models():
@@ -806,6 +936,86 @@ def convert_to_browser_mp4(input_path, output_path):
     return output_path
 
 
+def extract_first_video_frame(uploaded_video):
+    uploaded_video.seek(0)
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_input:
+        temp_input.write(uploaded_video.read())
+        temp_path = Path(temp_input.name)
+
+    cap = cv2.VideoCapture(str(temp_path))
+    success, frame = cap.read()
+    cap.release()
+    uploaded_video.seek(0)
+
+    if not success:
+        return None
+
+    return frame
+
+
+def get_default_pitch_points(frame):
+    height, width = frame.shape[:2]
+    return {
+        "top_left": (int(width * 0.40), int(height * 0.28)),
+        "top_right": (int(width * 0.60), int(height * 0.28)),
+        "bottom_left": (int(width * 0.22), int(height * 0.95)),
+        "bottom_right": (int(width * 0.78), int(height * 0.95)),
+    }
+
+
+def show_manual_pitch_point_inputs(frame):
+    defaults = get_default_pitch_points(frame)
+    height, width = frame.shape[:2]
+    preview = frame.copy()
+
+    for label, point in defaults.items():
+        cv2.circle(preview, point, 7, (0, 255, 0), -1)
+        draw_label(preview, label.replace("_", " "), point[0], point[1], (40, 160, 40))
+
+    st.image(
+        cv2.cvtColor(preview, cv2.COLOR_BGR2RGB),
+        caption="First frame with default pitch-point guide. Adjust the coordinates below.",
+        use_container_width=True,
+    )
+
+    points = []
+    labels = [
+        ("Top-left pitch corner", "top_left"),
+        ("Top-right pitch corner", "top_right"),
+        ("Bottom-left pitch corner", "bottom_left"),
+        ("Bottom-right pitch corner", "bottom_right"),
+    ]
+
+    for label, key in labels:
+        default_x, default_y = defaults[key]
+        col_x, col_y = st.columns(2)
+
+        with col_x:
+            point_x = st.number_input(
+                f"{label} X",
+                min_value=0,
+                max_value=max(width - 1, 0),
+                value=default_x,
+                step=1,
+                key=f"manual_pitch_{key}_x",
+            )
+
+        with col_y:
+            point_y = st.number_input(
+                f"{label} Y",
+                min_value=0,
+                max_value=max(height - 1, 0),
+                value=default_y,
+                step=1,
+                key=f"manual_pitch_{key}_y",
+            )
+
+        points.append((int(point_x), int(point_y)))
+
+    return points
+
+
 def get_nearest_stump_detections(stump_detections_by_frame, frame_index):
     if frame_index is None or not stump_detections_by_frame:
         return []
@@ -833,6 +1043,10 @@ def ensure_delivery_report_fields(result):
     result.setdefault("kalman_predicted_frames", 0)
     result.setdefault("tracker_recoveries", 0)
     result.setdefault("overall_tracking_quality", "Poor")
+    result.setdefault("pitch_normalized_bounce_point", None)
+    result.setdefault("calibration_status", "Not calibrated")
+    result.setdefault("calibration_source", "None")
+    result.setdefault("calibration_warning", "Confidence warning: pitch calibration is missing.")
 
 
 def show_cricket_delivery_report(result):
@@ -868,6 +1082,8 @@ def process_video(
     imgsz=640,
     use_ensemble=False,
     show_pitch_roi=False,
+    calibration_mode="Auto calibration using detected stumps",
+    manual_pitch_points=None,
 ):
     model = None
     ensemble_models = []
@@ -960,6 +1176,19 @@ def process_video(
     last_raw_frame = None
     previous_roi_box = None
     max_trajectory_points = 35
+    pitch_homography = None
+    calibration_status = "Not calibrated"
+    calibration_source = "None"
+    calibration_warning = "Confidence warning: pitch calibration is missing; using image-space fallback."
+    pitch_normalized_bounce_point = None
+
+    if calibration_mode.startswith("Manual"):
+        pitch_homography = compute_pitch_homography(manual_pitch_points)
+
+        if pitch_homography is not None:
+            calibration_status = "Calibrated"
+            calibration_source = "Manual"
+            calibration_warning = ""
 
     previous_ball_center = None
     kalman_tracker = BallKalmanTracker(max_missing_frames=10)
@@ -1081,6 +1310,15 @@ def process_video(
             stump_detected_frames += 1
             total_stump_detections += len(stump_detections)
 
+            if calibration_mode.startswith("Auto") and pitch_homography is None:
+                auto_pitch_points = estimate_auto_pitch_corners(frame.shape, stump_detections)
+                pitch_homography = compute_pitch_homography(auto_pitch_points)
+
+                if pitch_homography is not None:
+                    calibration_status = "Calibrated"
+                    calibration_source = "Auto"
+                    calibration_warning = ""
+
         stump_detections_by_frame.append(stump_detections)
 
         for detection in ball_detections:
@@ -1183,6 +1421,16 @@ def process_video(
                     estimated_bounce_point,
                     height 
                 )
+
+                pitch_normalized_bounce_point = transform_point_to_pitch(
+                    estimated_bounce_point,
+                    pitch_homography,
+                )
+
+                if pitch_normalized_bounce_point is not None:
+                    pitch_x, pitch_y = pitch_normalized_bounce_point
+                    estimated_line = estimate_line_from_pitch_x(pitch_x)
+                    estimated_length = estimate_length_from_pitch_y(pitch_y)
 
 
         else:
@@ -1442,6 +1690,10 @@ def process_video(
         "last_roi_size": last_roi_size,
         "estimated_bounce_point": estimated_bounce_point,
         "estimated_bounce_frame": estimated_bounce_frame,
+        "pitch_normalized_bounce_point": pitch_normalized_bounce_point,
+        "calibration_status": calibration_status,
+        "calibration_source": calibration_source,
+        "calibration_warning": calibration_warning,
         "estimated_line": estimated_line,
         "estimated_length": estimated_length,
         "review_frame_count": review_frame_count,
@@ -1502,6 +1754,14 @@ def show_video_analysis_page():
     )
 
     show_pitch_roi = st.checkbox("Show Pitch ROI", value=False)
+    calibration_mode = st.radio(
+        "Pitch calibration mode",
+        [
+            "Auto calibration using detected stumps",
+            "Manual calibration using 4 pitch corner points",
+        ],
+        index=0,
+    )
 
     st.info(
         "For phone videos, use landscape mode if possible. Good lighting and a stable camera will improve tracking."
@@ -1510,6 +1770,16 @@ def show_video_analysis_page():
     if uploaded_video is not None:
         st.subheader("Original Video")
         st.video(uploaded_video)
+        manual_pitch_points = None
+
+        if calibration_mode.startswith("Manual"):
+            st.subheader("Manual Pitch Calibration")
+            first_frame = extract_first_video_frame(uploaded_video)
+
+            if first_frame is None:
+                st.warning("Could not read the first frame for manual calibration.")
+            else:
+                manual_pitch_points = show_manual_pitch_point_inputs(first_frame)
 
         if st.button("Analyze Video", type="primary"):
             uploaded_video.seek(0)
@@ -1534,6 +1804,8 @@ def show_video_analysis_page():
                     imgsz=image_size,
                     use_ensemble=use_ensemble,
                     show_pitch_roi=show_pitch_roi,
+                    calibration_mode=calibration_mode,
+                    manual_pitch_points=manual_pitch_points,
                 )
                 result["active_preset"] = preset_name
                 result["active_model"] = selected_model_name
@@ -1607,8 +1879,19 @@ def show_video_analysis_page():
                 st.write(f"Ball detections: {result.get('total_ball_detections', 0)}")
                 st.write(f"Tracker recoveries: {result.get('tracker_recoveries', 0)}")
                 st.write(f"Average confidence: {result.get('average_ball_confidence', 0):.2f}")
+                st.write(
+                    f"Calibration: {result.get('calibration_status', 'Not calibrated')} "
+                    f"({result.get('calibration_source', 'None')})"
+                )
 
             st.subheader("Bounce / Pitch Estimate")
+
+            calib_col1, calib_col2 = st.columns(2)
+            calib_col1.metric("Calibration", result.get("calibration_status", "Not calibrated"))
+            calib_col2.metric("Calibration Mode", result.get("calibration_source", "None"))
+
+            if result.get("calibration_warning"):
+                st.warning(result["calibration_warning"])
 
             if result["estimated_bounce_point"] is not None:
                 bx, by = result["estimated_bounce_point"]
@@ -1620,10 +1903,26 @@ def show_video_analysis_page():
                 col13.metric("Bounce Y", by)
                 col14.metric("Estimated Line", result["estimated_line"])
                 col15.metric("Estimated Length", result["estimated_length"])
+
+                normalized_bounce = result.get("pitch_normalized_bounce_point")
+
+                if normalized_bounce is not None:
+                    pitch_x, pitch_y = normalized_bounce
+                    norm_col1, norm_col2 = st.columns(2)
+                    norm_col1.metric("Pitch X", f"{pitch_x:.2f}")
+                    norm_col2.metric("Pitch Y", f"{pitch_y:.2f}")
                 
                 st.success("Estimated bounce/pitch point found.")
             else:
                 st.warning("Bounce/pitch point was not found. Try a clearer or longer clip.")
+
+            st.subheader("Pitch Map")
+            pitch_map_fig = draw_pitch_map(
+                result.get("pitch_normalized_bounce_point"),
+                result.get("estimated_line", "Unknown"),
+                result.get("estimated_length", "Unknown"),
+            )
+            st.pyplot(pitch_map_fig)
 
             show_cricket_delivery_report(result)
 
