@@ -19,6 +19,13 @@ from Backends.src.analysis.cricket_agent import (
     generate_delivery_report,
 )
 from Backends.src.analysis.field_zones import FIELD_ZONES, generate_wagon_wheel_data
+from Backends.src.analysis.field_zones import (
+    DETAILED_FIELD_ZONES,
+    find_nearest_fielder,
+    save_field_analysis_history,
+    save_field_setup,
+    suggest_field_adjustment,
+)
 from Backends.src.tracking.ball_tracking_utils import (
     BallKalmanTracker,
     calculate_tracking_quality,
@@ -1111,6 +1118,7 @@ def process_video(
     manual_pitch_points=None,
     shot_trajectory_mode="Use last part of trajectory",
     manual_contact_frame=None,
+    field_setup=None,
 ):
     model = None
     ensemble_models = []
@@ -1661,12 +1669,42 @@ def process_video(
         tracking_quality["interpolated_frames"],
         kalman_predicted_frames,
     )
+    field_setup = field_setup or {}
+    batter_handedness = field_setup.get("batter_handedness", "Right-hand batter")
+    bowler_arm = field_setup.get("bowler_arm", "Right-arm bowler")
+    camera_view = field_setup.get("camera_view", "Behind bowler")
+    fielders = field_setup.get("fielders", [])
+    field_preset = field_setup.get("preset", "Custom")
+
     wagon_wheel = generate_wagon_wheel_data(
         ball_positions,
+        batter_handedness=batter_handedness,
         mode=shot_trajectory_mode,
         manual_contact_frame=manual_contact_frame,
     )
     wagon_wheel["mode"] = shot_trajectory_mode
+    nearest_fielder = find_nearest_fielder(wagon_wheel.get("shot_angle"), fielders)
+    wagon_wheel["nearest_fielder"] = nearest_fielder
+    wagon_wheel["suggested_adjustment"] = suggest_field_adjustment(wagon_wheel, nearest_fielder)
+
+    if field_setup:
+        save_field_setup(field_setup)
+        save_field_analysis_history(
+            {
+                "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
+                "source": "video_analysis",
+                "batter_handedness": batter_handedness,
+                "bowler_arm": bowler_arm,
+                "camera_view": camera_view,
+                "preset": field_preset,
+                "simple_zone": wagon_wheel.get("simple_zone", "Unknown"),
+                "detailed_zone": wagon_wheel.get("detailed_zone", "Unknown"),
+                "shot_angle": "" if wagon_wheel.get("shot_angle") is None else f"{wagon_wheel['shot_angle']:.2f}",
+                "nearest_fielder": "" if nearest_fielder is None else nearest_fielder.get("name", ""),
+                "confidence": wagon_wheel.get("confidence", "Low"),
+                "corrected_zone": "",
+            }
+        )
     average_full_frame_detection_time = 0
     average_roi_detection_time = 0
 
@@ -1730,6 +1768,10 @@ def process_video(
         "estimated_line": estimated_line,
         "estimated_length": estimated_length,
         "wagon_wheel": wagon_wheel,
+        "field_setup": field_setup,
+        "batter_handedness": batter_handedness,
+        "bowler_arm": bowler_arm,
+        "camera_view": camera_view,
         "review_frame_count": review_frame_count,
         "review_frames_dir": REVIEW_FRAMES_DIR,
     }
@@ -1836,14 +1878,23 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
     wagon_wheel = result.get("wagon_wheel", {})
     shot_angle = wagon_wheel.get("shot_angle")
     shot_zone = wagon_wheel.get("estimated_zone", "Unknown")
-    nearest_zone = wagon_wheel.get("nearest_zone", "Unknown")
+    simple_zone = wagon_wheel.get("simple_zone", shot_zone)
+    detailed_zone = wagon_wheel.get("detailed_zone", "Unknown")
+    nearest_fielder = wagon_wheel.get("nearest_fielder")
+    nearest_fielder_name = "Unknown" if nearest_fielder is None else nearest_fielder.get("name", "Unknown")
     shot_confidence = wagon_wheel.get("confidence", "Low")
 
     shot_cols = st.columns(4)
-    shot_cols[0].metric("Estimated Shot Zone", shot_zone)
+    shot_cols[0].metric("Estimated Shot Zone", simple_zone)
     shot_cols[1].metric("Shot Angle", "Unknown" if shot_angle is None else f"{shot_angle:.1f} deg")
-    shot_cols[2].metric("Nearest Field Zone", nearest_zone)
+    shot_cols[2].metric("Detailed Zone", detailed_zone)
     shot_cols[3].metric("Confidence", shot_confidence)
+    context_cols = st.columns(3)
+    context_cols[0].metric("Batter", result.get("batter_handedness", "Unknown"))
+    context_cols[1].metric("Bowler Arm", result.get("bowler_arm", "Unknown"))
+    context_cols[2].metric("Nearest Fielder", nearest_fielder_name)
+
+    info_panel(wagon_wheel.get("suggested_adjustment", "No field adjustment suggestion available."))
 
     if not wagon_wheel.get("success"):
         st.warning(wagon_wheel.get("message", "Shot direction is uncertain."))
@@ -1851,8 +1902,8 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
     st.pyplot(
         draw_field_map(
             shot_angle=shot_angle,
-            selected_zone=shot_zone,
-            fielders=[],
+            selected_zone=detailed_zone,
+            fielders=result.get("field_setup", {}).get("fielders", []),
         )
     )
 
@@ -1860,7 +1911,7 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
     with correction_col1:
         corrected_zone = st.selectbox(
             "Manual correction: actual field zone",
-            ["No correction"] + FIELD_ZONES,
+            ["No correction"] + DETAILED_FIELD_ZONES,
             key="video_analysis_field_zone_correction",
         )
 
@@ -1882,6 +1933,24 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
                     "source": "video_analysis",
                 }
             )
+            save_field_analysis_history(
+                {
+                    "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
+                    "source": "video_analysis_correction",
+                    "batter_handedness": result.get("batter_handedness", ""),
+                    "bowler_arm": result.get("bowler_arm", ""),
+                    "camera_view": result.get("camera_view", ""),
+                    "preset": result.get("field_setup", {}).get("preset", "Custom"),
+                    "simple_zone": simple_zone,
+                    "detailed_zone": detailed_zone,
+                    "shot_angle": "" if shot_angle is None else f"{shot_angle:.2f}",
+                    "nearest_fielder": nearest_fielder_name,
+                    "confidence": shot_confidence,
+                    "corrected_zone": corrected_zone,
+                }
+            )
+            result["wagon_wheel"]["corrected_zone"] = corrected_zone
+            st.session_state.video_analysis_result = result
             st.success("Field-zone correction saved for future review.")
 
     show_cricket_delivery_report(result)
@@ -1913,6 +1982,7 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
 
 def show_video_analysis_page():
     from Backends.src.ui.ui_components import badge_row, card, info_panel, page_header, section_header, status_badge
+    from Backends.src.ui.field_map import draw_field_map, field_setup_editor
 
     page_header(
         "Video Analysis",
@@ -2037,6 +2107,16 @@ def show_video_analysis_page():
             else:
                 st.caption("Run an analysis to populate debug metrics.")
 
+        with st.expander("Set Field Before Delivery", expanded=False):
+            field_setup = field_setup_editor("video_analysis", default_preset="Attacking Field")
+            st.pyplot(
+                draw_field_map(
+                    shot_angle=None,
+                    selected_zone="Unknown",
+                    fielders=field_setup["fielders"],
+                )
+            )
+
     with tab_upload:
         section_header("Upload Delivery Clip")
         info_panel(
@@ -2087,6 +2167,7 @@ def show_video_analysis_page():
                         manual_pitch_points=manual_pitch_points,
                         shot_trajectory_mode=shot_trajectory_mode,
                         manual_contact_frame=manual_contact_frame,
+                        field_setup=field_setup,
                     )
                     result["active_preset"] = preset_name
                     result["active_model"] = selected_model_name

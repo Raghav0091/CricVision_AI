@@ -11,6 +11,13 @@ from Backends.src.analysis.cricket_agent import (
     generate_coaching_feedback as generate_agent_coaching_feedback,
     generate_delivery_report,
 )
+from Backends.src.analysis.field_zones import (
+    generate_wagon_wheel_data,
+    find_nearest_fielder,
+    save_field_analysis_history,
+    save_field_setup,
+    suggest_field_adjustment,
+)
 from Backends.src.tracking.ball_tracking_utils import (
     BallKalmanTracker,
     calculate_tracking_quality,
@@ -340,6 +347,7 @@ def process_recorded_delivery(
     model_path=CRICKET_OBJECTS_MODEL_PATH,
     use_ensemble=False,
     show_pitch_roi=False,
+    field_setup=None,
     fps=DEFAULT_RECORDING_FPS,
 ):
     import cv2
@@ -771,6 +779,39 @@ def process_recorded_delivery(
         )
         review_frame_count += 1
 
+    field_setup = field_setup or {}
+    batter_handedness = field_setup.get("batter_handedness", "Right-hand batter")
+    bowler_arm = field_setup.get("bowler_arm", "Right-arm bowler")
+    camera_view = field_setup.get("camera_view", "Behind bowler")
+    fielders = field_setup.get("fielders", [])
+    wagon_wheel = generate_wagon_wheel_data(
+        ball_positions,
+        batter_handedness=batter_handedness,
+        mode="Use last part of trajectory",
+    )
+    nearest_fielder = find_nearest_fielder(wagon_wheel.get("shot_angle"), fielders)
+    wagon_wheel["nearest_fielder"] = nearest_fielder
+    wagon_wheel["suggested_adjustment"] = suggest_field_adjustment(wagon_wheel, nearest_fielder)
+
+    if field_setup:
+        save_field_setup(field_setup)
+        save_field_analysis_history(
+            {
+                "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
+                "source": "live_session",
+                "batter_handedness": batter_handedness,
+                "bowler_arm": bowler_arm,
+                "camera_view": camera_view,
+                "preset": field_setup.get("preset", "Custom"),
+                "simple_zone": wagon_wheel.get("simple_zone", "Unknown"),
+                "detailed_zone": wagon_wheel.get("detailed_zone", "Unknown"),
+                "shot_angle": "" if wagon_wheel.get("shot_angle") is None else f"{wagon_wheel['shot_angle']:.2f}",
+                "nearest_fielder": "" if nearest_fielder is None else nearest_fielder.get("name", ""),
+                "confidence": wagon_wheel.get("confidence", "Low"),
+                "corrected_zone": "",
+            }
+        )
+
     return {
         "success": True,
         "raw_video_bytes": raw_video_bytes,
@@ -799,6 +840,11 @@ def process_recorded_delivery(
         "estimated_bounce_frame": estimated_bounce_frame,
         "estimated_line": estimated_line,
         "estimated_length": estimated_length,
+        "wagon_wheel": wagon_wheel,
+        "field_setup": field_setup,
+        "batter_handedness": batter_handedness,
+        "bowler_arm": bowler_arm,
+        "camera_view": camera_view,
         "ball_detection_difficult": ball_detection_rate < 35 or low_confidence_ball_frames > 0,
         "review_frame_count": review_frame_count,
     }
@@ -928,6 +974,7 @@ def show_cricket_delivery_report(result):
 
 def show_analysis_output(result):
     from Backends.src.ui.ui_components import badge_row, metric_card, section_header, status_badge
+    from Backends.src.ui.field_map import draw_field_map
 
     section_header("Delivery Review")
 
@@ -1004,6 +1051,30 @@ def show_analysis_output(result):
             f"{result.get('roi_detection_time_ms', 0):.1f} ms",
         )
         timing_col3.metric("ROI Frames", result.get("roi_detected_frames", 0))
+
+    section_header("Batting Direction & Field")
+    wagon_wheel = result.get("wagon_wheel", {})
+    shot_angle = wagon_wheel.get("shot_angle")
+    nearest_fielder = wagon_wheel.get("nearest_fielder")
+    nearest_fielder_name = "Unknown" if nearest_fielder is None else nearest_fielder.get("name", "Unknown")
+    shot_cols = st.columns(4)
+    shot_cols[0].metric("Simple Zone", wagon_wheel.get("simple_zone", "Unknown"))
+    shot_cols[1].metric("Detailed Zone", wagon_wheel.get("detailed_zone", "Unknown"))
+    shot_cols[2].metric("Shot Angle", "Unknown" if shot_angle is None else f"{shot_angle:.1f} deg")
+    shot_cols[3].metric("Nearest Fielder", nearest_fielder_name)
+
+    context_cols = st.columns(3)
+    context_cols[0].metric("Batter", result.get("batter_handedness", "Unknown"))
+    context_cols[1].metric("Bowler Arm", result.get("bowler_arm", "Unknown"))
+    context_cols[2].metric("Confidence", wagon_wheel.get("confidence", "Low"))
+    st.info(wagon_wheel.get("suggested_adjustment", "No field adjustment suggestion available."))
+    st.pyplot(
+        draw_field_map(
+            shot_angle=shot_angle,
+            selected_zone=wagon_wheel.get("detailed_zone", "Unknown"),
+            fielders=result.get("field_setup", {}).get("fielders", []),
+        )
+    )
 
     show_delivery_report(result)
     show_cricket_delivery_report(result)
@@ -1116,6 +1187,7 @@ def show_live_session_page():
                     ),
                     use_ensemble=analysis_settings.get("use_ensemble", False),
                     show_pitch_roi=analysis_settings.get("show_pitch_roi", False),
+                    field_setup=analysis_settings.get("field_setup"),
                 )
                 st.session_state.live_last_result["active_model"] = analysis_settings.get(
                     "model_name",
@@ -1161,6 +1233,8 @@ def show_live_session_page():
     settings_tab, camera_tab = st.tabs(["Model Settings", "Camera & Controls"])
 
     with settings_tab:
+        from Backends.src.ui.field_map import draw_field_map, field_setup_editor
+
         selected_model_name = st.selectbox(
             "Choose detection model",
             list(model_options.keys()),
@@ -1216,6 +1290,16 @@ def show_live_session_page():
 
         info_panel(
             "If the selected model does not include stumps, line detection may remain Unknown."
+        )
+
+        section_header("Set Field Before Delivery")
+        field_setup = field_setup_editor("live_session", default_preset="Attacking Field")
+        st.pyplot(
+            draw_field_map(
+                shot_angle=None,
+                selected_zone="Unknown",
+                fielders=field_setup["fielders"],
+            )
         )
 
     with camera_tab:
@@ -1320,6 +1404,7 @@ def show_live_session_page():
             "show_pitch_roi": show_pitch_roi,
             "model_name": selected_model_name,
             "preset_name": preset_name,
+            "field_setup": field_setup,
         }
         st.session_state.live_status_message = (
             "Delivery captured. Camera session ended. Refresh or click Start New Delivery to record again."
