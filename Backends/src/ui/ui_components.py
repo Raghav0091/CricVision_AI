@@ -7,8 +7,6 @@ NAV_PAGES = [
     "Dashboard",
     "Live Session",
     "Video Analysis",
-    "Datasets",
-    "Training",
     "Results",
 ]
 
