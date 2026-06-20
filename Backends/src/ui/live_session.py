@@ -927,7 +927,9 @@ def show_cricket_delivery_report(result):
 
 
 def show_analysis_output(result):
-    st.subheader("Analysis Output")
+    from Backends.src.ui.ui_components import badge_row, metric_card, section_header, status_badge
+
+    section_header("Delivery Review")
 
     if result is None:
         st.info(
@@ -938,6 +940,17 @@ def show_analysis_output(result):
     if not result["success"]:
         st.error(result["error"])
         return
+
+    tracking_quality = result.get("overall_tracking_quality", "Poor")
+    tracking_tone = "green" if tracking_quality in {"Excellent", "Good"} else "amber"
+
+    badge_row(
+        [
+            status_badge(f"Model: {result.get('active_model', 'Unknown')}", "cyan"),
+            status_badge(f"Preset: {result.get('active_preset', 'Unknown')}", "blue"),
+            status_badge(f"Tracking: {tracking_quality}", tracking_tone),
+        ]
+    )
 
     outcome_col1, outcome_col2, outcome_col3 = st.columns(3)
     outcome_col1.metric("Line", result["estimated_line"])
@@ -950,41 +963,47 @@ def show_analysis_output(result):
 
     outcome_col3.metric("Bounce Point", bounce_text)
 
-    st.subheader("Processed Delivery Clip")
+    section_header("Processed Delivery Clip")
     st.video(result["processed_video_bytes"])
 
-    st.subheader("Analysis Stats")
-    stats_col1, stats_col2, stats_col3, stats_col4 = st.columns(4)
-    stats_col1.metric("Ball Frames", result["ball_detected_frames"])
-    stats_col2.metric("Stump Frames", result["stump_detected_frames"])
-    stats_col3.metric("Ball Detection Rate", f"{result['ball_detection_rate']:.1f}%")
-    stats_col4.metric("Low-Conf Review Frames", result.get("low_confidence_ball_frames", 0))
+    section_header("Analysis Stats")
+    stats_cols = st.columns(4)
+    with stats_cols[0]:
+        metric_card("Ball Frames", str(result["ball_detected_frames"]), "Detected ball frames")
+    with stats_cols[1]:
+        metric_card("Stump Frames", str(result["stump_detected_frames"]), "Detected stump frames")
+    with stats_cols[2]:
+        metric_card("Ball Detection Rate", f"{result['ball_detection_rate']:.1f}%", "Coverage across clip")
+    with stats_cols[3]:
+        metric_card("Low-Conf Frames", str(result.get("low_confidence_ball_frames", 0)), "Saved for review")
 
-    stats_col5, stats_col6, stats_col7, stats_col8 = st.columns(4)
-    stats_col5.metric("Ball Tracking Rate", f"{result.get('ball_tracking_rate', 0):.1f}%")
-    stats_col6.metric("Interpolated Ball Frames", result.get("interpolated_ball_frames", 0))
-    stats_col7.metric("Kalman Predicted Frames", result.get("kalman_predicted_frames", 0))
-    stats_col8.metric("Overall Tracking Quality", result.get("overall_tracking_quality", "Poor"))
-    st.metric("Review Frames", result.get("review_frame_count", 0))
+    stats_cols_2 = st.columns(4)
+    with stats_cols_2[0]:
+        metric_card("Tracking Rate", f"{result.get('ball_tracking_rate', 0):.1f}%", "Continuous ball path")
+    with stats_cols_2[1]:
+        metric_card("Interpolated", str(result.get("interpolated_ball_frames", 0)), "Filled trajectory gaps")
+    with stats_cols_2[2]:
+        metric_card("Kalman Frames", str(result.get("kalman_predicted_frames", 0)), "Predicted positions")
+    with stats_cols_2[3]:
+        metric_card("Review Frames", str(result.get("review_frame_count", 0)), "Training export candidates")
 
-    timing_col1, timing_col2, timing_col3 = st.columns(3)
-    timing_col1.metric(
-        "Full Frame Detection Time",
-        f"{result.get('full_frame_detection_time_ms', 0):.1f} ms",
-    )
-    timing_col2.metric(
-        "ROI Detection Time",
-        f"{result.get('roi_detection_time_ms', 0):.1f} ms",
-    )
-    timing_col3.metric("ROI Frames", result.get("roi_detected_frames", 0))
-
-    with st.expander("Debug Panel"):
+    with st.expander("Debug Panel", expanded=False):
         st.write(f"Active model: {result.get('active_model', 'Unknown')}")
         st.write(f"Active preset: {result.get('active_preset', 'Unknown')}")
         st.write(f"ROI size: {result.get('last_roi_size', 'Full frame')}")
         st.write(f"Ball detections: {result.get('total_ball_detections', 0)}")
         st.write(f"Tracker recoveries: {result.get('tracker_recoveries', 0)}")
         st.write(f"Average confidence: {result.get('average_ball_confidence', 0):.2f}")
+        timing_col1, timing_col2, timing_col3 = st.columns(3)
+        timing_col1.metric(
+            "Full Frame Detection Time",
+            f"{result.get('full_frame_detection_time_ms', 0):.1f} ms",
+        )
+        timing_col2.metric(
+            "ROI Detection Time",
+            f"{result.get('roi_detection_time_ms', 0):.1f} ms",
+        )
+        timing_col3.metric("ROI Frames", result.get("roi_detected_frames", 0))
 
     show_delivery_report(result)
     show_cricket_delivery_report(result)
@@ -996,7 +1015,7 @@ def show_analysis_output(result):
         mime="video/mp4",
     )
 
-    if st.button("Export Review Frames for Training"):
+    if st.button("Export Review Frames for Training", key="export_review_frames_live"):
         from Backends.src.ui.video_analysis import create_review_frames_zip
 
         zip_path, file_count = create_review_frames_zip()
@@ -1010,6 +1029,7 @@ def show_analysis_output(result):
                     data=zip_file,
                     file_name=zip_path.name,
                     mime="application/zip",
+                    key="download_review_frames_zip_live",
                 )
 
 
@@ -1046,9 +1066,19 @@ def initialize_live_session_state():
 
 
 def show_live_session_page():
-    st.title("Live Cricket Analysis")
-    st.markdown(
-        "Record one clean delivery from the live camera, then analyze it after the ball is bowled."
+    from Backends.src.ui.ui_components import (
+        badge_row,
+        card,
+        info_panel,
+        page_header,
+        section_header,
+        status_badge,
+        workflow_step,
+    )
+
+    page_header(
+        "Live Session",
+        "Record one clean delivery from the live camera, then analyze it after the ball is bowled.",
     )
 
     initialize_live_session_state()
@@ -1111,63 +1141,97 @@ def show_live_session_page():
         show_analysis_output(st.session_state.live_last_result)
         return
 
-    selected_model_name = st.selectbox(
-        "Choose detection model",
-        list(model_options.keys()),
+    section_header("Live Workflow")
+    workflow_cols = st.columns(5)
+    workflow_labels = [
+        "Start Camera",
+        "Start Delivery Recording",
+        "Bowl",
+        "Done / Analyze",
+        "Review Processed Delivery",
+    ]
+    for index, label in enumerate(workflow_labels):
+        with workflow_cols[index]:
+            workflow_step(index + 1, label)
+
+    info_panel(
+        "<strong>Live camera preview stays clean.</strong> Analysis overlays are generated after delivery."
     )
-    selected_model = model_options[selected_model_name]
-    selected_model_path = selected_model["path"]
-    use_ensemble = selected_model.get("ensemble", False)
 
-    if not use_ensemble and not selected_model_path.exists():
-        st.error(f"Model not found: {selected_model_path}")
-        st.info("Make sure the selected model file exists in the correct Models folder.")
-        return
+    settings_tab, camera_tab = st.tabs(["Model Settings", "Camera & Controls"])
 
-    st.success(f"Model ready: {selected_model_name}")
-    if use_ensemble:
-        from Backends.src.ui.video_analysis import get_available_ensemble_model_names
+    with settings_tab:
+        selected_model_name = st.selectbox(
+            "Choose detection model",
+            list(model_options.keys()),
+            key="live_session_model",
+        )
+        selected_model = model_options[selected_model_name]
+        selected_model_path = selected_model["path"]
+        use_ensemble = selected_model.get("ensemble", False)
 
-        active_model_names = get_available_ensemble_model_names()
+        if not use_ensemble and not selected_model_path.exists():
+            st.error(f"Model not found: {selected_model_path}")
+            info_panel("Make sure the selected model file exists in the correct Models folder.")
+            return
 
-        if active_model_names:
-            st.caption("Active ensemble models: " + ", ".join(active_model_names))
+        badge_row([status_badge(f"Model: {selected_model_name}", "cyan")])
+
+        if use_ensemble:
+            from Backends.src.ui.video_analysis import get_available_ensemble_model_names
+
+            active_model_names = get_available_ensemble_model_names()
+
+            if active_model_names:
+                st.caption("Active ensemble models: " + ", ".join(active_model_names))
+            else:
+                st.warning("No configured ensemble model files were found.")
         else:
-            st.warning("No configured ensemble model files were found.")
-    else:
-        st.caption(f"Model path: {selected_model_path}")
+            st.caption(f"Model path: {selected_model_path}")
 
-    st.info("If selected model does not include stumps, line detection may be Unknown.")
-
-    controls_col, guidance_col = st.columns([1, 1])
-
-    with controls_col:
         preset_name = st.selectbox(
             "Detection preset",
             list(DETECTION_PRESETS.keys()),
             index=1,
+            key="live_session_preset",
         )
         active_preset = DETECTION_PRESETS[preset_name]
         confidence = active_preset["confidence"]
         image_size = active_preset["imgsz"]
+        badge_row([status_badge(f"Preset: {preset_name}", "blue")])
 
         st.caption(
             f"Active preset: {preset_name} | imgsz={image_size} | confidence={confidence:.2f}"
         )
 
-        show_pitch_roi = st.checkbox("Show Pitch ROI", value=False)
-
-    with guidance_col:
-        st.warning(
-            "Live preview stays clean. Detection boxes and trajectory are drawn only after you click Done / Analyze Delivery."
+        show_pitch_roi = st.checkbox("Show Pitch ROI", value=False, key="live_session_show_roi")
+        badge_row(
+            [
+                status_badge(
+                    f"ROI Overlay: {'On' if show_pitch_roi else 'Off'}",
+                    "green" if show_pitch_roi else "muted",
+                )
+            ]
         )
-        st.info(
-            "Phone users: open this Streamlit app in your phone browser, allow camera access, use landscape mode, and use the back camera behind the bowler."
+
+        info_panel(
+            "If the selected model does not include stumps, line detection may remain Unknown."
+        )
+
+    with camera_tab:
+        card(
+            title="Camera Tips",
+            content_html=(
+                "Phone users: open this Streamlit app in your phone browser, allow camera access, "
+                "use landscape mode, and use the back camera behind the bowler."
+            ),
         )
 
     if st.session_state.live_status_message:
         st.info(st.session_state.live_status_message)
         st.session_state.live_status_message = None
+
+    section_header("Step 1 — Start Camera")
 
     try:
         from streamlit_webrtc import RTCConfiguration, webrtc_streamer
@@ -1208,6 +1272,7 @@ def show_live_session_page():
         recorder = webrtc_context.video_processor
     recording_state = st.session_state.live_recording_state
 
+    section_header("Steps 2–4 — Record & Analyze")
     button_col1, button_col2, button_col3 = st.columns([1, 1, 1])
 
     with button_col1:
@@ -1275,4 +1340,14 @@ def show_live_session_page():
     else:
         st.info("Start the camera stream to enable delivery recording.")
 
-    show_analysis_output(st.session_state.live_last_result)
+    if st.session_state.live_last_result is None:
+        section_header("Step 5 — Review Processed Delivery")
+        card(
+            title="Waiting for Analysis",
+            content_html=(
+                "After you click <strong>Done / Analyze Delivery</strong>, the processed clip, "
+                "delivery report, stats, and download button will appear here."
+            ),
+        )
+    else:
+        show_analysis_output(st.session_state.live_last_result)

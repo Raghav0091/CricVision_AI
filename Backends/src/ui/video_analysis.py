@@ -1701,178 +1701,220 @@ def process_video(
     }
 
 
-def show_video_analysis_page():
-    st.title("🎥 Cricket Video Analysis")
-    st.markdown(
-        "Upload a bowling clip. CricVision AI will detect balls, stumps, draw the ball trajectory, and estimate the bounce/pitch point."
+def show_video_analysis_results(result, selected_model_name, preset_name, show_pitch_roi):
+    from Backends.src.ui.ui_components import badge_row, info_panel, metric_card, section_header, status_badge
+
+    tracking_quality = result.get("overall_tracking_quality", "Poor")
+    tracking_tone = "green" if tracking_quality in {"Excellent", "Good"} else "amber"
+
+    badge_row(
+        [
+            status_badge(f"Model: {result.get('active_model', selected_model_name)}", "cyan"),
+            status_badge(f"Preset: {result.get('active_preset', preset_name)}", "blue"),
+            status_badge(
+                f"ROI: {'Enabled' if show_pitch_roi else 'Hidden'}",
+                "green" if show_pitch_roi else "muted",
+            ),
+            status_badge(f"Tracking: {tracking_quality}", tracking_tone),
+        ]
     )
+
+    section_header("Processed Video")
+    with open(result["output_path"], "rb") as video_file:
+        video_bytes = video_file.read()
+    st.video(video_bytes)
+
+    section_header("Analysis Stats")
+    stat_cols = st.columns(4)
+    with stat_cols[0]:
+        metric_card("Total Frames", str(result["total_frames"]), "Processed clip length")
+    with stat_cols[1]:
+        metric_card("Ball Frames", str(result["ball_detected_frames"]), "Frames with ball detections")
+    with stat_cols[2]:
+        metric_card("Stump Frames", str(result["stump_detected_frames"]), "Frames with stump detections")
+    with stat_cols[3]:
+        metric_card("Ball Detection Rate", f"{result['ball_detection_rate']:.1f}%", "Detection coverage")
+
+    stat_cols_2 = st.columns(4)
+    with stat_cols_2[0]:
+        metric_card("Ball Tracking Rate", f"{result.get('ball_tracking_rate', 0):.1f}%", "Continuous tracking")
+    with stat_cols_2[1]:
+        metric_card("Avg Confidence", f"{result['average_ball_confidence']:.2f}", "Mean ball confidence")
+    with stat_cols_2[2]:
+        metric_card("Recoveries", str(result.get("tracker_recoveries", 0)), "Local re-detection events")
+    with stat_cols_2[3]:
+        metric_card("Review Frames", str(result.get("review_frame_count", 0)), "Saved for training review")
+
+    timing_cols = st.columns(3)
+    with timing_cols[0]:
+        metric_card(
+            "Full Frame Time",
+            f"{result.get('full_frame_detection_time_ms', 0):.1f} ms",
+            "Average full-frame detection",
+        )
+    with timing_cols[1]:
+        metric_card(
+            "ROI Time",
+            f"{result.get('roi_detection_time_ms', 0):.1f} ms",
+            "Average ROI detection",
+        )
+    with timing_cols[2]:
+        metric_card("ROI Frames", str(result.get("roi_detected_frames", 0)), result.get("last_roi_size", "Full frame"))
+
+    section_header("Bounce / Pitch Estimate")
+    calib_col1, calib_col2 = st.columns(2)
+    calib_col1.metric("Calibration", result.get("calibration_status", "Not calibrated"))
+    calib_col2.metric("Calibration Mode", result.get("calibration_source", "None"))
+
+    if result.get("calibration_warning"):
+        st.warning(result["calibration_warning"])
+
+    if result["estimated_bounce_point"] is not None:
+        bx, by = result["estimated_bounce_point"]
+        bounce_cols = st.columns(5)
+        bounce_cols[0].metric("Bounce Frame", result["estimated_bounce_frame"])
+        bounce_cols[1].metric("Bounce X", bx)
+        bounce_cols[2].metric("Bounce Y", by)
+        bounce_cols[3].metric("Estimated Line", result["estimated_line"])
+        bounce_cols[4].metric("Estimated Length", result["estimated_length"])
+
+        normalized_bounce = result.get("pitch_normalized_bounce_point")
+        if normalized_bounce is not None:
+            pitch_x, pitch_y = normalized_bounce
+            norm_col1, norm_col2 = st.columns(2)
+            norm_col1.metric("Pitch X", f"{pitch_x:.2f}")
+            norm_col2.metric("Pitch Y", f"{pitch_y:.2f}")
+
+        st.success("Estimated bounce/pitch point found.")
+    else:
+        st.warning("Bounce/pitch point was not found. Try a clearer or longer clip.")
+
+    section_header("Pitch Map")
+    pitch_map_fig = draw_pitch_map(
+        result.get("pitch_normalized_bounce_point"),
+        result.get("estimated_line", "Unknown"),
+        result.get("estimated_length", "Unknown"),
+    )
+    st.pyplot(pitch_map_fig)
+
+    show_cricket_delivery_report(result)
+    st.caption(f"Saved output: {result['output_path']}")
+
+    with open(result["output_path"], "rb") as file:
+        st.download_button(
+            label="Download Processed Video",
+            data=file,
+            file_name="cricvision_processed_video.mp4",
+            mime="video/mp4",
+        )
+
+    if st.button("Export Review Frames for Training", key="export_review_frames_video"):
+        zip_path, file_count = create_review_frames_zip()
+
+        if file_count == 0:
+            st.warning("No review frames are available yet.")
+        else:
+            with open(zip_path, "rb") as zip_file:
+                st.download_button(
+                    label="Download Review Frames ZIP",
+                    data=zip_file,
+                    file_name=zip_path.name,
+                    mime="application/zip",
+                    key="download_review_frames_zip_video",
+                )
+
+
+def show_video_analysis_page():
+    from Backends.src.ui.ui_components import badge_row, card, info_panel, page_header, section_header, status_badge
+
+    page_header(
+        "Video Analysis",
+        "Upload a bowling clip. CricVision AI will detect balls, stumps, draw the ball trajectory, and estimate the bounce/pitch point.",
+    )
+
+    if "video_analysis_result" not in st.session_state:
+        st.session_state.video_analysis_result = None
+    if "video_analysis_settings" not in st.session_state:
+        st.session_state.video_analysis_settings = {}
 
     model_options = get_model_options()
-
-    selected_model_name = st.selectbox(
-        "Choose detection model",
-        list(model_options.keys()),
+    tab_upload, tab_model, tab_debug, tab_results = st.tabs(
+        ["Upload", "Model Settings", "Advanced Debug", "Results"]
     )
 
-    selected_model = model_options[selected_model_name]
-    selected_model_path = selected_model["path"]
-    use_ensemble = selected_model.get("ensemble", False)
+    with tab_model:
+        section_header("Detection Model")
+        selected_model_name = st.selectbox(
+            "Choose detection model",
+            list(model_options.keys()),
+            key="video_analysis_model",
+        )
 
-    if not use_ensemble and not selected_model_path.exists():
-        st.error(f"Model not found: {selected_model_path}")
-        st.info("Make sure your model file is inside the correct Models folder.")
-        st.stop()
+        selected_model = model_options[selected_model_name]
+        selected_model_path = selected_model["path"]
+        use_ensemble = selected_model.get("ensemble", False)
 
-    st.success(f"Loaded model: {selected_model_name}")
-    if use_ensemble:
-        active_model_names = get_available_ensemble_model_names()
+        if not use_ensemble and not selected_model_path.exists():
+            st.error(f"Model not found: {selected_model_path}")
+            info_panel("Make sure your model file is inside the correct Models folder.")
+            st.stop()
 
-        if active_model_names:
-            st.caption("Active ensemble models: " + ", ".join(active_model_names))
-        else:
-            st.warning("No configured ensemble model files were found.")
-    else:
-        st.caption(f"Model path: {selected_model_path}")
+        badge_row([status_badge(f"Model: {selected_model_name}", "cyan")])
 
-    st.info("If selected model does not include stumps, line detection may be Unknown.")
-
-    uploaded_video = st.file_uploader(
-        "Upload bowling video from phone or camera",
-        type=["mp4", "mov", "avi", "mkv"],
-    )
-
-    preset_name = st.selectbox(
-        "Detection preset",
-        list(DETECTION_PRESETS.keys()),
-        index=1,
-    )
-    active_preset = DETECTION_PRESETS[preset_name]
-    confidence = active_preset["confidence"]
-    image_size = active_preset["imgsz"]
-    st.caption(
-        f"Active preset: {preset_name} | imgsz={image_size} | confidence={confidence:.2f}"
-    )
-
-    show_pitch_roi = st.checkbox("Show Pitch ROI", value=False)
-    calibration_mode = st.radio(
-        "Pitch calibration mode",
-        [
-            "Auto calibration using detected stumps",
-            "Manual calibration using 4 pitch corner points",
-        ],
-        index=0,
-    )
-
-    st.info(
-        "For phone videos, use landscape mode if possible. Good lighting and a stable camera will improve tracking."
-    )
-
-    if uploaded_video is not None:
-        st.subheader("Original Video")
-        st.video(uploaded_video)
-        manual_pitch_points = None
-
-        if calibration_mode.startswith("Manual"):
-            st.subheader("Manual Pitch Calibration")
-            first_frame = extract_first_video_frame(uploaded_video)
-
-            if first_frame is None:
-                st.warning("Could not read the first frame for manual calibration.")
+        if use_ensemble:
+            active_model_names = get_available_ensemble_model_names()
+            if active_model_names:
+                info_panel("Active ensemble models: " + ", ".join(active_model_names))
             else:
-                manual_pitch_points = show_manual_pitch_point_inputs(first_frame)
+                st.warning("No configured ensemble model files were found.")
+        else:
+            st.caption(f"Model path: {selected_model_path}")
 
-        if st.button("Analyze Video", type="primary"):
-            uploaded_video.seek(0)
+        info_panel(
+            "If the selected model does not include stumps, line detection may remain Unknown."
+        )
 
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_input:
-                temp_input.write(uploaded_video.read())
-                input_video_path = Path(temp_input.name)
+        section_header("Detection Preset")
+        preset_name = st.selectbox(
+            "Detection preset",
+            list(DETECTION_PRESETS.keys()),
+            index=1,
+            key="video_analysis_preset",
+        )
+        active_preset = DETECTION_PRESETS[preset_name]
+        confidence = active_preset["confidence"]
+        image_size = active_preset["imgsz"]
+        badge_row([status_badge(f"Preset: {preset_name}", "blue")])
 
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        st.caption(
+            f"Active preset: {preset_name} | imgsz={image_size} | confidence={confidence:.2f}"
+        )
 
-            OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    with tab_debug:
+        section_header("Debug & Calibration")
+        show_pitch_roi = st.checkbox("Show Pitch ROI", value=False, key="video_analysis_show_roi")
+        calibration_mode = st.radio(
+            "Pitch calibration mode",
+            [
+                "Auto calibration using detected stumps",
+                "Manual calibration using 4 pitch corner points",
+            ],
+            index=0,
+            key="video_analysis_calibration_mode",
+        )
+        badge_row(
+            [
+                status_badge(f"ROI Overlay: {'On' if show_pitch_roi else 'Off'}", "green" if show_pitch_roi else "muted"),
+                status_badge(
+                    "Calibration: Auto" if calibration_mode.startswith("Auto") else "Calibration: Manual",
+                    "blue",
+                ),
+            ]
+        )
 
-            raw_output_path = OUTPUT_DIR / f"raw_cricvision_analysis_{timestamp}.mp4"
-            browser_output_path = OUTPUT_DIR / f"cricvision_analysis_{timestamp}.mp4"
-
-            with st.spinner("Analyzing video..."):
-                result = process_video(
-                    video_path=input_video_path,
-                    output_path=raw_output_path,
-                    model_path=selected_model_path,
-                    confidence=confidence,
-                    imgsz=image_size,
-                    use_ensemble=use_ensemble,
-                    show_pitch_roi=show_pitch_roi,
-                    calibration_mode=calibration_mode,
-                    manual_pitch_points=manual_pitch_points,
-                )
-                result["active_preset"] = preset_name
-                result["active_model"] = selected_model_name
-
-            if not result["success"]:
-                st.error(result["error"])
-                return
-
-            try:
-                final_video_path = convert_to_browser_mp4(
-                    input_path=result["output_path"],
-                    output_path=browser_output_path,
-                )
-
-                result["output_path"] = final_video_path
-
-            except Exception as e:
-                st.error(f"Video conversion failed: {e}")
-                st.info(
-                    "The analysis worked, but the final video could not be converted for browser playback."
-                )
-                return
-
-            st.success("Video analysis completed.")
-
-            st.subheader("Processed Video")
-
-            with open(result["output_path"], "rb") as video_file:
-                video_bytes = video_file.read()
-
-            st.video(video_bytes)
-
-            st.subheader("Analysis Stats")
-
-            col1, col2, col3, col4 = st.columns(4)
-
-            col1.metric("Total Frames", result["total_frames"])
-            col2.metric("Ball Frames", result["ball_detected_frames"])
-            col3.metric("Stump Frames", result["stump_detected_frames"])
-            col4.metric("Ball Detection Rate", f"{result['ball_detection_rate']:.1f}%")
-
-            col5, col6, col7 = st.columns(3)
-
-            col5.metric("Total Ball Detections", result["total_ball_detections"])
-            col6.metric("Total Stump Detections", result["total_stump_detections"])
-            col7.metric("Avg Ball Confidence", f"{result['average_ball_confidence']:.2f}")
-
-            col8, col9, col10, col11 = st.columns(4)
-            col8.metric("Ball Tracking Rate", f"{result.get('ball_tracking_rate', 0):.1f}%")
-            col9.metric("Interpolated Ball Frames", result.get("interpolated_ball_frames", 0))
-            col10.metric("Kalman Predicted Frames", result.get("kalman_predicted_frames", 0))
-            col11.metric("Overall Tracking Quality", result.get("overall_tracking_quality", "Poor"))
-
-            st.metric("Review Frames", result.get("review_frame_count", 0))
-
-            timing_col1, timing_col2, timing_col3 = st.columns(3)
-            timing_col1.metric(
-                "Full Frame Detection Time",
-                f"{result.get('full_frame_detection_time_ms', 0):.1f} ms",
-            )
-            timing_col2.metric(
-                "ROI Detection Time",
-                f"{result.get('roi_detection_time_ms', 0):.1f} ms",
-            )
-            timing_col3.metric("ROI Frames", result.get("roi_detected_frames", 0))
-
-            with st.expander("Debug Panel"):
+        with st.expander("Runtime Debug Panel", expanded=False):
+            result = st.session_state.video_analysis_result
+            if result and result.get("success"):
                 st.write(f"Active model: {result.get('active_model', selected_model_name)}")
                 st.write(f"Active preset: {result.get('active_preset', preset_name)}")
                 st.write(f"ROI size: {result.get('last_roi_size', 'Full frame')}")
@@ -1883,72 +1925,104 @@ def show_video_analysis_page():
                     f"Calibration: {result.get('calibration_status', 'Not calibrated')} "
                     f"({result.get('calibration_source', 'None')})"
                 )
-
-            st.subheader("Bounce / Pitch Estimate")
-
-            calib_col1, calib_col2 = st.columns(2)
-            calib_col1.metric("Calibration", result.get("calibration_status", "Not calibrated"))
-            calib_col2.metric("Calibration Mode", result.get("calibration_source", "None"))
-
-            if result.get("calibration_warning"):
-                st.warning(result["calibration_warning"])
-
-            if result["estimated_bounce_point"] is not None:
-                bx, by = result["estimated_bounce_point"]
-
-                col11, col12, col13, col14, col15 = st.columns(5)
-
-                col11.metric("Bounce Frame", result["estimated_bounce_frame"])
-                col12.metric("Bounce X", bx)
-                col13.metric("Bounce Y", by)
-                col14.metric("Estimated Line", result["estimated_line"])
-                col15.metric("Estimated Length", result["estimated_length"])
-
-                normalized_bounce = result.get("pitch_normalized_bounce_point")
-
-                if normalized_bounce is not None:
-                    pitch_x, pitch_y = normalized_bounce
-                    norm_col1, norm_col2 = st.columns(2)
-                    norm_col1.metric("Pitch X", f"{pitch_x:.2f}")
-                    norm_col2.metric("Pitch Y", f"{pitch_y:.2f}")
-                
-                st.success("Estimated bounce/pitch point found.")
             else:
-                st.warning("Bounce/pitch point was not found. Try a clearer or longer clip.")
+                st.caption("Run an analysis to populate debug metrics.")
 
-            st.subheader("Pitch Map")
-            pitch_map_fig = draw_pitch_map(
-                result.get("pitch_normalized_bounce_point"),
-                result.get("estimated_line", "Unknown"),
-                result.get("estimated_length", "Unknown"),
-            )
-            st.pyplot(pitch_map_fig)
+    with tab_upload:
+        section_header("Upload Delivery Clip")
+        info_panel(
+            "For phone videos, use landscape mode if possible. Good lighting and a stable camera will improve tracking."
+        )
+        uploaded_video = st.file_uploader(
+            "Upload bowling video from phone or camera",
+            type=["mp4", "mov", "avi", "mkv"],
+            key="video_analysis_upload",
+        )
 
-            show_cricket_delivery_report(result)
+        manual_pitch_points = None
+        if uploaded_video is not None:
+            section_header("Original Video")
+            st.video(uploaded_video)
 
-            st.caption(f"Saved output: {result['output_path']}")
+            if calibration_mode.startswith("Manual"):
+                section_header("Manual Pitch Calibration")
+                first_frame = extract_first_video_frame(uploaded_video)
 
-            with open(result["output_path"], "rb") as file:
-                st.download_button(
-                    label="Download Processed Video",
-                    data=file,
-                    file_name="cricvision_processed_video.mp4",
-                    mime="video/mp4",
-                )
-
-            if st.button("Export Review Frames for Training"):
-                zip_path, file_count = create_review_frames_zip()
-
-                if file_count == 0:
-                    st.warning("No review frames are available yet.")
+                if first_frame is None:
+                    st.warning("Could not read the first frame for manual calibration.")
                 else:
-                    with open(zip_path, "rb") as zip_file:
-                        st.download_button(
-                            label="Download Review Frames ZIP",
-                            data=zip_file,
-                            file_name=zip_path.name,
-                            mime="application/zip",
+                    manual_pitch_points = show_manual_pitch_point_inputs(first_frame)
+
+            if st.button("Analyze Video", type="primary", key="analyze_video_button"):
+                uploaded_video.seek(0)
+
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_input:
+                    temp_input.write(uploaded_video.read())
+                    input_video_path = Path(temp_input.name)
+
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+                raw_output_path = OUTPUT_DIR / f"raw_cricvision_analysis_{timestamp}.mp4"
+                browser_output_path = OUTPUT_DIR / f"cricvision_analysis_{timestamp}.mp4"
+
+                with st.spinner("Analyzing video..."):
+                    result = process_video(
+                        video_path=input_video_path,
+                        output_path=raw_output_path,
+                        model_path=selected_model_path,
+                        confidence=confidence,
+                        imgsz=image_size,
+                        use_ensemble=use_ensemble,
+                        show_pitch_roi=show_pitch_roi,
+                        calibration_mode=calibration_mode,
+                        manual_pitch_points=manual_pitch_points,
+                    )
+                    result["active_preset"] = preset_name
+                    result["active_model"] = selected_model_name
+
+                if not result["success"]:
+                    st.error(result["error"])
+                    st.session_state.video_analysis_result = None
+                else:
+                    try:
+                        final_video_path = convert_to_browser_mp4(
+                            input_path=result["output_path"],
+                            output_path=browser_output_path,
                         )
+                        result["output_path"] = final_video_path
+                        st.session_state.video_analysis_result = result
+                        st.session_state.video_analysis_settings = {
+                            "selected_model_name": selected_model_name,
+                            "preset_name": preset_name,
+                            "show_pitch_roi": show_pitch_roi,
+                        }
+                        st.success("Video analysis completed. Open the Results tab to review.")
+                    except Exception as error:
+                        st.error(f"Video conversion failed: {error}")
+                        info_panel(
+                            "The analysis worked, but the final video could not be converted for browser playback."
+                        )
+                        st.session_state.video_analysis_result = None
+
+    with tab_results:
+        result = st.session_state.video_analysis_result
+        settings = st.session_state.video_analysis_settings
+
+        if result is None or not result.get("success"):
+            card(
+                title="No Results Yet",
+                content_html=(
+                    "Upload a clip in the <strong>Upload</strong> tab, configure model settings, "
+                    "then click <strong>Analyze Video</strong> to generate processed video and reports."
+                ),
+            )
+        else:
+            show_video_analysis_results(
+                result=result,
+                selected_model_name=settings.get("selected_model_name", result.get("active_model", "Unknown")),
+                preset_name=settings.get("active_preset", settings.get("preset_name", result.get("active_preset", "Unknown"))),
+                show_pitch_roi=settings.get("show_pitch_roi", False),
+            )
                 
 def estimate_line_from_stumps(bounce_point, stump_detections):
     """
