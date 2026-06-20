@@ -1110,13 +1110,13 @@ def show_current_field_setup_preview(field_setup, draw_field_map):
 
     section_header("Current Field Setup")
     setup_cols = st.columns(4)
-    setup_cols[0].metric("Preset", field_setup.get("preset", "Attacking Field"))
+    setup_cols[0].metric("Preset", field_setup.get("preset", "Attacking Test Field"))
     setup_cols[1].metric("Batter", field_setup.get("batter_handedness", "Right-hand batter"))
     setup_cols[2].metric("Bowler Arm", field_setup.get("bowler_arm", "Right-arm bowler"))
     setup_cols[3].metric("Camera View", field_setup.get("camera_view", "Behind bowler"))
 
     if field_setup.get("is_default_setup"):
-        st.info("No saved field setup found. Using default Attacking Field.")
+        st.info("No saved field setup found. Using default Attacking Test Field.")
 
     st.info("Go to Field Map page to adjust field setup.")
     st.pyplot(
