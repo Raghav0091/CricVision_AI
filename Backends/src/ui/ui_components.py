@@ -7,6 +7,7 @@ NAV_PAGES = [
     "Dashboard",
     "Live Session",
     "Video Analysis",
+    "Field Map",
     "Results",
 ]
 
@@ -453,7 +454,7 @@ def sidebar_branding():
 
 def render_sidebar_nav(current_page=None):
     sidebar_branding()
-    labels = [f"{NAV_ICONS[name]}  {name}" for name in NAV_PAGES]
+    labels = [f"{NAV_ICONS.get(name, name)}  {name}" for name in NAV_PAGES]
     label_to_page = dict(zip(labels, NAV_PAGES))
 
     selected_label = st.sidebar.radio(

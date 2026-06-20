@@ -18,6 +18,7 @@ from Backends.src.analysis.cricket_agent import (
     generate_coaching_feedback,
     generate_delivery_report,
 )
+from Backends.src.analysis.field_zones import FIELD_ZONES, generate_wagon_wheel_data
 from Backends.src.tracking.ball_tracking_utils import (
     BallKalmanTracker,
     calculate_tracking_quality,
@@ -34,6 +35,7 @@ EXTERNAL_BALL_MODEL_PATH = Path("Models/cricket_objects/best_external.pt")
 OUTPUT_DIR = Path("outputs/video_analysis")
 REVIEW_FRAMES_DIR = Path("outputs/review_frames")
 REVIEW_FRAMES_CSV = REVIEW_FRAMES_DIR / "review_frames.csv"
+FIELD_ZONE_CORRECTIONS_CSV = Path("outputs/field_zone_corrections.csv")
 ENSEMBLE_MODEL_NAME = "Ensemble: All Ball Models + Stumps"
 LOW_CONFIDENCE_REVIEW_THRESHOLD = 0.35
 MAX_REVIEW_FRAMES_PER_ANALYSIS = 80
@@ -789,6 +791,28 @@ def write_review_metadata(row):
         writer.writerow(row)
 
 
+def save_field_zone_correction(row):
+    FIELD_ZONE_CORRECTIONS_CSV.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "timestamp",
+        "estimated_zone",
+        "corrected_zone",
+        "shot_angle",
+        "confidence",
+        "mode",
+        "source",
+    ]
+    write_header = not FIELD_ZONE_CORRECTIONS_CSV.exists()
+
+    with open(FIELD_ZONE_CORRECTIONS_CSV, "a", newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+
+        if write_header:
+            writer.writeheader()
+
+        writer.writerow(row)
+
+
 def save_review_frame(
     frame,
     timestamp,
@@ -1047,6 +1071,7 @@ def ensure_delivery_report_fields(result):
     result.setdefault("calibration_status", "Not calibrated")
     result.setdefault("calibration_source", "None")
     result.setdefault("calibration_warning", "Confidence warning: pitch calibration is missing.")
+    result.setdefault("wagon_wheel", {})
 
 
 def show_cricket_delivery_report(result):
@@ -1084,6 +1109,8 @@ def process_video(
     show_pitch_roi=False,
     calibration_mode="Auto calibration using detected stumps",
     manual_pitch_points=None,
+    shot_trajectory_mode="Use last part of trajectory",
+    manual_contact_frame=None,
 ):
     model = None
     ensemble_models = []
@@ -1634,6 +1661,12 @@ def process_video(
         tracking_quality["interpolated_frames"],
         kalman_predicted_frames,
     )
+    wagon_wheel = generate_wagon_wheel_data(
+        ball_positions,
+        mode=shot_trajectory_mode,
+        manual_contact_frame=manual_contact_frame,
+    )
+    wagon_wheel["mode"] = shot_trajectory_mode
     average_full_frame_detection_time = 0
     average_roi_detection_time = 0
 
@@ -1696,6 +1729,7 @@ def process_video(
         "calibration_warning": calibration_warning,
         "estimated_line": estimated_line,
         "estimated_length": estimated_length,
+        "wagon_wheel": wagon_wheel,
         "review_frame_count": review_frame_count,
         "review_frames_dir": REVIEW_FRAMES_DIR,
     }
@@ -1703,6 +1737,7 @@ def process_video(
 
 def show_video_analysis_results(result, selected_model_name, preset_name, show_pitch_roi):
     from Backends.src.ui.ui_components import badge_row, info_panel, metric_card, section_header, status_badge
+    from Backends.src.ui.field_map import draw_field_map
 
     tracking_quality = result.get("overall_tracking_quality", "Poor")
     tracking_tone = "green" if tracking_quality in {"Excellent", "Good"} else "amber"
@@ -1796,6 +1831,58 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
         result.get("estimated_length", "Unknown"),
     )
     st.pyplot(pitch_map_fig)
+
+    section_header("Batting Direction")
+    wagon_wheel = result.get("wagon_wheel", {})
+    shot_angle = wagon_wheel.get("shot_angle")
+    shot_zone = wagon_wheel.get("estimated_zone", "Unknown")
+    nearest_zone = wagon_wheel.get("nearest_zone", "Unknown")
+    shot_confidence = wagon_wheel.get("confidence", "Low")
+
+    shot_cols = st.columns(4)
+    shot_cols[0].metric("Estimated Shot Zone", shot_zone)
+    shot_cols[1].metric("Shot Angle", "Unknown" if shot_angle is None else f"{shot_angle:.1f} deg")
+    shot_cols[2].metric("Nearest Field Zone", nearest_zone)
+    shot_cols[3].metric("Confidence", shot_confidence)
+
+    if not wagon_wheel.get("success"):
+        st.warning(wagon_wheel.get("message", "Shot direction is uncertain."))
+
+    st.pyplot(
+        draw_field_map(
+            shot_angle=shot_angle,
+            selected_zone=shot_zone,
+            fielders=[],
+        )
+    )
+
+    correction_col1, correction_col2 = st.columns([2, 1])
+    with correction_col1:
+        corrected_zone = st.selectbox(
+            "Manual correction: actual field zone",
+            ["No correction"] + FIELD_ZONES,
+            key="video_analysis_field_zone_correction",
+        )
+
+    with correction_col2:
+        save_correction = st.button("Save Zone Correction", key="save_field_zone_correction")
+
+    if save_correction:
+        if corrected_zone == "No correction":
+            st.warning("Choose an actual zone before saving a correction.")
+        else:
+            save_field_zone_correction(
+                {
+                    "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
+                    "estimated_zone": shot_zone,
+                    "corrected_zone": corrected_zone,
+                    "shot_angle": "" if shot_angle is None else f"{shot_angle:.2f}",
+                    "confidence": shot_confidence,
+                    "mode": wagon_wheel.get("mode", ""),
+                    "source": "video_analysis",
+                }
+            )
+            st.success("Field-zone correction saved for future review.")
 
     show_cricket_delivery_report(result)
     st.caption(f"Saved output: {result['output_path']}")
@@ -1902,6 +1989,27 @@ def show_video_analysis_page():
             index=0,
             key="video_analysis_calibration_mode",
         )
+        shot_trajectory_mode = st.radio(
+            "Shot direction trajectory",
+            [
+                "Use full trajectory",
+                "Use last part of trajectory",
+                "Manually mark bat contact frame",
+            ],
+            index=1,
+            key="video_analysis_shot_trajectory_mode",
+        )
+        manual_contact_frame = None
+
+        if shot_trajectory_mode == "Manually mark bat contact frame":
+            manual_contact_frame = st.number_input(
+                "Bat contact frame",
+                min_value=0,
+                value=0,
+                step=1,
+                key="video_analysis_bat_contact_frame",
+            )
+
         badge_row(
             [
                 status_badge(f"ROI Overlay: {'On' if show_pitch_roi else 'Off'}", "green" if show_pitch_roi else "muted"),
@@ -1909,6 +2017,7 @@ def show_video_analysis_page():
                     "Calibration: Auto" if calibration_mode.startswith("Auto") else "Calibration: Manual",
                     "blue",
                 ),
+                status_badge(f"Shot: {shot_trajectory_mode}", "cyan"),
             ]
         )
 
@@ -1976,6 +2085,8 @@ def show_video_analysis_page():
                         show_pitch_roi=show_pitch_roi,
                         calibration_mode=calibration_mode,
                         manual_pitch_points=manual_pitch_points,
+                        shot_trajectory_mode=shot_trajectory_mode,
+                        manual_contact_frame=manual_contact_frame,
                     )
                     result["active_preset"] = preset_name
                     result["active_model"] = selected_model_name
@@ -1995,6 +2106,7 @@ def show_video_analysis_page():
                             "selected_model_name": selected_model_name,
                             "preset_name": preset_name,
                             "show_pitch_roi": show_pitch_roi,
+                            "shot_trajectory_mode": shot_trajectory_mode,
                         }
                         st.success("Video analysis completed. Open the Results tab to review.")
                     except Exception as error:

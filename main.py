@@ -27,6 +27,11 @@ elif page == "Video Analysis":
 
     show_video_analysis_page()
 
+elif page == "Field Map":
+    from Backends.src.ui.field_map import show_field_map_page
+
+    show_field_map_page()
+
 elif page == "Datasets":
     from Backends.src.ui.datasets_page import show_datasets_page
 
