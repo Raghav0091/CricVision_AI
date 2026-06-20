@@ -398,10 +398,56 @@ def suggest_field_adjustment(wagon_wheel, nearest_fielder):
     )
 
 
-def save_field_setup(field_setup):
-    FIELD_SETUP_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(FIELD_SETUP_PATH, "w", encoding="utf-8") as setup_file:
+def save_field_setup(field_setup, path=FIELD_SETUP_PATH):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as setup_file:
         json.dump(field_setup, setup_file, indent=2)
+
+
+def load_field_setup(path=FIELD_SETUP_PATH):
+    path = Path(path)
+
+    if not path.exists():
+        return None
+
+    try:
+        with open(path, "r", encoding="utf-8") as setup_file:
+            return json.load(setup_file)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def set_active_field_setup(field_setup):
+    import streamlit as st
+
+    st.session_state["current_field_setup"] = field_setup
+    save_field_setup(field_setup)
+    return field_setup
+
+
+def get_active_field_setup():
+    import streamlit as st
+
+    if "current_field_setup" in st.session_state:
+        return st.session_state["current_field_setup"]
+
+    saved_setup = load_field_setup()
+
+    if saved_setup is not None:
+        st.session_state["current_field_setup"] = saved_setup
+        return saved_setup
+
+    default_setup = {
+        "preset": "Attacking Field",
+        "batter_handedness": "Right-hand batter",
+        "bowler_arm": "Right-arm bowler",
+        "camera_view": "Behind bowler",
+        "fielders": create_default_fielders("Attacking Field", "Right-hand batter"),
+        "is_default_setup": True,
+    }
+    st.session_state["current_field_setup"] = default_setup
+    return default_setup
 
 
 def save_field_analysis_history(row):

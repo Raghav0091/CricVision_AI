@@ -14,6 +14,7 @@ from Backends.src.analysis.cricket_agent import (
 from Backends.src.analysis.field_zones import (
     generate_wagon_wheel_data,
     find_nearest_fielder,
+    get_active_field_setup,
     save_field_analysis_history,
     save_field_setup,
     suggest_field_adjustment,
@@ -1104,6 +1105,29 @@ def show_analysis_output(result):
                 )
 
 
+def show_current_field_setup_preview(field_setup, draw_field_map):
+    from Backends.src.ui.ui_components import section_header
+
+    section_header("Current Field Setup")
+    setup_cols = st.columns(4)
+    setup_cols[0].metric("Preset", field_setup.get("preset", "Attacking Field"))
+    setup_cols[1].metric("Batter", field_setup.get("batter_handedness", "Right-hand batter"))
+    setup_cols[2].metric("Bowler Arm", field_setup.get("bowler_arm", "Right-arm bowler"))
+    setup_cols[3].metric("Camera View", field_setup.get("camera_view", "Behind bowler"))
+
+    if field_setup.get("is_default_setup"):
+        st.info("No saved field setup found. Using default Attacking Field.")
+
+    st.info("Go to Field Map page to adjust field setup.")
+    st.pyplot(
+        draw_field_map(
+            shot_angle=None,
+            selected_zone="Unknown",
+            fielders=field_setup.get("fielders", []),
+        )
+    )
+
+
 def reset_live_delivery_state():
     st.session_state.live_delivery_recording = False
     st.session_state.live_recorded_frames = []
@@ -1233,7 +1257,7 @@ def show_live_session_page():
     settings_tab, camera_tab = st.tabs(["Model Settings", "Camera & Controls"])
 
     with settings_tab:
-        from Backends.src.ui.field_map import draw_field_map, field_setup_editor
+        from Backends.src.ui.field_map import draw_field_map
 
         selected_model_name = st.selectbox(
             "Choose detection model",
@@ -1293,14 +1317,8 @@ def show_live_session_page():
         )
 
         section_header("Set Field Before Delivery")
-        field_setup = field_setup_editor("live_session", default_preset="Attacking Field")
-        st.pyplot(
-            draw_field_map(
-                shot_angle=None,
-                selected_zone="Unknown",
-                fielders=field_setup["fielders"],
-            )
-        )
+        field_setup = get_active_field_setup()
+        show_current_field_setup_preview(field_setup, draw_field_map)
 
     with camera_tab:
         card(

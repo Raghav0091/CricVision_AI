@@ -14,7 +14,8 @@ from Backends.src.analysis.field_zones import (
     SIMPLE_FIELD_ZONES,
     classify_shot_zone,
     create_default_fielders,
-    save_field_setup,
+    get_active_field_setup,
+    set_active_field_setup,
 )
 from Backends.src.ui.ui_components import badge_row, page_header, section_header, status_badge
 
@@ -126,27 +127,36 @@ def field_setup_editor(
     default_preset="Attacking Field",
     default_handedness="Right-hand batter",
 ):
+    active_setup = get_active_field_setup()
     preset_key = f"{key_prefix}_field_preset"
     fielders_key = f"{key_prefix}_fielders"
     previous_preset_key = f"{key_prefix}_previous_preset"
 
-    preset_name = st.selectbox("Field preset", FIELD_PRESETS, index=FIELD_PRESETS.index(default_preset), key=preset_key)
+    initial_preset = active_setup.get("preset", default_preset)
+    if initial_preset not in FIELD_PRESETS:
+        initial_preset = default_preset
+
+    preset_name = st.selectbox("Field preset", FIELD_PRESETS, index=FIELD_PRESETS.index(initial_preset), key=preset_key)
+    initial_handedness = active_setup.get("batter_handedness", default_handedness)
     batter_handedness = st.selectbox(
         "Batter handedness",
         ["Right-hand batter", "Left-hand batter"],
-        index=0 if default_handedness.startswith("Right") else 1,
+        index=0 if initial_handedness.startswith("Right") else 1,
         key=f"{key_prefix}_batter_handedness",
     )
+    initial_bowler_arm = active_setup.get("bowler_arm", "Right-arm bowler")
     bowler_arm = st.selectbox(
         "Bowler arm",
         ["Right-arm bowler", "Left-arm bowler"],
-        index=0,
+        index=0 if initial_bowler_arm.startswith("Right") else 1,
         key=f"{key_prefix}_bowler_arm",
     )
+    initial_camera_view = active_setup.get("camera_view", "Behind bowler")
+    camera_options = ["Behind bowler", "Behind batter", "Side-on"]
     camera_view = st.selectbox(
         "Camera view",
-        ["Behind bowler", "Behind batter", "Side-on"],
-        index=0,
+        camera_options,
+        index=camera_options.index(initial_camera_view) if initial_camera_view in camera_options else 0,
         key=f"{key_prefix}_camera_view",
     )
 
@@ -155,7 +165,10 @@ def field_setup_editor(
         or st.session_state.get(previous_preset_key) != preset_name
         and preset_name != "Custom"
     ):
-        st.session_state[fielders_key] = create_default_fielders(preset_name, batter_handedness)
+        if st.session_state.get(previous_preset_key) is None and active_setup.get("fielders"):
+            st.session_state[fielders_key] = active_setup["fielders"]
+        else:
+            st.session_state[fielders_key] = create_default_fielders(preset_name, batter_handedness)
         st.session_state[previous_preset_key] = preset_name
 
     if fielders_key not in st.session_state:
@@ -185,7 +198,8 @@ def field_setup_editor(
     }
 
     if st.button("Save Current Field Setup", key=f"{key_prefix}_save_field_setup"):
-        save_field_setup(field_setup)
+        field_setup.pop("is_default_setup", None)
+        set_active_field_setup(field_setup)
         st.success("Field setup saved to outputs/field_setups/latest_field_setup.json")
 
     return field_setup
