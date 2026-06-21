@@ -10,9 +10,14 @@ import streamlit as st
 from Backends.src.analysis.field_zones import (
     DEPTH_OPTIONS,
     DETAILED_FIELD_ZONES,
+    FIELD_COORDINATE_SYSTEM_VERSION,
     FIELD_PRESETS,
+    RIGHT_HANDED_FIELD_POSITIONS,
+    RIGHT_HANDED_UMPIRE_POSITIONS,
     classify_shot_zone,
+    apply_batter_handedness,
     create_default_fielders,
+    create_default_umpires,
     get_active_field_setup,
     get_position_defaults,
     set_active_field_setup,
@@ -22,11 +27,19 @@ from Backends.src.ui.ui_components import badge_row, page_header, section_header
 
 def polar_to_xy(angle_degrees, radius=0.8):
     radians = math.radians(angle_degrees)
-    return math.sin(radians) * radius, math.cos(radians) * radius
+    return math.sin(radians) * radius, -math.cos(radians) * radius
 
 
-def draw_field_map(shot_angle=None, selected_zone="Unknown", fielders=None):
+def draw_field_map(
+    shot_angle=None,
+    selected_zone="Unknown",
+    fielders=None,
+    batter_handedness="Right-hand batter",
+    umpires=None,
+):
     fielders = fielders or []
+    umpires = umpires or create_default_umpires()
+    is_left_handed = str(batter_handedness).lower().startswith("left")
     fig, ax = plt.subplots(figsize=(7, 7))
     fig.patch.set_facecolor("#07111f")
     ax.set_facecolor("#0c5f3b")
@@ -53,11 +66,13 @@ def draw_field_map(shot_angle=None, selected_zone="Unknown", fielders=None):
 
     for zone_name, start_angle, end_angle in zone_sequence:
         color = "#2dd4bf" if selected_zone in {zone_name, "Third Man", "Gully"} else "#94a3b8"
+        display_start = 360 - end_angle if is_left_handed else start_angle
+        display_end = 360 - start_angle if is_left_handed else end_angle
         wedge = Wedge(
             (0, 0),
             1.0,
-            90 - end_angle,
-            90 - start_angle,
+            display_start - 90,
+            display_end - 90,
             width=0.98,
             alpha=0.15 if color == "#2dd4bf" else 0.08,
             facecolor=color,
@@ -65,7 +80,10 @@ def draw_field_map(shot_angle=None, selected_zone="Unknown", fielders=None):
             linewidth=0.7,
         )
         ax.add_patch(wedge)
-        label_x, label_y = polar_to_xy((start_angle + end_angle) / 2, 0.73)
+        label_angle = (start_angle + end_angle) / 2
+        if is_left_handed:
+            label_angle = 360 - label_angle
+        label_x, label_y = polar_to_xy(label_angle, 0.73)
         ax.text(label_x, label_y, zone_name, ha="center", va="center", fontsize=8, color="#f8fafc")
 
     for angle in range(0, 360, 45):
@@ -75,16 +93,15 @@ def draw_field_map(shot_angle=None, selected_zone="Unknown", fielders=None):
     pitch = Rectangle((-0.055, -0.24), 0.11, 0.48, facecolor="#d6b47a", edgecolor="#fef3c7", linewidth=1.5)
     ax.add_patch(pitch)
     ax.scatter([0], [0.11], s=42, color="#f8fafc", zorder=5)
-    ax.text(0, 0.155, "Batter", ha="center", va="bottom", fontsize=8, color="#f8fafc")
-    ax.scatter([0], [-0.11], s=32, color="#93c5fd", zorder=5)
-    ax.text(0, -0.155, "Non-striker", ha="center", va="top", fontsize=8, color="#dbeafe")
-    ax.scatter([0.12], [0.02], s=24, color="#facc15", zorder=5)
-    ax.text(0.14, 0.02, "Umpire", ha="left", va="center", fontsize=7, color="#fef9c3")
-    ax.scatter([-0.62], [0.0], s=24, color="#facc15", zorder=5)
-    ax.text(-0.64, -0.04, "Square leg umpire", ha="right", va="top", fontsize=7, color="#fef9c3")
-    ax.text(0.52, 0.98, "Off side", ha="center", va="center", fontsize=9, color="#bae6fd")
-    ax.text(-0.52, 0.98, "Leg side", ha="center", va="center", fontsize=9, color="#fecaca")
-    ax.text(0, -0.98, "Boundary", ha="center", va="center", fontsize=8, color="#f8fafc")
+    ax.annotate("Batter", (0, 0.11), xytext=(0, 10), textcoords="offset points", ha="center", fontsize=8, color="#f8fafc")
+    ax.scatter([0], [-0.08], s=32, color="#93c5fd", zorder=5)
+    ax.annotate("Non-striker", (0, -0.08), xytext=(-8, -13), textcoords="offset points", ha="right", fontsize=8, color="#dbeafe")
+
+    left_side_label = "Off side" if is_left_handed else "Leg side"
+    right_side_label = "Leg side" if is_left_handed else "Off side"
+    ax.text(-0.62, -0.96, left_side_label, ha="center", va="center", fontsize=9, color="#fecaca" if "Leg" in left_side_label else "#bae6fd")
+    ax.text(0.62, -0.96, right_side_label, ha="center", va="center", fontsize=9, color="#fecaca" if "Leg" in right_side_label else "#bae6fd")
+    ax.text(0, 0.98, "Boundary", ha="center", va="center", fontsize=8, color="#f8fafc")
     ax.text(0.0, 0.62, "30-yard circle / inner ring", ha="center", va="center", fontsize=8, color="#bae6fd")
     ax.text(0.075, 0.0, "Pitch", ha="left", va="center", fontsize=8, color="#422006")
 
@@ -110,12 +127,55 @@ def draw_field_map(shot_angle=None, selected_zone="Unknown", fielders=None):
         except (TypeError, ValueError):
             continue
 
+        marker_x, marker_y = apply_batter_handedness(
+            (marker_x, marker_y), batter_handedness
+        )
         name = fielder.get("name", "Fielder")
         ax.scatter([marker_x], [marker_y], s=72, color="#fde047", edgecolor="#111827", zorder=9)
-        ax.text(marker_x, marker_y - 0.052, name, ha="center", va="top", fontsize=7.5, color="#fefce8")
+        label_offset = (0, 12) if name == "Bowler" else (0, -11)
+        vertical_alignment = "bottom" if name == "Bowler" else "top"
+        ax.annotate(name, (marker_x, marker_y), xytext=label_offset, textcoords="offset points", ha="center", va=vertical_alignment, fontsize=7.5, color="#fefce8")
+
+    for umpire in umpires:
+        try:
+            marker_x = float(umpire.get("x", 0))
+            marker_y = float(umpire.get("y", 0))
+        except (TypeError, ValueError):
+            continue
+        marker_x, marker_y = apply_batter_handedness(
+            (marker_x, marker_y), batter_handedness
+        )
+        name = umpire.get("name", "Umpire")
+        ax.scatter(
+            [marker_x],
+            [marker_y],
+            s=82,
+            color="#f8fafc",
+            edgecolor="#2563eb",
+            linewidth=2,
+            zorder=10,
+        )
+        if name == "Square Leg Umpire":
+            label_offset = (0, 14)
+            horizontal_alignment = "center"
+        else:
+            label_offset = (12, 2)
+            horizontal_alignment = "left"
+        ax.annotate(
+            name,
+            (marker_x, marker_y),
+            xytext=label_offset,
+            textcoords="offset points",
+            ha=horizontal_alignment,
+            va="center",
+            fontsize=7.5,
+            color="#dbeafe",
+            zorder=11,
+        )
 
     ax.set_xticks([])
     ax.set_yticks([])
+    ax.invert_yaxis()
     for spine in ax.spines.values():
         spine.set_visible(False)
 
@@ -144,7 +204,7 @@ def normalize_fielder_table(fielders):
 def field_setup_editor(
     key_prefix,
     default_preset="Attacking Test Field",
-    default_handedness="Right-hand batter",
+    default_handedness="Right-handed",
 ):
     active_setup = get_active_field_setup()
     preset_key = f"{key_prefix}_field_preset"
@@ -158,8 +218,8 @@ def field_setup_editor(
     preset_name = st.selectbox("Field preset", FIELD_PRESETS, index=FIELD_PRESETS.index(initial_preset), key=preset_key)
     initial_handedness = active_setup.get("batter_handedness", default_handedness)
     batter_handedness = st.selectbox(
-        "Batter handedness",
-        ["Right-hand batter", "Left-hand batter"],
+        "Batter Handedness",
+        ["Right-handed", "Left-handed"],
         index=0 if initial_handedness.startswith("Right") else 1,
         key=f"{key_prefix}_batter_handedness",
     )
@@ -197,7 +257,7 @@ def field_setup_editor(
     edited_df = st.data_editor(
         pd.DataFrame(previous_rows),
         num_rows="dynamic",
-        use_container_width=True,
+        width="stretch",
         column_config={
             "position": st.column_config.SelectboxColumn("position", options=DETAILED_FIELD_ZONES),
             "zone": st.column_config.SelectboxColumn("zone", options=DETAILED_FIELD_ZONES),
@@ -206,6 +266,10 @@ def field_setup_editor(
             "y": st.column_config.NumberColumn("y", min_value=-1.0, max_value=1.0, step=0.05),
         },
         key=f"{key_prefix}_fielder_editor",
+    )
+    st.caption(
+        "Fielder coordinates are saved as right-handed batter-relative base values; "
+        "the preview mirrors them without changing saved data. Umpires are stored separately."
     )
     fielders = []
 
@@ -237,6 +301,8 @@ def field_setup_editor(
         "bowler_arm": bowler_arm,
         "camera_view": camera_view,
         "fielders": fielders,
+        "umpires": active_setup.get("umpires") or create_default_umpires(),
+        "coordinate_system_version": FIELD_COORDINATE_SYSTEM_VERSION,
     }
 
     if st.button("Save Current Field Setup", key=f"{key_prefix}_save_field_setup"):
@@ -276,6 +342,8 @@ def show_field_map_page():
                 shot_angle=shot_angle,
                 selected_zone=selected_zone,
                 fielders=field_setup["fielders"],
+                batter_handedness=field_setup["batter_handedness"],
+                umpires=field_setup["umpires"],
             )
         )
         st.caption("Coordinates use a normalized top-down field: x/y range from -1.0 to 1.0.")

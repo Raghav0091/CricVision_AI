@@ -1885,7 +1885,9 @@ def process_video(
         manual_contact_frame=manual_contact_frame,
     )
     wagon_wheel["mode"] = shot_trajectory_mode
-    nearest_fielder = find_nearest_fielder(wagon_wheel.get("shot_angle"), fielders)
+    nearest_fielder = find_nearest_fielder(
+        wagon_wheel.get("shot_angle"), fielders, batter_handedness
+    )
     wagon_wheel["nearest_fielder"] = nearest_fielder
     wagon_wheel["suggested_adjustment"] = suggest_field_adjustment(wagon_wheel, nearest_fielder)
 
@@ -2172,6 +2174,8 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
             shot_angle=shot_angle,
             selected_zone=detailed_zone,
             fielders=result.get("field_setup", {}).get("fielders", []),
+            batter_handedness=result.get("batter_handedness", "Right-handed"),
+            umpires=result.get("field_setup", {}).get("umpires"),
         )
     )
 
@@ -2267,6 +2271,8 @@ def show_current_field_setup_preview(field_setup, draw_field_map):
             shot_angle=None,
             selected_zone="Unknown",
             fielders=field_setup.get("fielders", []),
+            batter_handedness=field_setup.get("batter_handedness", "Right-handed"),
+            umpires=field_setup.get("umpires"),
         )
     )
 

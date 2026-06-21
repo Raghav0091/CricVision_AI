@@ -791,7 +791,9 @@ def process_recorded_delivery(
         batter_handedness=batter_handedness,
         mode="Use last part of trajectory",
     )
-    nearest_fielder = find_nearest_fielder(wagon_wheel.get("shot_angle"), fielders)
+    nearest_fielder = find_nearest_fielder(
+        wagon_wheel.get("shot_angle"), fielders, batter_handedness
+    )
     wagon_wheel["nearest_fielder"] = nearest_fielder
     wagon_wheel["suggested_adjustment"] = suggest_field_adjustment(wagon_wheel, nearest_fielder)
 
@@ -1075,6 +1077,8 @@ def show_analysis_output(result):
             shot_angle=shot_angle,
             selected_zone=wagon_wheel.get("detailed_zone", "Unknown"),
             fielders=result.get("field_setup", {}).get("fielders", []),
+            batter_handedness=result.get("batter_handedness", "Right-handed"),
+            umpires=result.get("field_setup", {}).get("umpires"),
         )
     )
     correction_col1, correction_col2 = st.columns([2, 1])
@@ -1160,6 +1164,8 @@ def show_current_field_setup_preview(field_setup, draw_field_map):
             shot_angle=None,
             selected_zone="Unknown",
             fielders=field_setup.get("fielders", []),
+            batter_handedness=field_setup.get("batter_handedness", "Right-handed"),
+            umpires=field_setup.get("umpires"),
         )
     )
 
