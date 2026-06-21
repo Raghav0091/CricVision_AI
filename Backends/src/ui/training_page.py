@@ -1,63 +1,60 @@
 import streamlit as st
 
-from Backends.src.ui.ui_components import (
-    feature_card,
-    info_panel,
-    page_header,
-    section_header,
-    workflow_step,
-)
+from Backends.src.ui.components import metric_grid, model_status_card
+from Backends.src.ui.theme import render_page_header, render_section_title, render_feature_card
 
 
 def show_training_page():
-    page_header(
-        "Model Training",
-        "Train and validate cricket vision models in Google Colab, then deploy updated weights to CricVision AI.",
+    render_page_header(
+        "Training Lab",
+        "Train, evaluate, and deploy cricket vision models without leaving your workflow.",
     )
 
-    section_header("Training Platform")
-    info_panel(
-        "<strong>Model training happens in Google Colab.</strong> The Streamlit app loads trained weights "
-        "from the Models folder. No training runs inside this deployment to keep Streamlit Cloud compatible."
-    )
-
-    platform_cols = st.columns(3)
-    with platform_cols[0]:
-        feature_card(
-            "Colab Notebooks",
-            "Use GPU-backed notebooks for YOLO training without heavy local setup.",
-            "☁️",
+    render_section_title("Lab Overview")
+    overview = st.columns(3)
+    with overview[0]:
+        render_feature_card(
+            "Model Training",
+            "Run YOLO and sequence-model training in Google Colab with GPU support.",
+            "🧪",
         )
-    with platform_cols[1]:
-        feature_card(
-            "Validated Weights",
-            "Validate on real bowling clips before replacing production model files.",
-            "✅",
+    with overview[1]:
+        render_feature_card(
+            "Model Evaluation",
+            "Validate on real clips before replacing production weights.",
+            "📊",
         )
-    with platform_cols[2]:
-        feature_card(
-            "Drop-in Deployment",
-            "Replace best.pt files in Models/ without changing detection logic or paths.",
+    with overview[2]:
+        render_feature_card(
+            "Deployment",
+            "Drop validated weights into Models/ without changing app logic.",
             "🚀",
         )
 
-    section_header("Recommended Training Pipeline")
-    pipeline_cols = st.columns(2)
+    metric_grid(
+        [
+            ("Training History", "—", "Future notebook runs"),
+            ("Best Checkpoint", "—", "Latest validated model"),
+            ("Dataset Status", "Review exports available", "Use Datasets page"),
+        ],
+        columns=3,
+    )
 
-    with pipeline_cols[0]:
-        workflow_step(1, "Collect frames from live sessions and video analysis review exports.")
-        workflow_step(2, "Label ball, stump, and difficult frames with consistent annotations.")
-        workflow_step(3, "Train YOLO models in Google Colab with augmentation and early stopping.")
-
-    with pipeline_cols[1]:
-        workflow_step(4, "Validate on unseen clips and compare detection / tracking metrics.")
-        workflow_step(5, "Replace model weights in Models/ball_detector or Models/cricket_objects.")
-        workflow_step(6, "Re-run Video Analysis and Live Session to confirm improved tracking.")
-
-    section_header("Current Status")
-    st.info("First model to train: Cricket Ball Detector using YOLO.")
-
-    if st.button("Open Colab Training Workflow"):
-        st.warning(
-            "Training code is managed in Google Colab. Add your notebook link here when ready."
+    with st.expander("Recommended Pipeline", expanded=True):
+        st.markdown(
+            """
+            1. Collect review frames from Analyze and Live Session  
+            2. Label ball, stump, and bat frames consistently  
+            3. Train in Google Colab with augmentation and early stopping  
+            4. Validate on unseen clips and compare tracking metrics  
+            5. Replace model weights and re-run Analyze / Live Session
+            """
         )
+
+    with st.expander("Advanced / Dangerous Actions", expanded=False):
+        st.warning("Training does not run inside Streamlit Cloud. Use Colab for GPU-backed jobs.")
+        if st.button("Open Colab Training Workflow"):
+            st.info("Add your Colab notebook link here when ready.")
+
+    with st.expander("Model Status", expanded=False):
+        model_status_card()

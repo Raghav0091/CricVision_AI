@@ -22,7 +22,7 @@ from Backends.src.analysis.field_zones import (
     get_position_defaults,
     set_active_field_setup,
 )
-from Backends.src.ui.ui_components import badge_row, page_header, section_header, status_badge
+from Backends.src.ui.theme import render_page_header, render_section_title, render_status_pill
 
 
 def polar_to_xy(angle_degrees, radius=0.8):
@@ -215,29 +215,23 @@ def field_setup_editor(
     if initial_preset not in FIELD_PRESETS:
         initial_preset = default_preset
 
-    preset_name = st.selectbox("Field preset", FIELD_PRESETS, index=FIELD_PRESETS.index(initial_preset), key=preset_key)
+    preset_name = st.selectbox(
+        "Field preset",
+        FIELD_PRESETS,
+        index=FIELD_PRESETS.index(initial_preset),
+        key=preset_key,
+    )
     initial_handedness = active_setup.get("batter_handedness", default_handedness)
     batter_handedness = st.selectbox(
-        "Batter Handedness",
+        "Batter handedness",
         ["Right-handed", "Left-handed"],
         index=0 if initial_handedness.startswith("Right") else 1,
         key=f"{key_prefix}_batter_handedness",
     )
+
     initial_bowler_arm = active_setup.get("bowler_arm", "Right-arm bowler")
-    bowler_arm = st.selectbox(
-        "Bowler arm",
-        ["Right-arm bowler", "Left-arm bowler"],
-        index=0 if initial_bowler_arm.startswith("Right") else 1,
-        key=f"{key_prefix}_bowler_arm",
-    )
     initial_camera_view = active_setup.get("camera_view", "Behind bowler")
     camera_options = ["Behind bowler", "Behind batter", "Side-on"]
-    camera_view = st.selectbox(
-        "Camera view",
-        camera_options,
-        index=camera_options.index(initial_camera_view) if initial_camera_view in camera_options else 0,
-        key=f"{key_prefix}_camera_view",
-    )
 
     if (
         fielders_key not in st.session_state
@@ -253,97 +247,135 @@ def field_setup_editor(
     if fielders_key not in st.session_state:
         st.session_state[fielders_key] = create_default_fielders("Attacking Test Field", batter_handedness)
 
-    previous_rows = normalize_fielder_table(st.session_state[fielders_key])
-    edited_df = st.data_editor(
-        pd.DataFrame(previous_rows),
-        num_rows="dynamic",
-        width="stretch",
-        column_config={
-            "position": st.column_config.SelectboxColumn("position", options=DETAILED_FIELD_ZONES),
-            "zone": st.column_config.SelectboxColumn("zone", options=DETAILED_FIELD_ZONES),
-            "depth": st.column_config.SelectboxColumn("depth", options=DEPTH_OPTIONS),
-            "x": st.column_config.NumberColumn("x", min_value=-1.0, max_value=1.0, step=0.05),
-            "y": st.column_config.NumberColumn("y", min_value=-1.0, max_value=1.0, step=0.05),
-        },
-        key=f"{key_prefix}_fielder_editor",
-    )
-    st.caption(
-        "Fielder coordinates are saved as right-handed batter-relative base values; "
-        "the preview mirrors them without changing saved data. Umpires are stored separately."
-    )
-    fielders = []
+    with st.expander("Edit Field Positions", expanded=False):
+        bowler_arm = st.selectbox(
+            "Bowler arm",
+            ["Right-arm bowler", "Left-arm bowler"],
+            index=0 if initial_bowler_arm.startswith("Right") else 1,
+            key=f"{key_prefix}_bowler_arm",
+        )
+        camera_view = st.selectbox(
+            "Camera view",
+            camera_options,
+            index=camera_options.index(initial_camera_view) if initial_camera_view in camera_options else 0,
+            key=f"{key_prefix}_camera_view",
+        )
 
-    for index, row in enumerate(edited_df.to_dict("records")):
-        previous = previous_rows[index] if index < len(previous_rows) else {}
-        position = row.get("position") or "Cover"
-        depth = row.get("depth") or get_position_defaults(position)["depth"]
-        position_changed = position != previous.get("position")
-        depth_changed = depth != previous.get("depth")
-        x_changed = row.get("x") != previous.get("x")
-        y_changed = row.get("y") != previous.get("y")
-        defaults = get_position_defaults(position, depth)
+        previous_rows = normalize_fielder_table(st.session_state[fielders_key])
+        edited_df = st.data_editor(
+            pd.DataFrame(previous_rows),
+            num_rows="dynamic",
+            width="stretch",
+            column_config={
+                "position": st.column_config.SelectboxColumn("position", options=DETAILED_FIELD_ZONES),
+                "zone": st.column_config.SelectboxColumn("zone", options=DETAILED_FIELD_ZONES),
+                "depth": st.column_config.SelectboxColumn("depth", options=DEPTH_OPTIONS),
+                "x": st.column_config.NumberColumn("x", min_value=-1.0, max_value=1.0, step=0.05),
+                "y": st.column_config.NumberColumn("y", min_value=-1.0, max_value=1.0, step=0.05),
+            },
+            key=f"{key_prefix}_fielder_editor",
+        )
+        st.caption(
+            "Fielder coordinates are saved as right-handed batter-relative base values. "
+            "The preview mirrors them for left-handed batters."
+        )
+        fielders = []
 
-        if position_changed or depth_changed:
-            row["zone"] = defaults["zone"]
+        for index, row in enumerate(edited_df.to_dict("records")):
+            previous = previous_rows[index] if index < len(previous_rows) else {}
+            position = row.get("position") or "Cover"
+            depth = row.get("depth") or get_position_defaults(position)["depth"]
+            position_changed = position != previous.get("position")
+            depth_changed = depth != previous.get("depth")
+            x_changed = row.get("x") != previous.get("x")
+            y_changed = row.get("y") != previous.get("y")
+            defaults = get_position_defaults(position, depth)
 
-            if not x_changed:
-                row["x"] = defaults["x"]
-            if not y_changed:
-                row["y"] = defaults["y"]
+            if position_changed or depth_changed:
+                row["zone"] = defaults["zone"]
+                if not x_changed:
+                    row["x"] = defaults["x"]
+                if not y_changed:
+                    row["y"] = defaults["y"]
 
-        fielders.append(row)
+            fielders.append(row)
 
-    st.session_state[fielders_key] = fielders
+        st.session_state[fielders_key] = fielders
 
-    field_setup = {
+    bowler_arm = st.session_state.get(f"{key_prefix}_bowler_arm", initial_bowler_arm)
+    camera_view = st.session_state.get(f"{key_prefix}_camera_view", initial_camera_view)
+    fielders = st.session_state[fielders_key]
+
+    if st.button("Save Field Setup", type="primary", key=f"{key_prefix}_save_field_setup", use_container_width=True):
+        field_setup = {
+            "preset": preset_name,
+            "batter_handedness": batter_handedness,
+            "bowler_arm": bowler_arm,
+            "camera_view": camera_view,
+            "fielders": st.session_state[fielders_key],
+            "umpires": active_setup.get("umpires") or create_default_umpires(),
+            "coordinate_system_version": FIELD_COORDINATE_SYSTEM_VERSION,
+        }
+        field_setup.pop("is_default_setup", None)
+        set_active_field_setup(field_setup)
+        st.success("Field setup saved.")
+
+    return {
         "preset": preset_name,
         "batter_handedness": batter_handedness,
         "bowler_arm": bowler_arm,
         "camera_view": camera_view,
-        "fielders": fielders,
+        "fielders": st.session_state[fielders_key],
         "umpires": active_setup.get("umpires") or create_default_umpires(),
         "coordinate_system_version": FIELD_COORDINATE_SYSTEM_VERSION,
     }
 
-    if st.button("Save Current Field Setup", key=f"{key_prefix}_save_field_setup"):
-        field_setup.pop("is_default_setup", None)
-        set_active_field_setup(field_setup)
-        st.success("Field setup saved to outputs/field_setups/latest_field_setup.json")
-
-    return field_setup
-
 
 def show_field_map_page():
-    page_header(
-        "Field Map",
-        "Set an 11-player cricket field and preview wagon-wheel shot direction zones.",
+    render_page_header(
+        "Field Setup",
+        "Configure the field once and reuse it across delivery analysis.",
+        badge="Premium Field View",
     )
 
-    control_col, map_col = st.columns([1.05, 1.25])
+    control_col, map_col = st.columns([0.85, 1.35], gap="large")
 
     with control_col:
-        section_header("Field Setup")
+        render_section_title("Field Controls")
         field_setup = field_setup_editor("field_map", default_preset="Attacking Test Field")
-
-        section_header("Shot Direction Preview")
-        shot_angle = st.slider("Shot angle", min_value=0, max_value=359, value=45, step=1)
-        selected_zone = classify_shot_zone(shot_angle, field_setup["batter_handedness"])
-        badge_row(
-            [
-                status_badge(f"Zone: {selected_zone}", "cyan"),
-                status_badge(f"Angle: {shot_angle} deg", "blue"),
-            ]
+        st.markdown(
+            f'<div style="margin-top:0.75rem;">{render_status_pill(field_setup["preset"], "gold")} '
+            f'{render_status_pill(field_setup["batter_handedness"], "success")}</div>',
+            unsafe_allow_html=True,
         )
 
+        with st.expander("Shot Direction Preview", expanded=False):
+            shot_angle = st.slider("Shot angle", min_value=0, max_value=359, value=45, step=1)
+            selected_zone = classify_shot_zone(shot_angle, field_setup["batter_handedness"])
+            st.markdown(
+                f'{render_status_pill(f"Zone: {selected_zone}", "success")} '
+                f'{render_status_pill(f"{shot_angle}°", "gold")}',
+                unsafe_allow_html=True,
+            )
+            st.pyplot(
+                draw_field_map(
+                    shot_angle=shot_angle,
+                    selected_zone=selected_zone,
+                    fielders=field_setup["fielders"],
+                    batter_handedness=field_setup["batter_handedness"],
+                    umpires=field_setup["umpires"],
+                )
+            )
+
     with map_col:
-        section_header("Top-Down Field")
+        render_section_title("Field Map")
         st.pyplot(
             draw_field_map(
-                shot_angle=shot_angle,
-                selected_zone=selected_zone,
+                shot_angle=None,
+                selected_zone="Unknown",
                 fielders=field_setup["fielders"],
                 batter_handedness=field_setup["batter_handedness"],
                 umpires=field_setup["umpires"],
             )
         )
-        st.caption("Coordinates use a normalized top-down field: x/y range from -1.0 to 1.0.")
+        st.caption("Normalized top-down field view. Left/right labels mirror correctly for left-handed batters.")

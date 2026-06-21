@@ -977,161 +977,66 @@ def show_cricket_delivery_report(result):
 
 
 def show_analysis_output(result):
-    from Backends.src.ui.ui_components import badge_row, metric_card, section_header, status_badge
+    from Backends.src.ui.components import (
+        analysis_report_card,
+        coaching_details_expander,
+        delivery_summary_card,
+        developer_details_expander,
+        video_preview_card,
+    )
     from Backends.src.ui.field_map import draw_field_map
-
-    section_header("Delivery Review")
+    from Backends.src.ui.theme import render_section_title
 
     if result is None:
-        st.info(
-            "No delivery has been analyzed yet. The outcome, processed clip, and download buttons appear here after Done / Analyze Delivery."
-        )
+        delivery_summary_card(None)
         return
 
     if not result["success"]:
         st.error(result["error"])
         return
 
-    tracking_quality = result.get("overall_tracking_quality", "Poor")
-    tracking_tone = "green" if tracking_quality in {"Excellent", "Good"} else "amber"
-
-    badge_row(
-        [
-            status_badge(f"Model: {result.get('active_model', 'Unknown')}", "cyan"),
-            status_badge(f"Preset: {result.get('active_preset', 'Unknown')}", "blue"),
-            status_badge(f"Tracking: {tracking_quality}", tracking_tone),
-        ]
-    )
-
-    outcome_col1, outcome_col2, outcome_col3 = st.columns(3)
-    outcome_col1.metric("Line", result["estimated_line"])
-    outcome_col2.metric("Length", result["estimated_length"])
-
-    bounce_text = "Not found"
-    if result["estimated_bounce_point"] is not None:
-        bx, by = result["estimated_bounce_point"]
-        bounce_text = f"({bx}, {by})"
-
-    outcome_col3.metric("Bounce Point", bounce_text)
-
-    section_header("Processed Delivery Clip")
-    st.video(result["processed_video_bytes"])
-
-    section_header("Analysis Stats")
-    stats_cols = st.columns(4)
-    with stats_cols[0]:
-        metric_card("Ball Frames", str(result["ball_detected_frames"]), "Detected ball frames")
-    with stats_cols[1]:
-        metric_card("Stump Frames", str(result["stump_detected_frames"]), "Detected stump frames")
-    with stats_cols[2]:
-        metric_card("Ball Detection Rate", f"{result['ball_detection_rate']:.1f}%", "Coverage across clip")
-    with stats_cols[3]:
-        metric_card("Low-Conf Frames", str(result.get("low_confidence_ball_frames", 0)), "Saved for review")
-
-    stats_cols_2 = st.columns(4)
-    with stats_cols_2[0]:
-        metric_card("Tracking Rate", f"{result.get('ball_tracking_rate', 0):.1f}%", "Continuous ball path")
-    with stats_cols_2[1]:
-        metric_card("Interpolated", str(result.get("interpolated_ball_frames", 0)), "Filled trajectory gaps")
-    with stats_cols_2[2]:
-        metric_card("Kalman Frames", str(result.get("kalman_predicted_frames", 0)), "Predicted positions")
-    with stats_cols_2[3]:
-        metric_card("Review Frames", str(result.get("review_frame_count", 0)), "Training export candidates")
-
-    with st.expander("Debug Panel", expanded=False):
-        st.write(f"Active model: {result.get('active_model', 'Unknown')}")
-        st.write(f"Active preset: {result.get('active_preset', 'Unknown')}")
-        st.write(f"ROI size: {result.get('last_roi_size', 'Full frame')}")
-        st.write(f"Ball detections: {result.get('total_ball_detections', 0)}")
-        st.write(f"Tracker recoveries: {result.get('tracker_recoveries', 0)}")
-        st.write(f"Average confidence: {result.get('average_ball_confidence', 0):.2f}")
-        timing_col1, timing_col2, timing_col3 = st.columns(3)
-        timing_col1.metric(
-            "Full Frame Detection Time",
-            f"{result.get('full_frame_detection_time_ms', 0):.1f} ms",
+    left_col, right_col = st.columns([1.15, 0.85], gap="large")
+    with left_col:
+        video_preview_card("Processed Delivery")
+        st.video(result["processed_video_bytes"])
+        st.download_button(
+            label="Download Processed Delivery Clip",
+            data=result["processed_video_bytes"],
+            file_name=result["processed_file_name"],
+            mime="video/mp4",
+            use_container_width=True,
         )
-        timing_col2.metric(
-            "ROI Detection Time",
-            f"{result.get('roi_detection_time_ms', 0):.1f} ms",
-        )
-        timing_col3.metric("ROI Frames", result.get("roi_detected_frames", 0))
+    with right_col:
+        analysis_report_card(result)
+        coaching_details_expander(result)
 
-    section_header("Batting Direction & Field")
-    wagon_wheel = result.get("wagon_wheel", {})
-    shot_angle = wagon_wheel.get("shot_angle")
-    nearest_fielder = wagon_wheel.get("nearest_fielder")
-    nearest_fielder_name = "Unknown" if nearest_fielder is None else nearest_fielder.get("name", "Unknown")
-    shot_cols = st.columns(4)
-    shot_cols[0].metric("Simple Zone", wagon_wheel.get("simple_zone", "Unknown"))
-    shot_cols[1].metric("Detailed Zone", wagon_wheel.get("detailed_zone", "Unknown"))
-    shot_cols[2].metric("Shot Angle", "Unknown" if shot_angle is None else f"{shot_angle:.1f} deg")
-    shot_cols[3].metric("Nearest Fielder", nearest_fielder_name)
-
-    context_cols = st.columns(3)
-    context_cols[0].metric("Batter", result.get("batter_handedness", "Unknown"))
-    context_cols[1].metric("Bowler Arm", result.get("bowler_arm", "Unknown"))
-    context_cols[2].metric("Confidence", wagon_wheel.get("confidence", "Low"))
-    st.info(wagon_wheel.get("suggested_adjustment", "No field adjustment suggestion available."))
-    st.pyplot(
-        draw_field_map(
-            shot_angle=shot_angle,
-            selected_zone=wagon_wheel.get("detailed_zone", "Unknown"),
-            fielders=result.get("field_setup", {}).get("fielders", []),
-            batter_handedness=result.get("batter_handedness", "Right-handed"),
-            umpires=result.get("field_setup", {}).get("umpires"),
-        )
-    )
-    correction_col1, correction_col2 = st.columns([2, 1])
-
-    with correction_col1:
-        corrected_zone = st.selectbox(
-            "Manual correction: actual shot zone",
-            ["No correction"] + SIMPLE_FIELD_ZONES,
-            key="live_session_field_zone_correction",
-        )
-
-    with correction_col2:
-        save_correction = st.button("Save Zone Correction", key="save_live_field_zone_correction")
-
-    if save_correction:
-        if corrected_zone == "No correction":
-            st.warning("Choose an actual zone before saving a correction.")
-        else:
-            save_field_analysis_history(
-                {
-                    "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
-                    "source": "live_session_correction",
-                    "batter_handedness": result.get("batter_handedness", ""),
-                    "bowler_arm": result.get("bowler_arm", ""),
-                    "camera_view": result.get("camera_view", ""),
-                    "preset": result.get("field_setup", {}).get("preset", "Custom"),
-                    "simple_zone": wagon_wheel.get("simple_zone", "Unknown"),
-                    "detailed_zone": wagon_wheel.get("detailed_zone", "Unknown"),
-                    "shot_angle": "" if shot_angle is None else f"{shot_angle:.2f}",
-                    "nearest_fielder": nearest_fielder_name,
-                    "confidence": wagon_wheel.get("confidence", "Low"),
-                    "corrected_zone": corrected_zone,
-                }
+    with st.expander("Field Context", expanded=False):
+        wagon_wheel = result.get("wagon_wheel", {})
+        shot_angle = wagon_wheel.get("shot_angle")
+        detailed_zone = wagon_wheel.get("detailed_zone", "Unknown")
+        st.pyplot(
+            draw_field_map(
+                shot_angle=shot_angle,
+                selected_zone=detailed_zone,
+                fielders=result.get("field_setup", {}).get("fielders", []),
+                batter_handedness=result.get("batter_handedness", "Right-handed"),
+                umpires=result.get("field_setup", {}).get("umpires"),
             )
-            result["wagon_wheel"]["corrected_zone"] = corrected_zone
-            st.session_state.live_last_result = result
-            st.success("Field-zone correction saved for future review.")
+        )
 
-    show_delivery_report(result)
-    show_cricket_delivery_report(result)
+    with st.expander("Advanced Metrics", expanded=False):
+        stats_cols = st.columns(4)
+        stats_cols[0].metric("Ball Detection Rate", f"{result['ball_detection_rate']:.1f}%")
+        stats_cols[1].metric("Tracking Rate", f"{result.get('ball_tracking_rate', 0):.1f}%")
+        stats_cols[2].metric("Review Frames", result.get("review_frame_count", 0))
+        stats_cols[3].metric("Recoveries", result.get("tracker_recoveries", 0))
 
-    st.download_button(
-        label="Download Processed Delivery Clip",
-        data=result["processed_video_bytes"],
-        file_name=result["processed_file_name"],
-        mime="video/mp4",
-    )
+    developer_details_expander(result)
 
-    if st.button("Export Review Frames for Training", key="export_review_frames_live"):
+    if st.button("Export Review Frames for Training", key="export_review_frames_live", use_container_width=True):
         from Backends.src.ui.video_analysis import create_review_frames_zip
 
         zip_path, file_count = create_review_frames_zip()
-
         if file_count == 0:
             st.warning("No review frames are available yet.")
         else:
@@ -1142,13 +1047,14 @@ def show_analysis_output(result):
                     file_name=zip_path.name,
                     mime="application/zip",
                     key="download_review_frames_zip_live",
+                    use_container_width=True,
                 )
 
 
 def show_current_field_setup_preview(field_setup, draw_field_map):
-    from Backends.src.ui.ui_components import section_header
+    from Backends.src.ui.theme import render_section_title
 
-    section_header("Current Field Setup")
+    render_section_title("Current Field Setup")
     setup_cols = st.columns(4)
     setup_cols[0].metric("Preset", field_setup.get("preset", "Attacking Test Field"))
     setup_cols[1].metric("Batter", field_setup.get("batter_handedness", "Right-hand batter"))
@@ -1203,22 +1109,26 @@ def initialize_live_session_state():
 
 
 def show_live_session_page():
-    from Backends.src.ui.ui_components import (
-        badge_row,
-        card,
-        info_panel,
-        page_header,
-        section_header,
-        status_badge,
-        workflow_step,
-    )
-
-    page_header(
-        "Live Session",
-        "Record one clean delivery from the live camera, then analyze it after the ball is bowled.",
-    )
+    from Backends.src.analysis.field_zones import get_active_field_setup
+    from Backends.src.ui.theme import render_page_header, render_status_pill
 
     initialize_live_session_state()
+    recording_state = st.session_state.live_recording_state
+
+    if recording_state.recording:
+        status = "Recording"
+    elif st.session_state.live_pending_analysis:
+        status = "Analyzing"
+    elif st.session_state.live_camera_session_ended and st.session_state.live_last_result:
+        status = "Review Ready"
+    else:
+        status = "Camera Ready"
+
+    render_page_header(
+        "Live Bowling Session",
+        "Record one clean delivery. Overlays appear only after analysis.",
+        badge=status,
+    )
 
     model_options = get_live_model_options()
     analysis_complete = (
@@ -1279,103 +1189,51 @@ def show_live_session_page():
         show_analysis_output(st.session_state.live_last_result)
         return
 
-    section_header("Live Workflow")
-    workflow_cols = st.columns(5)
-    workflow_labels = [
-        "Start Camera",
-        "Start Delivery Recording",
-        "Bowl",
-        "Done / Analyze",
-        "Review Processed Delivery",
-    ]
-    for index, label in enumerate(workflow_labels):
-        with workflow_cols[index]:
-            workflow_step(index + 1, label)
-
-    info_panel(
-        "<strong>Live camera preview stays clean.</strong> Analysis overlays are generated after delivery."
+    st.markdown(
+        f'<div style="margin-bottom:1rem;">{render_status_pill("Live preview stays clean until analysis", "gold")}</div>',
+        unsafe_allow_html=True,
     )
 
-    settings_tab, camera_tab = st.tabs(["Model Settings", "Camera & Controls"])
+    with st.expander("Advanced Settings", expanded=False):
+        from Backends.src.ui.field_map import draw_field_map as draw_field_map_preview
 
-    with settings_tab:
-        from Backends.src.ui.field_map import draw_field_map
-
-        selected_model_name = st.selectbox(
-            "Choose detection model",
+        st.selectbox(
+            "Detection model",
             list(model_options.keys()),
             key="live_session_model",
         )
+        selected_model_name = st.session_state["live_session_model"]
         selected_model = model_options[selected_model_name]
         selected_model_path = selected_model["path"]
-        use_ensemble = selected_model.get("ensemble", False)
+        if not selected_model.get("ensemble", False) and not selected_model_path.exists():
+            st.warning(f"Model not found: {selected_model_path}")
 
-        if not use_ensemble and not selected_model_path.exists():
-            st.error(f"Model not found: {selected_model_path}")
-            info_panel("Make sure the selected model file exists in the correct Models folder.")
-            return
-
-        badge_row([status_badge(f"Model: {selected_model_name}", "cyan")])
-
-        if use_ensemble:
-            from Backends.src.ui.video_analysis import get_available_ensemble_model_names
-
-            active_model_names = get_available_ensemble_model_names()
-
-            if active_model_names:
-                st.caption("Active ensemble models: " + ", ".join(active_model_names))
-            else:
-                st.warning("No configured ensemble model files were found.")
-        else:
-            st.caption(f"Model path: {selected_model_path}")
-
-        preset_name = st.selectbox(
+        st.selectbox(
             "Detection preset",
             list(DETECTION_PRESETS.keys()),
             index=1,
             key="live_session_preset",
         )
-        active_preset = DETECTION_PRESETS[preset_name]
-        confidence = active_preset["confidence"]
-        image_size = active_preset["imgsz"]
-        badge_row([status_badge(f"Preset: {preset_name}", "blue")])
+        st.checkbox("Show pitch ROI overlay", value=False, key="live_session_show_roi")
+        show_current_field_setup_preview(get_active_field_setup(), draw_field_map_preview)
 
-        st.caption(
-            f"Active preset: {preset_name} | imgsz={image_size} | confidence={confidence:.2f}"
-        )
-
-        show_pitch_roi = st.checkbox("Show Pitch ROI", value=False, key="live_session_show_roi")
-        badge_row(
-            [
-                status_badge(
-                    f"ROI Overlay: {'On' if show_pitch_roi else 'Off'}",
-                    "green" if show_pitch_roi else "muted",
-                )
-            ]
-        )
-
-        info_panel(
-            "If the selected model does not include stumps, line detection may remain Unknown."
-        )
-
-        section_header("Set Field Before Delivery")
-        field_setup = get_active_field_setup()
-        show_current_field_setup_preview(field_setup, draw_field_map)
-
-    with camera_tab:
-        card(
-            title="Camera Tips",
-            content_html=(
-                "Phone users: open this Streamlit app in your phone browser, allow camera access, "
-                "use landscape mode, and use the back camera behind the bowler."
-            ),
-        )
+    selected_model_name = st.session_state.get(
+        "live_session_model",
+        list(model_options.keys())[0],
+    )
+    selected_model = model_options[selected_model_name]
+    selected_model_path = selected_model["path"]
+    use_ensemble = selected_model.get("ensemble", False)
+    preset_name = st.session_state.get("live_session_preset", "Balanced Mode")
+    active_preset = DETECTION_PRESETS[preset_name]
+    confidence = active_preset["confidence"]
+    image_size = active_preset["imgsz"]
+    show_pitch_roi = st.session_state.get("live_session_show_roi", False)
+    field_setup = get_active_field_setup()
 
     if st.session_state.live_status_message:
         st.info(st.session_state.live_status_message)
         st.session_state.live_status_message = None
-
-    section_header("Step 1 — Start Camera")
 
     try:
         from streamlit_webrtc import RTCConfiguration, webrtc_streamer
@@ -1383,14 +1241,7 @@ def show_live_session_page():
         st.error("streamlit-webrtc is not installed. Add streamlit-webrtc to requirements.txt.")
         return
 
-    rtc_config = RTCConfiguration(
-        {
-            "iceServers": [
-                {"urls": ["stun:stun.l.google.com:19302"]},
-            ],
-        }
-    )
-
+    rtc_config = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
     webrtc_context = None
 
     if st.session_state.live_camera_active:
@@ -1414,29 +1265,32 @@ def show_live_session_page():
     recorder = None
     if webrtc_context is not None:
         recorder = webrtc_context.video_processor
-    recording_state = st.session_state.live_recording_state
 
-    section_header("Steps 2–4 — Record & Analyze")
-    button_col1, button_col2, button_col3 = st.columns([1, 1, 1])
-
-    with button_col1:
+    if not recording_state.recording:
         start_clicked = st.button(
             "Start Delivery Recording",
             type="primary",
-            disabled=recording_state.recording,
+            use_container_width=True,
+            disabled=recorder is None,
         )
-
-    with button_col2:
+    else:
+        start_clicked = False
         done_clicked = st.button(
-            "Done / Analyze Delivery",
-            disabled=not recording_state.recording,
+            "Analyze Delivery",
+            type="primary",
+            use_container_width=True,
         )
+        clear_clicked = st.button("Clear Delivery", use_container_width=True)
 
-    with button_col3:
-        clear_clicked = st.button(
-            "Clear Delivery",
-            disabled=recording_state.recording,
-        )
+    if not recording_state.recording:
+        done_clicked = False
+        clear_clicked = False
+        if recorder is None:
+            st.caption("Allow camera access to begin your live session.")
+        else:
+            st.caption("Preview stays clean. Start recording, bowl one delivery, then analyze.")
+    else:
+        st.info(f"Recording... {recording_state.get_frame_count()} frames captured.")
 
     if start_clicked:
         recording_state.start_recording()
@@ -1476,23 +1330,7 @@ def show_live_session_page():
         st.session_state.live_status_message = "Recorded delivery cleared."
         st.rerun()
 
-    recorded_count = recording_state.get_frame_count()
+    from Backends.src.ui.theme import render_section_title
 
-    if recording_state.recording:
-        st.info(f"Recording delivery... captured {recorded_count} frames.")
-    elif recorder is not None:
-        st.caption("Live preview is clean. Click Start Delivery Recording when you are ready to bowl.")
-    else:
-        st.info("Start the camera stream to enable delivery recording.")
-
-    if st.session_state.live_last_result is None:
-        section_header("Step 5 — Review Processed Delivery")
-        card(
-            title="Waiting for Analysis",
-            content_html=(
-                "After you click <strong>Done / Analyze Delivery</strong>, the processed clip, "
-                "delivery report, stats, and download button will appear here."
-            ),
-        )
-    else:
-        show_analysis_output(st.session_state.live_last_result)
+    render_section_title("Recent Delivery Summary")
+    show_analysis_output(st.session_state.live_last_result)

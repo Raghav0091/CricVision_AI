@@ -1,16 +1,16 @@
 import streamlit as st
 
-from Backends.src.ui.ui_components import apply_global_styles, render_sidebar_nav
+from Backends.src.ui.theme import apply_global_theme, render_sidebar
 
 st.set_page_config(
     page_title="CricVision AI",
     page_icon="🏏",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-apply_global_styles()
-
-page = render_sidebar_nav()
+apply_global_theme()
+page = render_sidebar()
 
 if page == "Dashboard":
     from Backends.src.ui.dashboard import show_dashboard

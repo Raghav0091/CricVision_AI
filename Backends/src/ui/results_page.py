@@ -1,39 +1,50 @@
 import streamlit as st
+from pathlib import Path
 
-from Backends.src.ui.ui_components import empty_state, metric_card, page_header, section_header
+from Backends.src.ui.components import metric_grid, report_history_card
+from Backends.src.ui.theme import render_empty_state, render_page_header, render_section_title
 
 
 def show_results_page():
-    page_header(
-        "Results History",
-        "Saved bowling sessions and delivery analytics will appear here as history builds up.",
+    render_page_header(
+        "Reports",
+        "Delivery history and match-style analysis summaries.",
     )
 
-    has_history = False
+    reports = st.session_state.get("video_analysis_result")
+    has_history = bool(reports and reports.get("success"))
 
     if not has_history:
-        empty_state(
-            title="No delivery history yet",
-            message=(
-                "Analyze a video or complete a live session to start building your delivery history. "
-                "Future updates will store sessions in Supabase for trend tracking."
-            ),
-            icon="📊",
+        render_empty_state(
+            "No reports yet",
+            "Analyze a delivery or complete a live session to build your report history.",
+            action_label="Go to Analyze to create your first report",
         )
+    else:
+        impact = reports.get("impact_info", {}) or {}
+        report_history_card(
+            {
+                "title": "Latest Delivery Report",
+                "timestamp": "Current session",
+                "analysis_type": reports.get("analysis_mode", "Full Delivery Analysis"),
+                "line": reports.get("estimated_line", "Unknown"),
+                "length": reports.get("estimated_length", "Unknown"),
+                "tracking_quality": reports.get("overall_tracking_quality", "Unknown"),
+                "impact_confidence": impact.get("impact_confidence", "Unknown"),
+            }
+        )
+        if st.button("View Latest Report Details", use_container_width=True):
+            st.info("Open Analyze to review the full processed video and detailed report.")
 
-    section_header("Coming Soon")
-    future_cols = st.columns(4)
+    render_section_title("Insights", "Future history cards will populate here automatically.")
+    metric_grid(
+        [
+            ("Recent Deliveries", "—", "Latest analyzed clips"),
+            ("Best Length", "—", "Most effective zone"),
+            ("Line Consistency", "—", "Off / middle / leg trend"),
+            ("Tracking Quality", "—", "Quality over time"),
+        ],
+        columns=4,
+    )
 
-    with future_cols[0]:
-        metric_card("Recent Deliveries", "—", "Latest analyzed clips and reports")
-
-    with future_cols[1]:
-        metric_card("Best Length", "—", "Most effective length zone")
-
-    with future_cols[2]:
-        metric_card("Line Consistency", "—", "Off / middle / leg distribution")
-
-    with future_cols[3]:
-        metric_card("Tracking Quality Trend", "—", "Detection quality over time")
-
-    st.info("Database connection will be added later using Supabase.")
+    st.caption("Persistent report storage will be added with Supabase in a future update.")
