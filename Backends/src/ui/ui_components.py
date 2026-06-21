@@ -15,6 +15,7 @@ NAV_ICONS = {
     "Dashboard": "📊",
     "Live Session": "📹",
     "Video Analysis": "🎥",
+    "Field Map": "🗺️",
     "Datasets": "📁",
     "Training": "🧠",
     "Results": "📈",

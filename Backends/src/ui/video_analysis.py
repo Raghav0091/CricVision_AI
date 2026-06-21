@@ -1,6 +1,7 @@
 import tempfile
 import subprocess
 import csv
+import json
 import zipfile
 import time
 from datetime import datetime
@@ -19,6 +20,13 @@ from Backends.src.analysis.cricket_agent import (
     generate_delivery_report,
 )
 from Backends.src.analysis.field_zones import FIELD_ZONES, generate_wagon_wheel_data
+from Backends.src.analysis.bat_detection import (
+    detect_ball_in_frame,
+    detect_bat_in_frame,
+    draw_bat_detections,
+    draw_impact_marker,
+    find_possible_impact_frame,
+)
 from Backends.src.analysis.field_zones import (
     DETAILED_FIELD_ZONES,
     find_nearest_fielder,
@@ -35,12 +43,20 @@ from Backends.src.tracking.ball_tracking_utils import (
     interpolate_missing_positions,
     smooth_trajectory,
 )
+from Backends.src.models.model_loader import get_cached_yolo_model
+from Backends.src.models.model_registry import (
+    get_model_info,
+    get_model_path,
+    validate_model_paths,
+)
 
 
 BALL_MODEL_PATH = Path("Models/ball_detector/best.pt")
 CRICKET_OBJECTS_MODEL_PATH = Path("Models/cricket_objects/best.pt")
 EXTERNAL_BALL_MODEL_PATH = Path("Models/cricket_objects/best_external.pt")
 OUTPUT_DIR = Path("outputs/video_analysis")
+PROCESSED_VIDEO_DIR = Path("outputs/processed_videos")
+REPORTS_DIR = Path("outputs/reports")
 REVIEW_FRAMES_DIR = Path("outputs/review_frames")
 REVIEW_FRAMES_CSV = REVIEW_FRAMES_DIR / "review_frames.csv"
 FIELD_ZONE_CORRECTIONS_CSV = Path("outputs/field_zone_corrections.csv")
@@ -986,6 +1002,171 @@ def extract_first_video_frame(uploaded_video):
     return frame
 
 
+def _draw_ball_detections(frame, ball_detections):
+    for detection in ball_detections or []:
+        x1, y1, x2, y2 = detection["bbox"]
+        center_x, center_y = detection["center"]
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
+        cv2.circle(frame, (center_x, center_y), 4, (0, 255, 255), -1)
+        draw_label(frame, f"ball {detection['confidence']:.2f}", x1, y1, (0, 180, 180))
+
+
+def _add_impact_marker_to_video(video_path, impact_info):
+    """Rewrite an analyzed video once so its retrospectively chosen impact frame is marked."""
+    if not impact_info or impact_info.get("impact_frame") is None:
+        return Path(video_path)
+
+    video_path = Path(video_path)
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return video_path
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    temp_path = video_path.with_name(f"{video_path.stem}_impact{video_path.suffix}")
+    writer = cv2.VideoWriter(
+        str(temp_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height)
+    )
+    if not writer.isOpened():
+        cap.release()
+        return video_path
+
+    frame_index = 0
+    while True:
+        success, frame = cap.read()
+        if not success:
+            break
+        draw_impact_marker(frame, impact_info, frame_index)
+        writer.write(frame)
+        frame_index += 1
+    cap.release()
+    writer.release()
+    temp_path.replace(video_path)
+    return video_path
+
+
+def save_batting_report(result, analysis_mode):
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    report_path = REPORTS_DIR / f"batting_analysis_{timestamp}.json"
+    impact = result.get("impact_info", {})
+    report = {
+        "analysis_mode": analysis_mode,
+        "ball_detected": bool(result.get("ball_detected_frames", 0)),
+        "bat_detected": bool(result.get("bat_detected_frames", 0)),
+        "possible_impact_frame": impact.get("impact_frame"),
+        "impact_confidence": impact.get("impact_confidence", "Unknown"),
+        "minimum_ball_bat_distance": impact.get("min_distance"),
+        "ball_model_used": result.get("ball_model_used", "Unknown"),
+        "bat_model_used": result.get("bat_model_used", "Unknown"),
+        "processed_video_path": str(result.get("output_path", "")),
+    }
+    with open(report_path, "w", encoding="utf-8") as report_file:
+        json.dump(report, report_file, indent=2)
+    result["report_path"] = report_path
+    result["batting_report"] = report
+    return report_path
+
+
+def process_batting_video(
+    video_path,
+    output_path,
+    ball_model_key="current_best",
+    bat_model_key="cricshot_bat",
+    confidence=0.25,
+):
+    """Process a clip with only the models needed for batting intelligence."""
+    ball_model = get_cached_yolo_model(ball_model_key)
+    bat_model = get_cached_yolo_model(bat_model_key)
+    if ball_model is None:
+        return {"success": False, "error": "The selected ball model is unavailable."}
+    if bat_model is None:
+        return {"success": False, "error": "The selected bat model is unavailable."}
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return {"success": False, "error": "Could not open uploaded video."}
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if width <= 0 or height <= 0:
+        cap.release()
+        return {"success": False, "error": "Could not read video width/height."}
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(
+        str(output_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height)
+    )
+    if not writer.isOpened():
+        cap.release()
+        return {"success": False, "error": "Could not create output video writer."}
+
+    frame_index = 0
+    ball_detected_frames = 0
+    bat_detected_frames = 0
+    ball_tracks = []
+    bat_detections_by_frame = {}
+    trajectory = []
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    while True:
+        success, frame = cap.read()
+        if not success:
+            break
+        annotated_frame = frame.copy()
+        ball_detections = detect_ball_in_frame(frame, ball_model, confidence)
+        bat_detections = detect_bat_in_frame(frame, bat_model, confidence)
+        if ball_detections:
+            ball_detected_frames += 1
+            main_ball = max(ball_detections, key=lambda item: item["confidence"])
+            ball_tracks.append(main_ball["center"])
+            trajectory.append(tuple(main_ball["center"]))
+        else:
+            ball_tracks.append(None)
+        if bat_detections:
+            bat_detected_frames += 1
+            bat_detections_by_frame[frame_index] = bat_detections
+
+        _draw_ball_detections(annotated_frame, ball_detections)
+        draw_bat_detections(annotated_frame, bat_detections)
+        for index in range(1, len(trajectory[-35:])):
+            recent = trajectory[-35:]
+            cv2.line(annotated_frame, recent[index - 1], recent[index], (0, 255, 255), 3)
+        writer.write(annotated_frame)
+        frame_index += 1
+        if total_frames > 0:
+            progress_bar.progress(min(frame_index / total_frames, 1.0))
+            status_text.text(f"Processing frame {frame_index}/{total_frames}")
+
+    cap.release()
+    writer.release()
+    progress_bar.empty()
+    status_text.empty()
+    if frame_index == 0:
+        return {"success": False, "error": "No video frames were processed."}
+
+    impact_info = find_possible_impact_frame(ball_tracks, bat_detections_by_frame)
+    _add_impact_marker_to_video(output_path, impact_info)
+    ball_info = get_model_info(ball_model_key) or {}
+    bat_info = get_model_info(bat_model_key) or {}
+    return {
+        "success": True,
+        "analysis_mode": "Batting Analysis",
+        "output_path": Path(output_path),
+        "total_frames": frame_index,
+        "ball_detected_frames": ball_detected_frames,
+        "bat_detected_frames": bat_detected_frames,
+        "ball_detection_rate": (ball_detected_frames / frame_index) * 100,
+        "bat_detection_rate": (bat_detected_frames / frame_index) * 100,
+        "impact_info": impact_info,
+        "ball_model_used": ball_info.get("name", ball_model_key),
+        "bat_model_used": bat_info.get("name", bat_model_key),
+    }
+
+
 def get_default_pitch_points(frame):
     height, width = frame.shape[:2]
     return {
@@ -1120,9 +1301,17 @@ def process_video(
     shot_trajectory_mode="Use last part of trajectory",
     manual_contact_frame=None,
     field_setup=None,
+    bat_model_key=None,
 ):
     model = None
     ensemble_models = []
+    bat_model = get_cached_yolo_model(bat_model_key) if bat_model_key else None
+
+    if bat_model_key and bat_model is None:
+        return {
+            "success": False,
+            "error": "The selected bat model is unavailable. Bowling Analysis remains available.",
+        }
     stump_model = load_yolo_model(str(CRICKET_OBJECTS_MODEL_PATH))
 
     if stump_model is None:
@@ -1208,6 +1397,8 @@ def process_video(
 
     trajectory_points = []
     ball_positions = []
+    bat_detections_by_frame = {}
+    bat_detected_frames = 0
     stump_detections_by_frame = []
     last_raw_frame = None
     previous_roi_box = None
@@ -1257,6 +1448,12 @@ def process_video(
         last_raw_frame = frame.copy()
         annotated_frame = frame.copy()
         low_confidence_ball_detections = []
+        bat_detections = detect_bat_in_frame(frame, bat_model, confidence) if bat_model else []
+
+        if bat_detections:
+            bat_detected_frames += 1
+            bat_detections_by_frame[frame_index] = bat_detections
+        draw_bat_detections(annotated_frame, bat_detections)
 
         detection_result = run_pitch_roi_detection(
             frame,
@@ -1652,6 +1849,10 @@ def process_video(
             "error": "No frames were processed. The uploaded video may be corrupted or unsupported.",
         }
 
+    impact_info = find_possible_impact_frame(ball_positions, bat_detections_by_frame)
+    if bat_model is not None:
+        _add_impact_marker_to_video(output_path, impact_info)
+
     ball_detection_rate = 0
     stump_detection_rate = 0
 
@@ -1745,6 +1946,7 @@ def process_video(
         "total_frames": frame_index,
         "ball_detected_frames": ball_detected_frames,
         "stump_detected_frames": stump_detected_frames,
+        "bat_detected_frames": bat_detected_frames,
         "total_ball_detections": total_ball_detections,
         "low_confidence_ball_frames": low_confidence_ball_frames,
         "total_stump_detections": total_stump_detections,
@@ -1775,7 +1977,59 @@ def process_video(
         "camera_view": camera_view,
         "review_frame_count": review_frame_count,
         "review_frames_dir": REVIEW_FRAMES_DIR,
+        "impact_info": impact_info,
+        "ball_model_used": "Current Best Ball + Stump Model",
+        "bat_model_used": (
+            (get_model_info(bat_model_key) or {}).get("name", bat_model_key)
+            if bat_model_key
+            else "Not used"
+        ),
     }
+
+
+def show_batting_analysis_results(result):
+    from Backends.src.ui.ui_components import metric_card, section_header
+
+    section_header("Processed Video")
+    with open(result["output_path"], "rb") as video_file:
+        video_bytes = video_file.read()
+    st.video(video_bytes)
+
+    impact = result.get("impact_info", {})
+    impact_frame = impact.get("impact_frame")
+    min_distance = impact.get("min_distance")
+    cols = st.columns(5)
+    with cols[0]:
+        metric_card("Ball Detected", "Yes" if result.get("ball_detected_frames") else "No")
+    with cols[1]:
+        metric_card("Bat Detected", "Yes" if result.get("bat_detected_frames") else "No")
+    with cols[2]:
+        metric_card("Impact Frame", str(impact_frame) if impact_frame is not None else "Not found")
+    with cols[3]:
+        metric_card("Impact Confidence", impact.get("impact_confidence", "Unknown"))
+    with cols[4]:
+        metric_card("Minimum Distance", f"{min_distance:.1f} px" if min_distance is not None else "Unknown")
+
+    st.caption(f"Ball model: {result.get('ball_model_used', 'Unknown')}")
+    st.caption(f"Bat model: {result.get('bat_model_used', 'Unknown')}")
+    st.caption(f"Processed video: {result['output_path']}")
+    if result.get("report_path"):
+        st.caption(f"JSON report: {result['report_path']}")
+    if not result.get("ball_detected_frames"):
+        st.warning("No ball was detected. Try a clearer clip or the other ball model.")
+    if not result.get("bat_detected_frames"):
+        st.warning("No bat was detected in this clip.")
+    if impact_frame is None:
+        st.warning("A possible ball-bat impact frame could not be estimated.")
+
+    with open(result["output_path"], "rb") as video_file:
+        st.download_button(
+            "Download Processed Video",
+            data=video_file,
+            file_name=Path(result["output_path"]).name,
+            mime="video/mp4",
+            key="download_batting_processed_video",
+        )
 
 
 def show_video_analysis_results(result, selected_model_name, preset_name, show_pitch_roi):
@@ -1838,6 +2092,19 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
         )
     with timing_cols[2]:
         metric_card("ROI Frames", str(result.get("roi_detected_frames", 0)), result.get("last_roi_size", "Full frame"))
+
+    if result.get("analysis_mode") == "Full Delivery Analysis":
+        section_header("Batting Impact")
+        impact = result.get("impact_info", {})
+        impact_frame = impact.get("impact_frame")
+        min_distance = impact.get("min_distance")
+        impact_cols = st.columns(4)
+        impact_cols[0].metric("Bat Detected", "Yes" if result.get("bat_detected_frames") else "No")
+        impact_cols[1].metric("Possible Impact Frame", impact_frame if impact_frame is not None else "Not found")
+        impact_cols[2].metric("Impact Confidence", impact.get("impact_confidence", "Unknown"))
+        impact_cols[3].metric("Minimum Distance", f"{min_distance:.1f} px" if min_distance is not None else "Unknown")
+        if not result.get("bat_detected_frames"):
+            st.warning("No bat was detected in this clip.")
 
     section_header("Bounce / Pitch Estimate")
     calib_col1, calib_col2 = st.columns(2)
@@ -2010,7 +2277,7 @@ def show_video_analysis_page():
 
     page_header(
         "Video Analysis",
-        "Upload a bowling clip. CricVision AI will detect balls, stumps, draw the ball trajectory, and estimate the bounce/pitch point.",
+        "Analyze bowling, batting, or a full delivery with models loaded only when they are needed.",
     )
 
     if "video_analysis_result" not in st.session_state:
@@ -2018,27 +2285,67 @@ def show_video_analysis_page():
     if "video_analysis_settings" not in st.session_state:
         st.session_state.video_analysis_settings = {}
 
+    analysis_mode = st.selectbox(
+        "Analysis Mode",
+        ["Bowling Analysis", "Batting Analysis", "Full Delivery Analysis"],
+        index=0,
+        key="video_analysis_mode",
+    )
     model_options = get_model_options()
+    selected_bat_model_key = None
+
+    with st.expander("Model Status", expanded=False):
+        for status in validate_model_paths().values():
+            icon = "✅" if status["found"] else "⚠️"
+            st.write(f"{icon} {status['name']}: {status['status']}")
     tab_upload, tab_model, tab_debug, tab_results = st.tabs(
         ["Upload", "Model Settings", "Advanced Debug", "Results"]
     )
 
     with tab_model:
         section_header("Detection Model")
-        selected_model_name = st.selectbox(
-            "Choose detection model",
-            list(model_options.keys()),
-            key="video_analysis_model",
-        )
+        if analysis_mode == "Batting Analysis":
+            batting_ball_options = {
+                "Current Best Ball + Stump Model": "current_best",
+                "CricShot10k Ball Detector": "cricshot_ball",
+            }
+            selected_model_name = st.selectbox(
+                "Ball model",
+                list(batting_ball_options),
+                key="video_analysis_batting_ball_model",
+            )
+            selected_ball_model_key = batting_ball_options[selected_model_name]
+            selected_model_path = get_model_path(selected_ball_model_key)
+            use_ensemble = False
+            selected_bat_model_key = "cricshot_bat"
+            st.selectbox(
+                "Bat model",
+                ["CricShot10k Bat Detector"],
+                key="video_analysis_bat_model",
+            )
+        else:
+            selected_model_name = st.selectbox(
+                "Choose detection model",
+                list(model_options.keys()),
+                key="video_analysis_model",
+            )
+            selected_model = model_options[selected_model_name]
+            selected_model_path = selected_model["path"]
+            use_ensemble = selected_model.get("ensemble", False)
+            selected_ball_model_key = "current_best"
+            if analysis_mode == "Full Delivery Analysis":
+                selected_bat_model_key = "cricshot_bat"
+                st.selectbox(
+                    "Bat model",
+                    ["CricShot10k Bat Detector"],
+                    key="video_analysis_full_bat_model",
+                )
 
-        selected_model = model_options[selected_model_name]
-        selected_model_path = selected_model["path"]
-        use_ensemble = selected_model.get("ensemble", False)
-
-        if not use_ensemble and not selected_model_path.exists():
-            st.error(f"Model not found: {selected_model_path}")
+        if not use_ensemble and (selected_model_path is None or not selected_model_path.exists()):
+            st.warning(f"Model not found: {selected_model_path}")
             info_panel("Make sure your model file is inside the correct Models folder.")
-            st.stop()
+        if selected_bat_model_key and not (get_model_path(selected_bat_model_key) or Path()).is_file():
+            st.warning("CricShot10k Bat Detector is missing. Batting modes cannot run until it is added.")
 
         badge_row([status_badge(f"Model: {selected_model_name}", "cyan")])
 
@@ -2048,7 +2355,7 @@ def show_video_analysis_page():
                 info_panel("Active ensemble models: " + ", ".join(active_model_names))
             else:
                 st.warning("No configured ensemble model files were found.")
-        else:
+        elif selected_model_path is not None:
             st.caption(f"Model path: {selected_model_path}")
 
         info_panel(
@@ -2141,7 +2448,7 @@ def show_video_analysis_page():
             "For phone videos, use landscape mode if possible. Good lighting and a stable camera will improve tracking."
         )
         uploaded_video = st.file_uploader(
-            "Upload bowling video from phone or camera",
+            "Upload delivery video from phone or camera",
             type=["mp4", "mov", "avi", "mkv"],
             key="video_analysis_upload",
         )
@@ -2168,27 +2475,39 @@ def show_video_analysis_page():
                     input_video_path = Path(temp_input.name)
 
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-                raw_output_path = OUTPUT_DIR / f"raw_cricvision_analysis_{timestamp}.mp4"
-                browser_output_path = OUTPUT_DIR / f"cricvision_analysis_{timestamp}.mp4"
+                PROCESSED_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+                raw_output_path = PROCESSED_VIDEO_DIR / f"raw_cricvision_analysis_{timestamp}.mp4"
+                browser_output_path = PROCESSED_VIDEO_DIR / f"cricvision_analysis_{timestamp}.mp4"
 
                 with st.spinner("Analyzing video..."):
-                    result = process_video(
-                        video_path=input_video_path,
-                        output_path=raw_output_path,
-                        model_path=selected_model_path,
-                        confidence=confidence,
-                        imgsz=image_size,
-                        use_ensemble=use_ensemble,
-                        show_pitch_roi=show_pitch_roi,
-                        calibration_mode=calibration_mode,
-                        manual_pitch_points=manual_pitch_points,
-                        shot_trajectory_mode=shot_trajectory_mode,
-                        manual_contact_frame=manual_contact_frame,
-                        field_setup=field_setup,
-                    )
+                    if analysis_mode == "Batting Analysis":
+                        result = process_batting_video(
+                            video_path=input_video_path,
+                            output_path=raw_output_path,
+                            ball_model_key=selected_ball_model_key,
+                            bat_model_key=selected_bat_model_key,
+                            confidence=confidence,
+                        )
+                    else:
+                        result = process_video(
+                            video_path=input_video_path,
+                            output_path=raw_output_path,
+                            model_path=selected_model_path,
+                            confidence=confidence,
+                            imgsz=image_size,
+                            use_ensemble=use_ensemble,
+                            show_pitch_roi=show_pitch_roi,
+                            calibration_mode=calibration_mode,
+                            manual_pitch_points=manual_pitch_points,
+                            shot_trajectory_mode=shot_trajectory_mode,
+                            manual_contact_frame=manual_contact_frame,
+                            field_setup=field_setup,
+                            bat_model_key=selected_bat_model_key,
+                        )
+                    result["analysis_mode"] = analysis_mode
                     result["active_preset"] = preset_name
                     result["active_model"] = selected_model_name
+                    result["ball_model_used"] = selected_model_name
 
                 if not result["success"]:
                     st.error(result["error"])
@@ -2200,8 +2519,11 @@ def show_video_analysis_page():
                             output_path=browser_output_path,
                         )
                         result["output_path"] = final_video_path
+                        if analysis_mode in {"Batting Analysis", "Full Delivery Analysis"}:
+                            save_batting_report(result, analysis_mode)
                         st.session_state.video_analysis_result = result
                         st.session_state.video_analysis_settings = {
+                            "analysis_mode": analysis_mode,
                             "selected_model_name": selected_model_name,
                             "preset_name": preset_name,
                             "show_pitch_roi": show_pitch_roi,
@@ -2228,12 +2550,15 @@ def show_video_analysis_page():
                 ),
             )
         else:
-            show_video_analysis_results(
-                result=result,
-                selected_model_name=settings.get("selected_model_name", result.get("active_model", "Unknown")),
-                preset_name=settings.get("active_preset", settings.get("preset_name", result.get("active_preset", "Unknown"))),
-                show_pitch_roi=settings.get("show_pitch_roi", False),
-            )
+            if result.get("analysis_mode") == "Batting Analysis":
+                show_batting_analysis_results(result)
+            else:
+                show_video_analysis_results(
+                    result=result,
+                    selected_model_name=settings.get("selected_model_name", result.get("active_model", "Unknown")),
+                    preset_name=settings.get("active_preset", settings.get("preset_name", result.get("active_preset", "Unknown"))),
+                    show_pitch_roi=settings.get("show_pitch_roi", False),
+                )
                 
 def estimate_line_from_stumps(bounce_point, stump_detections):
     """
