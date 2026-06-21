@@ -1912,7 +1912,7 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
     with correction_col1:
         corrected_zone = st.selectbox(
             "Manual correction: actual field zone",
-            ["No correction"] + DETAILED_FIELD_ZONES,
+            ["No correction"] + FIELD_ZONES,
             key="video_analysis_field_zone_correction",
         )
 

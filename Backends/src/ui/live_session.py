@@ -12,6 +12,7 @@ from Backends.src.analysis.cricket_agent import (
     generate_delivery_report,
 )
 from Backends.src.analysis.field_zones import (
+    SIMPLE_FIELD_ZONES,
     generate_wagon_wheel_data,
     find_nearest_fielder,
     get_active_field_setup,
@@ -1076,6 +1077,41 @@ def show_analysis_output(result):
             fielders=result.get("field_setup", {}).get("fielders", []),
         )
     )
+    correction_col1, correction_col2 = st.columns([2, 1])
+
+    with correction_col1:
+        corrected_zone = st.selectbox(
+            "Manual correction: actual shot zone",
+            ["No correction"] + SIMPLE_FIELD_ZONES,
+            key="live_session_field_zone_correction",
+        )
+
+    with correction_col2:
+        save_correction = st.button("Save Zone Correction", key="save_live_field_zone_correction")
+
+    if save_correction:
+        if corrected_zone == "No correction":
+            st.warning("Choose an actual zone before saving a correction.")
+        else:
+            save_field_analysis_history(
+                {
+                    "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
+                    "source": "live_session_correction",
+                    "batter_handedness": result.get("batter_handedness", ""),
+                    "bowler_arm": result.get("bowler_arm", ""),
+                    "camera_view": result.get("camera_view", ""),
+                    "preset": result.get("field_setup", {}).get("preset", "Custom"),
+                    "simple_zone": wagon_wheel.get("simple_zone", "Unknown"),
+                    "detailed_zone": wagon_wheel.get("detailed_zone", "Unknown"),
+                    "shot_angle": "" if shot_angle is None else f"{shot_angle:.2f}",
+                    "nearest_fielder": nearest_fielder_name,
+                    "confidence": wagon_wheel.get("confidence", "Low"),
+                    "corrected_zone": corrected_zone,
+                }
+            )
+            result["wagon_wheel"]["corrected_zone"] = corrected_zone
+            st.session_state.live_last_result = result
+            st.success("Field-zone correction saved for future review.")
 
     show_delivery_report(result)
     show_cricket_delivery_report(result)
