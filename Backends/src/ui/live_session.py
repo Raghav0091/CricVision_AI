@@ -1110,6 +1110,7 @@ def initialize_live_session_state():
 
 def show_live_session_page():
     from Backends.src.analysis.field_zones import get_active_field_setup
+    from Backends.src.ui.interactive_field_map import render_field_setup_card
     from Backends.src.ui.theme import render_page_header, render_status_pill
 
     initialize_live_session_state()
@@ -1194,9 +1195,9 @@ def show_live_session_page():
         unsafe_allow_html=True,
     )
 
-    with st.expander("Advanced Settings", expanded=False):
-        from Backends.src.ui.field_map import draw_field_map as draw_field_map_preview
+    field_setup = render_field_setup_card(key_prefix="live_session_field", compact=True, default_preset="Balanced")
 
+    with st.expander("Advanced Settings", expanded=False):
         st.selectbox(
             "Detection model",
             list(model_options.keys()),
@@ -1215,7 +1216,6 @@ def show_live_session_page():
             key="live_session_preset",
         )
         st.checkbox("Show pitch ROI overlay", value=False, key="live_session_show_roi")
-        show_current_field_setup_preview(get_active_field_setup(), draw_field_map_preview)
 
     selected_model_name = st.session_state.get(
         "live_session_model",
@@ -1229,7 +1229,6 @@ def show_live_session_page():
     confidence = active_preset["confidence"]
     image_size = active_preset["imgsz"]
     show_pitch_roi = st.session_state.get("live_session_show_roi", False)
-    field_setup = get_active_field_setup()
 
     if st.session_state.live_status_message:
         st.info(st.session_state.live_status_message)

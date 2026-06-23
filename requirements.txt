@@ -10,5 +10,6 @@ plotly
 scikit-learn
 matplotlib
 imageio-ffmpeg
+streamlit-drawable-canvas>=0.9.3
 torch
 torchvision

@@ -6,6 +6,19 @@ import math
 from pathlib import Path
 
 
+from Backends.src.analysis.field_geometry import (
+    UMPIRE_POSITIONS_RH,
+    angle_to_field_zone,
+    ensure_fielder_polar,
+    ensure_umpire_polar,
+    fielder_display_xy,
+    mirror_angle_for_handedness as mirror_signed_angle_for_handedness,
+    polar_to_xy,
+    umpire_from_name,
+    xy_to_polar,
+)
+from Backends.src.data.field_presets import PRESET_NAMES, create_preset_fielders
+
 SIMPLE_FIELD_ZONES = [
     "Third Man",
     "Gully",
@@ -79,7 +92,7 @@ FIELD_PRESETS = [
 DEPTH_OPTIONS = ["close", "inner ring", "deep", "boundary"]
 FIELD_SETUP_PATH = Path("outputs/field_setups/latest_field_setup.json")
 FIELD_ANALYSIS_HISTORY_PATH = Path("outputs/video_analysis/field_analysis_history.csv")
-FIELD_COORDINATE_SYSTEM_VERSION = 2
+FIELD_COORDINATE_SYSTEM_VERSION = 3
 
 
 # Base coordinates are always stored from a right-handed batter's perspective.
@@ -149,47 +162,50 @@ DETAILED_RIGHT_HAND_RANGES = [
 
 ZONE_ANGLES = {
     "Bowler": 0,
-    "Long Off": 0,
-    "Straight Hit / Long Stop": 0,
-    "Deep Mid Off": 8,
-    "Mid Off": 15,
-    "Deep Extra Cover": 24,
-    "Extra Cover": 32,
-    "Cover": 45,
-    "Cover Point": 58,
-    "Forward Point": 72,
+    "Straight": 0,
+    "Long Off": 18,
+    "Long On": -18,
+    "Mid Off": 28,
+    "Mid On": -28,
+    "Extra Cover": 42,
+    "Cover": 55,
+    "Deep Cover": 55,
     "Point": 90,
-    "Backward Point": 98,
-    "Gully": 112,
+    "Deep Point": 90,
+    "Gully": 120,
+    "Third Man": 145,
+    "Wicket Keeper": 180,
+    "First Slip": 155,
+    "Second Slip": 150,
+    "Third Slip": 145,
+    "Fine Leg": -145,
+    "Short Fine Leg": -140,
+    "Square Leg": -90,
+    "Deep Square Leg": -90,
+    "Mid Wicket": -55,
+    "Deep Mid Wicket": -55,
+    "Cow Corner": -38,
+    "Deep Extra Cover": 42,
+    "Deep Mid Off": 28,
+    "Deep Mid On": -28,
+    "Straight Hit / Long Stop": 0,
     "Third Man / Gully": 125,
     "Fourth Slip": 124,
-    "Third Slip": 132,
     "Deep Third Man": 134,
-    "Third Man": 136,
     "Fly Slip": 145,
-    "Second Slip": 144,
-    "First Slip": 154,
-    "Wicket Keeper": 180,
-    "Leg Slip": 205,
-    "Short Fine Leg": 195,
-    "Fine Leg": 205,
-    "Deep Fine Leg": 210,
-    "Long Leg": 220,
-    "Deep Backward Square": 235,
-    "Backward Square Leg": 240,
-    "Square Leg": 252,
-    "Deep Square Leg": 252,
-    "Short Leg": 258,
-    "Deep Forward Square": 272,
-    "Deep Mid Wicket": 286,
-    "Mid Wicket": 296,
-    "Cow Corner": 310,
-    "Mid On": 326,
-    "Deep Mid On": 340,
-    "Long On": 344,
+    "Leg Slip": -205,
+    "Backward Point": 98,
+    "Forward Point": 72,
+    "Cover Point": 58,
+    "Backward Square Leg": -240,
+    "Short Leg": -258,
     "Silly Point": 95,
     "Silly Mid Off": 28,
-    "Silly Mid On": 332,
+    "Silly Mid On": -28,
+    "Deep Fine Leg": -210,
+    "Long Leg": -220,
+    "Deep Backward Square": -235,
+    "Deep Forward Square": -272,
 }
 
 POSITION_DEFAULTS = {
@@ -266,19 +282,20 @@ def apply_batter_handedness(position, batter_hand):
 def mirror_angle_for_handedness(angle, batter_handedness):
     if angle is None:
         return None
-    if normalize_handedness(batter_handedness).startswith("Left"):
-        return (360 - angle) % 360
-    return angle % 360
+    signed = float(angle) % 360
+    if signed > 180:
+        signed -= 360
+    mirrored = mirror_signed_angle_for_handedness(signed, batter_handedness)
+    return (mirrored + 360) % 360
 
 
-def _zone_from_ranges(angle, ranges):
+def _signed_shot_angle(angle):
     if angle is None:
-        return "Unknown"
-    normalized_angle = angle % 360
-    for start_angle, end_angle, zone_name in ranges:
-        if start_angle <= normalized_angle < end_angle:
-            return zone_name
-    return "Unknown"
+        return None
+    signed = float(angle) % 360
+    if signed > 180:
+        signed -= 360
+    return signed
 
 
 def calculate_shot_angle(start_point, end_point):
@@ -294,13 +311,11 @@ def calculate_shot_angle(start_point, end_point):
 
 
 def get_simple_8_zone(angle, batter_handedness="Right-hand batter"):
-    adjusted_angle = mirror_angle_for_handedness(angle, batter_handedness)
-    return _zone_from_ranges(adjusted_angle, SIMPLE_RIGHT_HAND_RANGES)
+    return angle_to_field_zone(_signed_shot_angle(angle), batter_handedness)
 
 
 def get_detailed_field_zone(angle, batter_handedness="Right-hand batter"):
-    adjusted_angle = mirror_angle_for_handedness(angle, batter_handedness)
-    return _zone_from_ranges(adjusted_angle, DETAILED_RIGHT_HAND_RANGES)
+    return angle_to_field_zone(_signed_shot_angle(angle), batter_handedness)
 
 
 def classify_shot_zone(angle, batter_handedness="Right-hand batter"):
@@ -403,18 +418,13 @@ def generate_wagon_wheel_data(
 
 def get_position_defaults(position, depth=None):
     defaults = POSITION_DEFAULTS.get(position, POSITION_DEFAULTS["Cover"]).copy()
-    selected_depth = depth or defaults["depth"]
-    if (
-        depth is not None
-        and selected_depth != defaults["depth"]
-        and selected_depth in DEPTH_SCALE
-        and position not in {"Wicket Keeper", "Bowler"}
-    ):
-        angle = math.radians(ZONE_ANGLES.get(position, ZONE_ANGLES.get(defaults["zone"], 45)))
-        radius = DEPTH_SCALE[selected_depth]
-        defaults["x"] = round(math.sin(angle) * radius, 3)
-        defaults["y"] = round(-math.cos(angle) * radius, 3)
-        defaults["depth"] = selected_depth
+    selected_depth = depth or defaults.get("depth", "inner ring")
+    angle = ZONE_ANGLES.get(position, ZONE_ANGLES.get(defaults.get("zone", "Cover"), 55))
+    radius = DEPTH_SCALE.get(selected_depth, 0.62)
+    defaults["angle"] = float(angle)
+    defaults["radius"] = float(radius)
+    defaults["x"], defaults["y"] = polar_to_xy(angle, radius)
+    defaults["depth"] = selected_depth
     return defaults
 
 
@@ -425,13 +435,28 @@ def _fielder(name, position, depth=None):
         "position": position,
         "zone": defaults["zone"],
         "depth": defaults["depth"],
+        "angle": defaults["angle"],
+        "radius": defaults["radius"],
         "x": defaults["x"],
         "y": defaults["y"],
     }
 
 
-def create_default_fielders(preset_name="Attacking Test Field", batter_handedness="Right-hand batter"):
-    preset_name = preset_name or "Attacking Test Field"
+LEGACY_PRESET_MAP = {
+    "Attacking Test Field": "Attacking Pace",
+    "Defensive ODI Field": "Defensive Pace",
+    "T20 Ring Field": "T20 Death Overs",
+    "Off Side Trap": "Attacking Pace",
+    "Leg Side Trap": "Defensive Pace",
+    "Spin Attacking Field": "Spin Attack",
+    "Pace Slip Field": "Attacking Pace",
+}
+
+
+def create_default_fielders(preset_name="Balanced", batter_handedness="Right-hand batter"):
+    preset_name = LEGACY_PRESET_MAP.get(preset_name, preset_name)
+    if preset_name in PRESET_NAMES:
+        return [ensure_fielder_polar(dict(item)) for item in create_preset_fielders(preset_name)]
     presets = {
         "Attacking Test Field": [
             ("Bowler", "Bowler", "close"), ("Wicket Keeper", "Wicket Keeper", "close"),
@@ -494,23 +519,28 @@ def create_default_fielders(preset_name="Attacking Test Field", batter_handednes
 
 
 def create_default_umpires():
-    """Return separately stored right-handed base positions for both umpires."""
-    return [
-        {"name": name, "x": x, "y": y}
-        for name, (x, y) in RIGHT_HANDED_UMPIRE_POSITIONS.items()
-    ]
+    """Return separately stored RH angle/radius umpire positions."""
+    return [ensure_umpire_polar(umpire_from_name(name)) for name in UMPIRE_POSITIONS_RH]
 
 
 def upgrade_field_setup_coordinates(field_setup):
-    """Upgrade legacy screen-oriented Y values without touching saved X edits."""
+    """Upgrade legacy coordinates to angle/radius without flipping saved RH data."""
     if not isinstance(field_setup, dict):
         return field_setup
-    if field_setup.get("coordinate_system_version", 1) < FIELD_COORDINATE_SYSTEM_VERSION:
+    version = field_setup.get("coordinate_system_version", 1)
+    if version < 2:
         for fielder in field_setup.get("fielders", []):
             try:
                 fielder["y"] = -float(fielder.get("y", 0))
             except (TypeError, ValueError):
                 continue
+        field_setup["coordinate_system_version"] = 2
+        version = 2
+    for fielder in field_setup.get("fielders", []):
+        ensure_fielder_polar(fielder)
+    for umpire in field_setup.get("umpires", []):
+        ensure_umpire_polar(umpire)
+    if version < FIELD_COORDINATE_SYSTEM_VERSION:
         field_setup["coordinate_system_version"] = FIELD_COORDINATE_SYSTEM_VERSION
     field_setup.setdefault("umpires", create_default_umpires())
     return field_setup
@@ -523,19 +553,14 @@ def find_nearest_fielder(
 ):
     if shot_angle is None or not fielders:
         return None
-    target_x = math.sin(math.radians(shot_angle))
-    target_y = -math.cos(math.radians(shot_angle))
+    target_signed = _signed_shot_angle(shot_angle)
+    target_x = math.sin(math.radians(target_signed))
+    target_y = -math.cos(math.radians(target_signed))
     best_fielder = None
     best_distance = None
     for fielder in fielders:
-        try:
-            fielder_x = float(fielder.get("x", 0))
-            fielder_y = float(fielder.get("y", 0))
-        except (TypeError, ValueError):
-            continue
-        fielder_x, fielder_y = apply_batter_handedness(
-            (fielder_x, fielder_y), batter_handedness
-        )
+        ensure_fielder_polar(fielder)
+        fielder_x, fielder_y = polar_to_xy(fielder["angle"], fielder["radius"])
         fielder_length = math.hypot(fielder_x, fielder_y) or 1
         fielder_x /= fielder_length
         fielder_y /= fielder_length
@@ -594,11 +619,11 @@ def get_active_field_setup():
         st.session_state["current_field_setup"] = saved_setup
         return saved_setup
     default_setup = {
-        "preset": "Attacking Test Field",
+        "preset": "Balanced",
         "batter_handedness": "Right-hand batter",
         "bowler_arm": "Right-arm bowler",
         "camera_view": "Behind bowler",
-        "fielders": create_default_fielders("Attacking Test Field", "Right-hand batter"),
+        "fielders": create_default_fielders("Balanced", "Right-hand batter"),
         "umpires": create_default_umpires(),
         "coordinate_system_version": FIELD_COORDINATE_SYSTEM_VERSION,
         "is_default_setup": True,
@@ -628,15 +653,16 @@ def create_field_map_figure(
     batter_handedness="Right-hand batter",
     umpires=None,
 ):
-    from Backends.src.ui.field_map import draw_field_map
+    from Backends.src.ui.interactive_field_map import draw_cricket_field_figure
+
     shot_angle = None if shot_direction is None else shot_direction.get("shot_angle")
     selected_zone = "Unknown" if shot_direction is None else shot_direction.get("detailed_zone", "Unknown")
-    return draw_field_map(
+    return draw_cricket_field_figure(
+        fielders=fielders,
+        umpires=umpires,
+        handedness=batter_handedness,
         shot_angle=shot_angle,
         selected_zone=selected_zone,
-        fielders=fielders,
-        batter_handedness=batter_handedness,
-        umpires=umpires,
     )
 
 

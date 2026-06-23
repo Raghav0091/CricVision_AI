@@ -6,20 +6,20 @@ NAV_ITEMS = [
     ("Home", "Dashboard"),
     ("Analyze", "Video Analysis"),
     ("Live Session", "Live Session"),
-    ("Field Setup", "Field Map"),
     ("Reports", "Results"),
     ("Training Lab", "Training"),
     ("Datasets", "Datasets"),
+    ("Field Setup Lab", "Field Map"),
 ]
 
 NAV_ICONS = {
     "Home": "🏠",
     "Analyze": "🎯",
     "Live Session": "📹",
-    "Field Setup": "🗺️",
     "Reports": "📋",
     "Training Lab": "🧪",
     "Datasets": "📁",
+    "Field Setup Lab": "🧪",
 }
 
 PAGE_ROUTE = {label: route for label, route in NAV_ITEMS}

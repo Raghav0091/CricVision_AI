@@ -2211,7 +2211,10 @@ def show_video_analysis_page():
         st.session_state.video_analysis_settings = {}
 
     model_options = get_model_options()
-    field_setup = get_active_field_setup()
+
+    from Backends.src.ui.interactive_field_map import render_field_setup_card
+
+    field_setup = render_field_setup_card(key_prefix="video_analysis_field", compact=True, default_preset="Balanced")
 
     clean_upload_box("Upload cricket video")
     uploaded_video = st.file_uploader(
@@ -2314,8 +2317,6 @@ def show_video_analysis_page():
             for status in validate_model_paths().values():
                 icon = "Ready" if status["found"] else "Missing"
                 st.write(f"{icon}: {status['name']}")
-
-        show_current_field_setup_preview(field_setup, draw_field_map)
 
     analysis_mode = st.session_state.get("video_analysis_mode", "Full Delivery Analysis")
     preset_name = st.session_state.get("video_analysis_preset", "Balanced Mode")
