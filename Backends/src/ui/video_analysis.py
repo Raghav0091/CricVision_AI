@@ -11,7 +11,6 @@ import cv2
 import imageio_ffmpeg
 import numpy as np
 import streamlit as st
-from ultralytics import YOLO
 
 from Backends.src.analysis.cricket_agent import (
     calculate_detection_quality,
@@ -84,6 +83,8 @@ def load_yolo_model(model_path_str):
     if not model_path.exists():
         return None
 
+    from ultralytics import YOLO
+
     return YOLO(str(model_path))
 
 
@@ -91,15 +92,19 @@ def get_model_options():
     return {
         "Ball + Stump Detector": {
             "path": CRICKET_OBJECTS_MODEL_PATH,
+            "model_key": "current_best",
         },
         "Old Ball Detector": {
             "path": BALL_MODEL_PATH,
+            "model_key": None,
         },
         "External Ball Model": {
             "path": EXTERNAL_BALL_MODEL_PATH,
+            "model_key": None,
         },
         ENSEMBLE_MODEL_NAME: {
             "path": None,
+            "model_key": None,
             "ensemble": True,
         },
     }
@@ -110,18 +115,21 @@ def get_ensemble_model_configs():
         {
             "name": "Ball + Stump Detector",
             "path": CRICKET_OBJECTS_MODEL_PATH,
+            "model_key": "current_best",
             "use_ball": True,
             "use_stump": True,
         },
         {
             "name": "Old Ball Detector",
             "path": BALL_MODEL_PATH,
+            "model_key": None,
             "use_ball": True,
             "use_stump": False,
         },
         {
             "name": "External Ball Model",
             "path": EXTERNAL_BALL_MODEL_PATH,
+            "model_key": None,
             "use_ball": True,
             "use_stump": False,
         },
@@ -129,11 +137,16 @@ def get_ensemble_model_configs():
 
 
 def get_available_ensemble_model_names():
-    return [
-        config["name"]
-        for config in get_ensemble_model_configs()
-        if config["path"].exists()
-    ]
+    available = []
+    for config in get_ensemble_model_configs():
+        model_key = config.get("model_key")
+        if model_key:
+            path = get_model_path(model_key)
+            if path is not None and path.is_file():
+                available.append(config["name"])
+        elif config["path"].exists():
+            available.append(config["name"])
+    return available
 
 
 def get_model_names(model):
@@ -164,6 +177,15 @@ def map_model_classes(model):
             class_names[int(class_id)] = "stump"
 
     return class_names
+
+
+def load_detection_model(model_key=None, model_path=None):
+    """Load a YOLO detection model from a registry key or legacy path."""
+    if model_key:
+        return get_cached_yolo_model(model_key)
+    if model_path is None:
+        return None
+    return load_yolo_model(str(model_path))
 
 
 def calculate_iou(box1, box2):
@@ -537,10 +559,10 @@ def load_ensemble_models():
     models = []
 
     for config in get_ensemble_model_configs():
-        if not config["path"].exists():
-            continue
-
-        model = load_yolo_model(str(config["path"]))
+        model = load_detection_model(
+            model_key=config.get("model_key"),
+            model_path=config.get("path"),
+        )
 
         if model is None:
             continue
@@ -566,11 +588,10 @@ def resolve_ensemble_models(model_paths=None):
         if config["path"] not in model_paths and str(config["path"]) not in model_paths:
             continue
 
-        if not config["path"].exists():
-            continue
-
-        model = load_yolo_model(str(config["path"]))
-
+        model = load_detection_model(
+            model_key=config.get("model_key"),
+            model_path=config.get("path"),
+        )
         if model is None:
             continue
 
@@ -1289,6 +1310,7 @@ def process_video(
     video_path,
     output_path,
     model_path,
+    model_key=None,
     class_names=None,
     confidence=0.25,
     imgsz=640,
@@ -1310,12 +1332,12 @@ def process_video(
             "success": False,
             "error": "The selected bat model is unavailable. Bowling Analysis remains available.",
         }
-    stump_model = load_yolo_model(str(CRICKET_OBJECTS_MODEL_PATH))
+    stump_model = get_cached_yolo_model("current_best")
 
     if stump_model is None:
         return {
             "success": False,
-            "error": f"Stump model not found: {CRICKET_OBJECTS_MODEL_PATH}",
+            "error": "Current Best Ball + Stump Model is unavailable.",
         }
 
     stump_class_names = map_model_classes(stump_model)
@@ -1329,12 +1351,13 @@ def process_video(
                 "error": "No ensemble models were found. Add at least one configured model file.",
             }
     else:
-        model = load_yolo_model(str(model_path))
+        model = load_detection_model(model_key=model_key, model_path=model_path)
 
         if model is None:
+            model_label = (get_model_info(model_key) or {}).get("name") if model_key else None
             return {
                 "success": False,
-                "error": f"Model not found: {model_path}",
+                "error": f"Model not found: {model_label or model_path}",
             }
 
         class_names = map_model_classes(model)
@@ -2216,6 +2239,7 @@ def show_video_analysis_page():
         )
         selected_bat_model_key = None
         selected_ball_model_key = "current_best"
+        selected_model_key = "current_best"
 
         if analysis_mode == "Batting Analysis":
             batting_ball_options = {
@@ -2240,6 +2264,7 @@ def show_video_analysis_page():
             )
             selected_model = model_options[selected_model_name]
             selected_model_path = selected_model["path"]
+            selected_model_key = selected_model.get("model_key")
             use_ensemble = selected_model.get("ensemble", False)
             if analysis_mode == "Full Delivery Analysis":
                 selected_bat_model_key = "cricshot_bat"
@@ -2287,8 +2312,7 @@ def show_video_analysis_page():
 
         with st.expander("Model Status", expanded=False):
             for status in validate_model_paths().values():
-                icon = "Ready" if status["found"] else "Missing"
-                st.write(f"{icon}: {status['name']}")
+                st.write(f"{status['status']}: {status['name']}")
 
     analysis_mode = st.session_state.get("video_analysis_mode", "Full Delivery Analysis")
     preset_name = st.session_state.get("video_analysis_preset", "Balanced Mode")
@@ -2319,6 +2343,7 @@ def show_video_analysis_page():
         )
         selected_ball_model_key = batting_ball_options.get(selected_model_name, "current_best")
         selected_model_path = get_model_path(selected_ball_model_key)
+        selected_model_key = selected_ball_model_key
         use_ensemble = False
         selected_bat_model_key = "cricshot_bat"
     else:
@@ -2331,6 +2356,7 @@ def show_video_analysis_page():
             list(model_options.values())[0],
         )
         selected_model_path = selected_model["path"]
+        selected_model_key = selected_model.get("model_key")
         use_ensemble = selected_model.get("ensemble", False)
         selected_bat_model_key = "cricshot_bat" if analysis_mode == "Full Delivery Analysis" else None
 
@@ -2368,6 +2394,7 @@ def show_video_analysis_page():
                     video_path=input_video_path,
                     output_path=raw_output_path,
                     model_path=selected_model_path,
+                    model_key=selected_model_key,
                     confidence=confidence,
                     imgsz=image_size,
                     use_ensemble=use_ensemble,

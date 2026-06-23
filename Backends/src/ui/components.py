@@ -152,11 +152,24 @@ def model_status_card():
     statuses = list(validate_model_paths().values())
     for index, status in enumerate(statuses):
         with cols[index % 2]:
+            if status["local_ready"]:
+                hint = "Ready for analysis"
+                if status["lazy_only"]:
+                    hint += " (lazy only)"
+                pill_status = "Ready"
+            elif status["remote_available"]:
+                hint = "Downloads from Hugging Face on first use"
+                if status["lazy_only"]:
+                    hint += " (lazy only)"
+                pill_status = "Remote available"
+            else:
+                hint = status["path"]
+                pill_status = "Missing"
             render_metric_card(
                 status["name"],
                 status["status"],
-                hint=status["path"] if not status["found"] else "Ready for analysis",
-                status="Ready" if status["found"] else "Missing",
+                hint=hint,
+                status=pill_status,
             )
 
 

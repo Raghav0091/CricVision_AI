@@ -26,6 +26,8 @@ from Backends.src.tracking.ball_tracking_utils import (
     interpolate_missing_positions,
     smooth_trajectory,
 )
+from Backends.src.models.model_loader import get_cached_yolo_model
+from Backends.src.models.model_registry import get_model_info, get_model_path
 
 
 CRICKET_OBJECTS_MODEL_PATH = Path("Models/cricket_objects/best.pt")
@@ -62,18 +64,22 @@ def get_live_model_options():
     return {
         "Ball + Stump Detector": {
             "path": CRICKET_OBJECTS_MODEL_PATH,
+            "model_key": "current_best",
             "ensemble": False,
         },
         "Old Ball Detector": {
             "path": BALL_MODEL_PATH,
+            "model_key": None,
             "ensemble": False,
         },
         "External Ball Model": {
             "path": EXTERNAL_BALL_MODEL_PATH,
+            "model_key": None,
             "ensemble": False,
         },
         ENSEMBLE_MODEL_NAME: {
             "path": None,
+            "model_key": None,
             "ensemble": True,
         },
     }
@@ -345,6 +351,7 @@ def process_recorded_delivery(
     confidence,
     image_size,
     model_path=CRICKET_OBJECTS_MODEL_PATH,
+    model_key=None,
     use_ensemble=False,
     show_pitch_roi=False,
     field_setup=None,
@@ -362,7 +369,7 @@ def process_recorded_delivery(
         get_nearest_stump_detections,
         has_enough_ball_movement,
         load_ensemble_models,
-        load_yolo_model,
+        load_detection_model,
         map_model_classes,
         run_local_redetection,
         run_pitch_roi_detection,
@@ -377,12 +384,12 @@ def process_recorded_delivery(
 
     model = None
     ensemble_models = []
-    stump_model = load_yolo_model(str(CRICKET_OBJECTS_MODEL_PATH))
+    stump_model = get_cached_yolo_model("current_best")
 
     if stump_model is None:
         return {
             "success": False,
-            "error": f"Stump model not found: {CRICKET_OBJECTS_MODEL_PATH}",
+            "error": "Current Best Ball + Stump Model is unavailable.",
         }
 
     stump_class_names = map_model_classes(stump_model)
@@ -396,12 +403,13 @@ def process_recorded_delivery(
                 "error": "No ensemble models were found. Add at least one configured model file.",
             }
     else:
-        model = load_yolo_model(str(model_path))
+        model = load_detection_model(model_key=model_key, model_path=model_path)
 
         if model is None:
+            model_label = (get_model_info(model_key) or {}).get("name") if model_key else None
             return {
                 "success": False,
-                "error": f"Model not found: {model_path}",
+                "error": f"Model not found: {model_label or model_path}",
             }
 
         class_names = map_model_classes(model)
@@ -1131,6 +1139,7 @@ def show_live_session_page():
                             str(CRICKET_OBJECTS_MODEL_PATH),
                         )
                     ),
+                    model_key=analysis_settings.get("model_key"),
                     use_ensemble=analysis_settings.get("use_ensemble", False),
                     show_pitch_roi=analysis_settings.get("show_pitch_roi", False),
                     field_setup=analysis_settings.get("field_setup"),
@@ -1175,8 +1184,10 @@ def show_live_session_page():
         selected_model_name = st.session_state["live_session_model"]
         selected_model = model_options[selected_model_name]
         selected_model_path = selected_model["path"]
-        if not selected_model.get("ensemble", False) and not selected_model_path.exists():
-            st.warning(f"Model not found: {selected_model_path}")
+        selected_model_key = selected_model.get("model_key")
+        status_path = get_model_path(selected_model_key) if selected_model_key else selected_model_path
+        if not selected_model.get("ensemble", False) and status_path is not None and not status_path.exists():
+            st.warning(f"Model not found: {status_path}")
 
         st.selectbox(
             "Detection preset",
@@ -1192,6 +1203,7 @@ def show_live_session_page():
     )
     selected_model = model_options[selected_model_name]
     selected_model_path = selected_model["path"]
+    selected_model_key = selected_model.get("model_key")
     use_ensemble = selected_model.get("ensemble", False)
     preset_name = st.session_state.get("live_session_preset", "Balanced Mode")
     active_preset = DETECTION_PRESETS[preset_name]
@@ -1282,6 +1294,7 @@ def show_live_session_page():
             "confidence": confidence,
             "image_size": image_size,
             "model_path": str(selected_model_path),
+            "model_key": selected_model_key,
             "use_ensemble": use_ensemble,
             "show_pitch_roi": show_pitch_roi,
             "model_name": selected_model_name,

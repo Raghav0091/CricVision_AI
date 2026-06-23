@@ -38,7 +38,7 @@ def _active_model_label():
 
 def _system_ready_label():
     statuses = list(validate_model_paths().values())
-    ready = sum(1 for item in statuses if item["found"])
+    ready = sum(1 for item in statuses if item["found"] or item.get("remote_available"))
     if ready == len(statuses) and statuses:
         return "Ready"
     if ready > 0:

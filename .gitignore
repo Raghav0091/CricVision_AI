@@ -1,4 +1,5 @@
 # Python environments
+.env
 .venv/
 venv/
 env/
@@ -7,6 +8,8 @@ ENV/
 
 # Python cache
 __pycache__/
+**/__pycache__/
+**pycache**/
 *.pyc
 *.pyo
 *.pyd
@@ -17,6 +20,12 @@ __pycache__/
 # Large outputs
 outputs/
 runs/
+Models/CricShot10k/
+Models/cricshot10k/
+Models/remote/
+Models/cricket_objects/*Copy*.pt
+*.keras
+*.zip
 *.mp4
 *.avi
 *.mov

@@ -13,3 +13,5 @@ imageio-ffmpeg
 streamlit-drawable-canvas>=0.9.3
 torch
 torchvision
+huggingface_hub
+python-dotenv
