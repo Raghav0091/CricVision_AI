@@ -4,7 +4,6 @@ import streamlit as st
 
 from Backends.src.ui.theme import (
     render_empty_state,
-    render_feature_card,
     render_metric_card,
     render_section_title,
     render_status_pill,

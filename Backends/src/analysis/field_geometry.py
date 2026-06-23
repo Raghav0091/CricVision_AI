@@ -2,8 +2,8 @@
 
 import math
 
-# Shared visual tilt for pitch, labels, fielders, and zones (cricket angle 0 stays straight).
-PITCH_AXIS_DEGREES = -20
+# Shared visual tilt for pitch, labels, fielders, and zones (0 = straight up).
+PITCH_AXIS_DEGREES = 0
 DEFAULT_VISUAL_ROTATION = PITCH_AXIS_DEGREES
 
 FIELD_POSITION_ANGLES_RH = {
@@ -65,11 +65,17 @@ def normalize_handedness_label(handedness):
 
 def mirror_angle_for_handedness(angle_deg, handedness):
     """Mirror signed cricket angle for display; stored data stays RH-relative."""
+    return display_angle_for_handedness(angle_deg, handedness)
+
+
+def display_angle_for_handedness(angle_deg, handedness):
+    """RH cricket angle -> display angle before screen conversion."""
     if angle_deg is None:
         return None
+    angle = float(angle_deg)
     if is_left_handed(handedness):
-        return -float(angle_deg)
-    return float(angle_deg)
+        return -angle
+    return angle
 
 
 def apply_visual_rotation(angle_deg, visual_rotation_deg=DEFAULT_VISUAL_ROTATION):
@@ -80,7 +86,11 @@ def apply_visual_rotation(angle_deg, visual_rotation_deg=DEFAULT_VISUAL_ROTATION
 
 
 def polar_to_xy(angle_deg, radius):
-    """Convert RH cricket angle/radius to normalized RH x/y (no mirror, no rotation)."""
+    """Convert display angle/radius to normalized x/y.
+
+    x = sin(angle) * radius  (positive x = off side for RH)
+    y = -cos(angle) * radius (angle 0 points straight down the ground)
+    """
     radians = math.radians(float(angle_deg))
     radius = float(radius)
     x = math.sin(radians) * radius
@@ -100,20 +110,25 @@ def xy_to_polar(x, y):
 
 
 def polar_to_screen(angle_deg, radius, handedness="Right-handed", visual_rotation_deg=DEFAULT_VISUAL_ROTATION):
-    """Display-only normalized coordinates in roughly -1..1."""
-    display_angle = apply_visual_rotation(
-        mirror_angle_for_handedness(angle_deg, handedness),
-        visual_rotation_deg,
-    )
+    """Display-only normalized coordinates in roughly -1..1.
+
+    RH: display_angle = cricket_angle
+    LH: display_angle = -cricket_angle
+    Then: x = sin(display_angle) * radius, y = -cos(display_angle) * radius
+    """
+    display_angle = display_angle_for_handedness(angle_deg, handedness)
+    if visual_rotation_deg:
+        display_angle = apply_visual_rotation(display_angle, visual_rotation_deg)
     return polar_to_xy(display_angle, radius)
 
 
 def screen_to_polar(x, y, handedness="Right-handed", visual_rotation_deg=DEFAULT_VISUAL_ROTATION):
     """Convert display x/y back to RH cricket angle/radius."""
     display_angle, radius = xy_to_polar(x, y)
-    cricket_angle = display_angle - visual_rotation_deg
-    if is_left_handed(handedness):
-        cricket_angle = -cricket_angle
+    cricket_angle = display_angle
+    if visual_rotation_deg:
+        cricket_angle = display_angle - visual_rotation_deg
+    cricket_angle = display_angle_for_handedness(cricket_angle, handedness)
     if cricket_angle > 180:
         cricket_angle -= 360
     elif cricket_angle <= -180:

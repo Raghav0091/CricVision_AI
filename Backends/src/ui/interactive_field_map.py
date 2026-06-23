@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import io
-
 import matplotlib.pyplot as plt
 from matplotlib.patches import Ellipse, Polygon, Wedge
 import streamlit as st
-from PIL import Image
 
 from Backends.src.analysis.field_geometry import (
     DEFAULT_VISUAL_ROTATION,
@@ -18,7 +15,6 @@ from Backends.src.analysis.field_geometry import (
     ensure_fielder_polar,
     ensure_umpire_polar,
     fielder_display_xy,
-    get_side_labels,
     mirror_angle_for_handedness,
     pitch_polygon_corners,
     polar_to_screen,
@@ -152,7 +148,7 @@ def _fabric_circle_display(x, y, radius_px, fill, stroke, stroke_width=2, kind="
     return obj
 
 
-def build_fabric_field_drawing(
+def build_canvas_field_drawing(
     fielders,
     umpires,
     handedness,
@@ -162,7 +158,6 @@ def build_fabric_field_drawing(
     """Build Fabric.js objects for the full cricket field (static) plus draggable fielders."""
     handedness = _normalize_handedness(handedness)
     umpires = umpires or create_default_umpires()
-    sides = get_side_labels(handedness)
     objects = []
 
     center_x, center_y = _display_to_canvas(0, 0)
@@ -262,8 +257,10 @@ def build_fabric_field_drawing(
             label_x, label_y = polar_to_screen(mid, 0.72, handedness, visual_rotation_deg)
             objects.append(_fabric_text_display(label_x, label_y, zone_name, font_size=10))
 
-        objects.append(_fabric_text_display(-0.62, -0.96, sides["left"], fill="#bae6fd", font_size=11))
-        objects.append(_fabric_text_display(0.62, -0.96, sides["right"], fill="#fecaca", font_size=11))
+        leg_x, leg_y = polar_to_screen(-90, 0.92, handedness, visual_rotation_deg)
+        off_x, off_y = polar_to_screen(90, 0.92, handedness, visual_rotation_deg)
+        objects.append(_fabric_text_display(leg_x, leg_y, "Leg side", fill="#bae6fd", font_size=11))
+        objects.append(_fabric_text_display(off_x, off_y, "Off side", fill="#fecaca", font_size=11))
         objects.append(_fabric_text_display(striker_x, striker_y + 0.06, "Batter", font_size=10))
         objects.append(_fabric_text_display(bowler_x, bowler_y - 0.06, "Bowler end", fill="#dbeafe", font_size=10))
 
@@ -338,6 +335,27 @@ def apply_wedge_angles(start_angle, end_angle, handedness, visual_rotation_deg):
     return start, end
 
 
+def draw_field_map(
+    shot_angle=None,
+    selected_zone="Unknown",
+    fielders=None,
+    batter_handedness="Right-handed",
+    umpires=None,
+    show_labels=True,
+    compact=False,
+):
+    """Matplotlib field preview used by analysis result views."""
+    return draw_cricket_field_figure(
+        fielders=fielders,
+        umpires=umpires,
+        handedness=batter_handedness,
+        shot_angle=shot_angle,
+        selected_zone=selected_zone,
+        show_labels=show_labels,
+        compact=compact,
+    )
+
+
 def draw_cricket_field_figure(
     fielders=None,
     umpires=None,
@@ -351,7 +369,6 @@ def draw_cricket_field_figure(
     fielders = fielders or []
     umpires = umpires or create_default_umpires()
     handedness = _normalize_handedness(handedness)
-    sides = get_side_labels(handedness)
 
     fig_size = 4.8 if compact else 7
     fig, ax = plt.subplots(figsize=(fig_size, fig_size))
@@ -411,8 +428,22 @@ def draw_cricket_field_figure(
     if show_labels:
         ax.annotate("Bowler end", (bowler_x, bowler_y), xytext=(0, -12), textcoords="offset points", ha="center", fontsize=7, color="#dbeafe")
 
-    ax.text(-0.62, -0.96, sides["left"], ha="center", va="center", fontsize=8, color="#bae6fd")
-    ax.text(0.62, -0.96, sides["right"], ha="center", va="center", fontsize=8, color="#fecaca")
+    ax.text(
+        *polar_to_screen(-90, 0.92, handedness, visual_rotation_deg),
+        "Leg side",
+        ha="center",
+        va="center",
+        fontsize=8,
+        color="#bae6fd",
+    )
+    ax.text(
+        *polar_to_screen(90, 0.92, handedness, visual_rotation_deg),
+        "Off side",
+        ha="center",
+        va="center",
+        fontsize=8,
+        color="#fecaca",
+    )
 
     if shot_angle is not None:
         display_shot = mirror_angle_for_handedness(shot_angle, handedness)
@@ -471,15 +502,7 @@ def draw_cricket_field_figure(
     return fig
 
 
-def field_figure_to_png(fig):
-    buffer = io.BytesIO()
-    fig.savefig(buffer, format="png", dpi=120, facecolor=fig.patch.get_facecolor())
-    plt.close(fig)
-    buffer.seek(0)
-    return Image.open(buffer)
-
-
-def _apply_canvas_fielder_moves(canvas_result, fielders, handedness, visual_rotation_deg=DEFAULT_VISUAL_ROTATION):
+def parse_canvas_fielders(canvas_result, fielders, handedness, visual_rotation_deg=DEFAULT_VISUAL_ROTATION):
     if canvas_result is None or canvas_result.json_data is None:
         return fielders
 
@@ -515,7 +538,7 @@ def _render_canvas_editor(field_setup, handedness, show_labels, key):
         return None, "streamlit-drawable-canvas is not installed."
 
     fielders = field_setup["fielders"]
-    initial_drawing = build_fabric_field_drawing(
+    initial_drawing = build_canvas_field_drawing(
         fielders=fielders,
         umpires=field_setup.get("umpires"),
         handedness=handedness,
@@ -535,7 +558,7 @@ def _render_canvas_editor(field_setup, handedness, show_labels, key):
         key=f"{key}_canvas",
     )
 
-    updated_fielders = _apply_canvas_fielder_moves(canvas_result, fielders, handedness)
+    updated_fielders = parse_canvas_fielders(canvas_result, fielders, handedness)
     field_setup = dict(field_setup)
     field_setup["fielders"] = updated_fielders
     if updated_fielders != fielders:
@@ -741,3 +764,8 @@ def render_field_setup_card(key_prefix="field", compact=True, default_preset="Ba
 
     st.session_state["current_field_setup"] = active
     return active
+
+
+# Backward-compatible aliases
+build_canvas_objects = build_canvas_field_drawing
+build_fabric_field_drawing = build_canvas_field_drawing

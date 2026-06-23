@@ -9,12 +9,29 @@ NAV_ITEMS = [
     ("Session Results", "Results"),
 ]
 
+DEV_NAV_ITEMS = [
+    ("Field Setup Lab", "Field Map"),
+    ("Datasets", "Datasets"),
+    ("Training Lab", "Training"),
+]
+
 NAV_ICONS = {
     "Dashboard": "🏠",
     "Live Session": "📹",
     "Video Analysis": "🎯",
     "Session Results": "📋",
+    "Field Setup Lab": "🧪",
+    "Datasets": "📁",
+    "Training Lab": "🧪",
 }
+
+
+def get_nav_items(show_dev_pages=False):
+    items = list(NAV_ITEMS)
+    if show_dev_pages:
+        items.extend(DEV_NAV_ITEMS)
+    return items
+
 
 PAGE_ROUTE = {label: route for label, route in NAV_ITEMS}
 
@@ -290,7 +307,7 @@ def apply_global_theme():
     )
 
 
-def render_sidebar():
+def render_sidebar(show_dev_pages=False):
     st.sidebar.markdown(
         """
         <div style="padding:0.2rem 0 1rem 0;border-bottom:1px solid rgba(51,65,85,0.55);margin-bottom:1rem;">
@@ -301,8 +318,10 @@ def render_sidebar():
         unsafe_allow_html=True,
     )
 
-    labels = [f"{NAV_ICONS[label]}  {label}" for label, _ in NAV_ITEMS]
-    routes = [route for _, route in NAV_ITEMS]
+    nav_items = get_nav_items(show_dev_pages)
+    page_route = {label: route for label, route in nav_items}
+    labels = [f"{NAV_ICONS.get(label, '📄')}  {label}" for label, _ in nav_items]
+    routes = [route for _, route in nav_items]
 
     if "app_page" not in st.session_state:
         st.session_state.app_page = routes[0]
@@ -314,23 +333,10 @@ def render_sidebar():
     default_index = routes.index(st.session_state.app_page) if st.session_state.app_page in routes else 0
     selected_label = st.sidebar.radio("Navigation", labels, index=default_index, label_visibility="collapsed")
     selected_nav = selected_label.split("  ", 1)[-1]
-    route = PAGE_ROUTE[selected_nav]
+    route = page_route[selected_nav]
     st.session_state.app_page = route
 
     return route
-
-
-def render_model_status_sidebar():
-    from Backends.src.models.model_registry import validate_model_paths
-
-    for status in validate_model_paths().values():
-        pill_class = "cv-pill-success" if status["found"] else "cv-pill-warning"
-        st.markdown(
-            f'<div style="margin-bottom:0.45rem;">'
-            f'<span class="cv-pill {pill_class}">{status["name"]}: {status["status"]}</span>'
-            f"</div>",
-            unsafe_allow_html=True,
-        )
 
 
 def render_page_header(title, subtitle=None, badge=None):

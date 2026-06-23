@@ -1,4 +1,4 @@
-"""Field Setup Lab — testing and advanced field configuration."""
+"""Field Setup Lab — developer-only advanced field configuration."""
 
 import json
 
@@ -6,29 +6,11 @@ import streamlit as st
 
 from Backends.src.analysis.field_zones import classify_shot_zone, get_active_field_setup, set_active_field_setup
 from Backends.src.data.field_presets import PRESET_NAMES
-from Backends.src.ui.interactive_field_map import draw_cricket_field_figure, render_interactive_field_map
+from Backends.src.ui.interactive_field_map import (
+    build_field_setup,
+    render_interactive_field_map,
+)
 from Backends.src.ui.theme import render_page_header, render_section_title, render_status_pill
-
-
-def draw_field_map(
-    shot_angle=None,
-    selected_zone="Unknown",
-    fielders=None,
-    batter_handedness="Right-handed",
-    umpires=None,
-    show_labels=True,
-    compact=False,
-):
-    """Backward-compatible wrapper used by analysis pages."""
-    return draw_cricket_field_figure(
-        fielders=fielders,
-        umpires=umpires,
-        handedness=batter_handedness,
-        shot_angle=shot_angle,
-        selected_zone=selected_zone,
-        show_labels=show_labels,
-        compact=compact,
-    )
 
 
 def show_field_map_page():
@@ -61,8 +43,6 @@ def show_field_map_page():
         show_labels = st.checkbox("Show labels", value=True, key="field_lab_show_labels")
 
         if st.button("Reset to preset", use_container_width=True, key="field_lab_reset"):
-            from Backends.src.ui.interactive_field_map import build_field_setup
-
             active = build_field_setup(preset_name, handedness)
             st.session_state["current_field_setup"] = active
             st.rerun()

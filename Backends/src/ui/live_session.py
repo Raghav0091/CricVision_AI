@@ -12,10 +12,8 @@ from Backends.src.analysis.cricket_agent import (
     generate_delivery_report,
 )
 from Backends.src.analysis.field_zones import (
-    SIMPLE_FIELD_ZONES,
     generate_wagon_wheel_data,
     find_nearest_fielder,
-    get_active_field_setup,
     save_field_analysis_history,
     save_field_setup,
     suggest_field_adjustment,
@@ -361,13 +359,11 @@ def process_recorded_delivery(
         draw_search_roi,
         estimate_length_from_bounce,
         estimate_line_from_stumps,
-        get_box_center,
         get_nearest_stump_detections,
         has_enough_ball_movement,
         load_ensemble_models,
         load_yolo_model,
         map_model_classes,
-        run_ensemble_detection,
         run_local_redetection,
         run_pitch_roi_detection,
         save_review_frame,
@@ -984,8 +980,7 @@ def show_analysis_output(result):
         developer_details_expander,
         video_preview_card,
     )
-    from Backends.src.ui.field_map import draw_field_map
-    from Backends.src.ui.theme import render_section_title
+    from Backends.src.ui.interactive_field_map import draw_field_map
 
     if result is None:
         delivery_summary_card(None)
@@ -1051,31 +1046,6 @@ def show_analysis_output(result):
                 )
 
 
-def show_current_field_setup_preview(field_setup, draw_field_map):
-    from Backends.src.ui.theme import render_section_title
-
-    render_section_title("Current Field Setup")
-    setup_cols = st.columns(4)
-    setup_cols[0].metric("Preset", field_setup.get("preset", "Attacking Test Field"))
-    setup_cols[1].metric("Batter", field_setup.get("batter_handedness", "Right-hand batter"))
-    setup_cols[2].metric("Bowler Arm", field_setup.get("bowler_arm", "Right-arm bowler"))
-    setup_cols[3].metric("Camera View", field_setup.get("camera_view", "Behind bowler"))
-
-    if field_setup.get("is_default_setup"):
-        st.info("No saved field setup found. Using default Attacking Test Field.")
-
-    st.info("Go to Field Map page to adjust field setup.")
-    st.pyplot(
-        draw_field_map(
-            shot_angle=None,
-            selected_zone="Unknown",
-            fielders=field_setup.get("fielders", []),
-            batter_handedness=field_setup.get("batter_handedness", "Right-handed"),
-            umpires=field_setup.get("umpires"),
-        )
-    )
-
-
 def reset_live_delivery_state():
     st.session_state.live_delivery_recording = False
     st.session_state.live_recorded_frames = []
@@ -1109,7 +1079,6 @@ def initialize_live_session_state():
 
 
 def show_live_session_page():
-    from Backends.src.analysis.field_zones import get_active_field_setup
     from Backends.src.ui.interactive_field_map import render_field_setup_card
     from Backends.src.ui.theme import render_page_header, render_status_pill
 

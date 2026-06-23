@@ -11,11 +11,9 @@ from Backends.src.analysis.field_geometry import (
     angle_to_field_zone,
     ensure_fielder_polar,
     ensure_umpire_polar,
-    fielder_display_xy,
     mirror_angle_for_handedness as mirror_signed_angle_for_handedness,
     polar_to_xy,
     umpire_from_name,
-    xy_to_polar,
 )
 from Backends.src.data.field_presets import PRESET_NAMES, create_preset_fielders
 
@@ -269,14 +267,6 @@ def normalize_handedness(batter_handedness):
     if str(batter_handedness).lower().startswith("left"):
         return "Left-hand batter"
     return "Right-hand batter"
-
-
-def apply_batter_handedness(position, batter_hand):
-    """Mirror a right-handed base coordinate for a left-handed batter."""
-    x, y = position
-    if normalize_handedness(batter_hand).startswith("Left"):
-        return -float(x), float(y)
-    return float(x), float(y)
 
 
 def mirror_angle_for_handedness(angle, batter_handedness):
@@ -645,25 +635,6 @@ def save_field_analysis_history(row):
         if write_header:
             writer.writeheader()
         writer.writerow(row)
-
-
-def create_field_map_figure(
-    fielders,
-    shot_direction=None,
-    batter_handedness="Right-hand batter",
-    umpires=None,
-):
-    from Backends.src.ui.interactive_field_map import draw_cricket_field_figure
-
-    shot_angle = None if shot_direction is None else shot_direction.get("shot_angle")
-    selected_zone = "Unknown" if shot_direction is None else shot_direction.get("detailed_zone", "Unknown")
-    return draw_cricket_field_figure(
-        fielders=fielders,
-        umpires=umpires,
-        handedness=batter_handedness,
-        shot_angle=shot_angle,
-        selected_zone=selected_zone,
-    )
 
 
 FIELD_ZONES = SIMPLE_FIELD_ZONES
