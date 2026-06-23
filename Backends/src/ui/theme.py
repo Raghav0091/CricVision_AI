@@ -3,12 +3,14 @@
 import streamlit as st
 
 NAV_ITEMS = [
+    ("Dashboard", "Dashboard"),
     ("Live Session", "Live Session"),
     ("Video Analysis", "Video Analysis"),
     ("Session Results", "Results"),
 ]
 
 NAV_ICONS = {
+    "Dashboard": "🏠",
     "Live Session": "📹",
     "Video Analysis": "🎯",
     "Session Results": "📋",
@@ -300,9 +302,20 @@ def render_sidebar():
     )
 
     labels = [f"{NAV_ICONS[label]}  {label}" for label, _ in NAV_ITEMS]
-    selected_label = st.sidebar.radio("Navigation", labels, label_visibility="collapsed")
+    routes = [route for _, route in NAV_ITEMS]
+
+    if "app_page" not in st.session_state:
+        st.session_state.app_page = routes[0]
+
+    nav_target = st.session_state.pop("nav_target", None)
+    if nav_target in routes:
+        st.session_state.app_page = nav_target
+
+    default_index = routes.index(st.session_state.app_page) if st.session_state.app_page in routes else 0
+    selected_label = st.sidebar.radio("Navigation", labels, index=default_index, label_visibility="collapsed")
     selected_nav = selected_label.split("  ", 1)[-1]
     route = PAGE_ROUTE[selected_nav]
+    st.session_state.app_page = route
 
     return route
 

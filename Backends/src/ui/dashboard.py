@@ -1,66 +1,73 @@
+from pathlib import Path
+
 import streamlit as st
 
 from Backends.src.models.model_registry import validate_model_paths
-from Backends.src.ui.components import hero_section, metric_grid, primary_action_card, render_feature_card
-from Backends.src.ui.theme import render_page_header, render_section_title
+from Backends.src.ui.components import metric_grid
+from Backends.src.ui.theme import render_page_header
 
 
-def _count_ready_models():
-    statuses = validate_model_paths().values()
+REPORTS_DIR = Path("outputs/reports")
+
+
+def _count_reports():
+    if not REPORTS_DIR.exists():
+        return 0
+    return sum(1 for path in REPORTS_DIR.iterdir() if path.is_file())
+
+
+def _last_analysis_label():
+    video_result = st.session_state.get("video_analysis_result") or {}
+    live_result = st.session_state.get("live_last_result") or {}
+    if video_result.get("success"):
+        return video_result.get("analysis_mode", "Video analysis")
+    if live_result.get("success"):
+        return "Live session delivery"
+    return "None yet"
+
+
+def _active_model_label():
+    settings = st.session_state.get("video_analysis_settings") or {}
+    if settings.get("model_name"):
+        return settings["model_name"]
+    live_model = st.session_state.get("live_session_model")
+    if live_model:
+        return live_model
+    return "Ball + Stump Detector"
+
+
+def _system_ready_label():
+    statuses = list(validate_model_paths().values())
     ready = sum(1 for item in statuses if item["found"])
-    return ready, len(list(statuses))
+    if ready == len(statuses) and statuses:
+        return "Ready"
+    if ready > 0:
+        return "Partial"
+    return "Setup needed"
 
 
 def show_dashboard():
     render_page_header(
         "CricVision AI",
-        "AI-powered cricket performance analysis for players, coaches, academies, and analysts.",
-        badge="System Ready",
+        "AI-powered cricket performance analysis",
     )
 
-    hero_section(
-        title="Analyze every delivery with confidence",
-        subtitle="Professional cricket vision analytics",
-        description=(
-            "Upload a clip or record live from camera. CricVision automatically tracks the ball, "
-            "estimates line and length, and produces a clean delivery report."
-        ),
-    )
+    action_cols = st.columns(2)
+    with action_cols[0]:
+        if st.button("Start Live Session", type="primary", use_container_width=True, key="dashboard_live"):
+            st.session_state["nav_target"] = "Live Session"
+            st.rerun()
+    with action_cols[1]:
+        if st.button("Analyze Video", type="primary", use_container_width=True, key="dashboard_analyze"):
+            st.session_state["nav_target"] = "Video Analysis"
+            st.rerun()
 
-    cta_cols = st.columns(2)
-    with cta_cols[0]:
-        primary_action_card(
-            "Analyze a Delivery",
-            "Upload a bowling or full-delivery clip and generate a processed video plus report.",
-            "Open Analyze from the sidebar",
-        )
-    with cta_cols[1]:
-        primary_action_card(
-            "Start Live Session",
-            "Record one clean delivery from your camera and review it after the ball is bowled.",
-            "Open Live Session from the sidebar",
-        )
-
-    ready_count, total_count = _count_ready_models()
     metric_grid(
         [
-            ("Deliveries Analyzed", "—", "History builds after analysis"),
-            ("Reports Generated", "—", "Saved reports coming soon"),
-            ("Active Models", f"{ready_count}/{total_count}", "Configured model files"),
-            ("Tracking Quality", "Auto", "Smart defaults enabled", "Ready"),
+            ("Reports Generated", str(_count_reports()), "Saved analysis reports"),
+            ("Last Analysis", _last_analysis_label(), "Most recent completed run"),
+            ("Active Model", _active_model_label(), "Current detection model"),
+            ("System Ready", _system_ready_label(), "Model files on disk", _system_ready_label()),
         ],
         columns=4,
     )
-
-    render_section_title("What CricVision analyzes")
-    feature_cols = st.columns(5)
-    features = [
-        ("Line & Length", "Off, middle, leg and yorker/full/good/short estimates.", "📏"),
-        ("Bounce Point", "Pitch contact and normalized pitch-map view.", "🎯"),
-        ("Ball Trajectory", "Continuous tracking with recovery and smoothing.", "📈"),
-        ("Bat Impact", "Possible ball-bat contact frame in full delivery mode.", "🏏"),
-        ("Field Zones", "Wagon-wheel direction and nearest fielder context.", "🗺️"),
-    ]
-    for col, (title, description, icon) in zip(feature_cols, features):
-        with col:
-            render_feature_card(title, description, icon)

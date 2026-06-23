@@ -7,7 +7,7 @@ import io
 import matplotlib.pyplot as plt
 from matplotlib.patches import Ellipse, Polygon, Wedge
 import streamlit as st
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from Backends.src.analysis.field_geometry import (
     DEFAULT_VISUAL_ROTATION,
@@ -31,6 +31,7 @@ from Backends.src.data.field_presets import PRESET_NAMES, create_preset_fielders
 
 CANVAS_SIZE = 520
 FIELD_COORDINATE_VERSION = 3
+FIELDER_RADIUS_PX = 9
 
 ZONE_SPECS = [
     ("Long On", -38, -8),
@@ -65,10 +66,245 @@ def _canvas_to_display(px, py, size=CANVAS_SIZE):
     return x, y
 
 
-def _display_to_pil(x, y, width, height):
-    px = int((float(x) + 1.0) * 0.5 * width)
-    py = int((1.0 - float(y)) * 0.5 * height)
-    return px, py
+def _fabric_static(obj, kind="field_static"):
+    obj.setdefault("selectable", False)
+    obj.setdefault("evented", False)
+    data = dict(obj.get("data") or {})
+    data.setdefault("kind", kind)
+    obj["data"] = data
+    return obj
+
+
+def _fabric_line_display(x1, y1, x2, y2, stroke, width=1, dash=None, kind="field_static"):
+    px1, py1 = _display_to_canvas(x1, y1)
+    px2, py2 = _display_to_canvas(x2, y2)
+    left = min(px1, px2)
+    top = min(py1, py2)
+    obj = {
+        "type": "line",
+        "left": left,
+        "top": top,
+        "x1": px1 - left,
+        "y1": py1 - top,
+        "x2": px2 - left,
+        "y2": py2 - top,
+        "stroke": stroke,
+        "strokeWidth": width,
+    }
+    if dash:
+        obj["strokeDashArray"] = dash
+    return _fabric_static(obj, kind=kind)
+
+
+def _fabric_polygon_display(corners, fill, stroke, stroke_width=2):
+    canvas_pts = [_display_to_canvas(x, y) for x, y in corners]
+    left = min(point[0] for point in canvas_pts)
+    top = min(point[1] for point in canvas_pts)
+    rel_pts = [{"x": point[0] - left, "y": point[1] - top} for point in canvas_pts]
+    return _fabric_static(
+        {
+            "type": "polygon",
+            "left": left,
+            "top": top,
+            "points": rel_pts,
+            "fill": fill,
+            "stroke": stroke,
+            "strokeWidth": stroke_width,
+        }
+    )
+
+
+def _fabric_text_display(x, y, text, fill="#f8fafc", font_size=11):
+    px, py = _display_to_canvas(x, y)
+    return _fabric_static(
+        {
+            "type": "text",
+            "left": px,
+            "top": py,
+            "text": text,
+            "fontSize": font_size,
+            "fill": fill,
+        }
+    )
+
+
+def _fabric_circle_display(x, y, radius_px, fill, stroke, stroke_width=2, kind="field_static", data=None):
+    px, py = _display_to_canvas(x, y)
+    obj = {
+        "type": "circle",
+        "left": px - radius_px,
+        "top": py - radius_px,
+        "radius": radius_px,
+        "fill": fill,
+        "stroke": stroke,
+        "strokeWidth": stroke_width,
+    }
+    if kind == "fielder":
+        obj["selectable"] = True
+        obj["evented"] = True
+        obj["hasControls"] = True
+        obj["hasBorders"] = True
+        obj["data"] = data or {"kind": "fielder"}
+    else:
+        obj = _fabric_static(obj, kind=kind)
+        if data:
+            obj["data"].update(data)
+    return obj
+
+
+def build_fabric_field_drawing(
+    fielders,
+    umpires,
+    handedness,
+    show_labels=True,
+    visual_rotation_deg=DEFAULT_VISUAL_ROTATION,
+):
+    """Build Fabric.js objects for the full cricket field (static) plus draggable fielders."""
+    handedness = _normalize_handedness(handedness)
+    umpires = umpires or create_default_umpires()
+    sides = get_side_labels(handedness)
+    objects = []
+
+    center_x, center_y = _display_to_canvas(0, 0)
+    boundary_radius = int(0.96 * CANVAS_SIZE / 2)
+    inner_radius = int(0.62 * CANVAS_SIZE / 2)
+
+    objects.append(
+        _fabric_static(
+            {
+                "type": "circle",
+                "left": center_x - boundary_radius,
+                "top": center_y - boundary_radius,
+                "radius": boundary_radius,
+                "fill": "#137a46",
+                "stroke": "#d8f3dc",
+                "strokeWidth": 3,
+            }
+        )
+    )
+    objects.append(
+        _fabric_static(
+            {
+                "type": "circle",
+                "left": center_x - inner_radius,
+                "top": center_y - inner_radius,
+                "radius": inner_radius,
+                "fill": "rgba(0,0,0,0)",
+                "stroke": "#bae6fd",
+                "strokeWidth": 1,
+                "strokeDashArray": [6, 6],
+            }
+        )
+    )
+
+    for angle in range(-180, 181, 45):
+        line_x, line_y = polar_to_screen(angle, 0.96, handedness, visual_rotation_deg)
+        objects.append(_fabric_line_display(0, 0, line_x, line_y, "#e2e8f0", width=1))
+
+    straight_x, straight_y = polar_to_screen(0, 0.95, handedness, visual_rotation_deg)
+    objects.append(_fabric_line_display(0, 0, straight_x, straight_y, "#fef3c7", width=2, kind="straight_axis"))
+
+    objects.append(
+        _fabric_polygon_display(
+            pitch_polygon_corners(handedness, visual_rotation_deg),
+            fill="#d6b47a",
+            stroke="#fef3c7",
+            stroke_width=2,
+        )
+    )
+
+    striker_x, striker_y = striker_crease_xy(handedness, visual_rotation_deg)
+    bowler_x, bowler_y = bowler_end_xy(handedness, visual_rotation_deg)
+    perp_x, perp_y = polar_to_screen(90, 0.09, handedness, visual_rotation_deg)
+    objects.append(
+        _fabric_line_display(
+            striker_x - perp_x,
+            striker_y - perp_y,
+            striker_x + perp_x,
+            striker_y + perp_y,
+            "#fef3c7",
+            width=2,
+        )
+    )
+    objects.append(
+        _fabric_line_display(
+            bowler_x - perp_x,
+            bowler_y - perp_y,
+            bowler_x + perp_x,
+            bowler_y + perp_y,
+            "#fef3c7",
+            width=2,
+        )
+    )
+
+    objects.append(_fabric_circle_display(striker_x, striker_y, 6, "#f8fafc", "#f8fafc", kind="batter"))
+    objects.append(_fabric_circle_display(bowler_x, bowler_y, 5, "#93c5fd", "#93c5fd", kind="bowler"))
+
+    for umpire in umpires:
+        ensure_umpire_polar(umpire)
+        ux, uy = umpire_display_xy(umpire, handedness, visual_rotation_deg)
+        objects.append(
+            _fabric_circle_display(
+                ux,
+                uy,
+                9,
+                "#f8fafc",
+                "#2563eb",
+                stroke_width=2,
+                kind="umpire",
+                data={"name": umpire.get("name", "Umpire")},
+            )
+        )
+
+    if show_labels:
+        for zone_name, start_angle, end_angle in ZONE_SPECS:
+            mid = (start_angle + end_angle) / 2
+            label_x, label_y = polar_to_screen(mid, 0.72, handedness, visual_rotation_deg)
+            objects.append(_fabric_text_display(label_x, label_y, zone_name, font_size=10))
+
+        objects.append(_fabric_text_display(-0.62, -0.96, sides["left"], fill="#bae6fd", font_size=11))
+        objects.append(_fabric_text_display(0.62, -0.96, sides["right"], fill="#fecaca", font_size=11))
+        objects.append(_fabric_text_display(striker_x, striker_y + 0.06, "Batter", font_size=10))
+        objects.append(_fabric_text_display(bowler_x, bowler_y - 0.06, "Bowler end", fill="#dbeafe", font_size=10))
+
+        for umpire in umpires:
+            ensure_umpire_polar(umpire)
+            ux, uy = umpire_display_xy(umpire, handedness, visual_rotation_deg)
+            short_name = umpire.get("name", "Umpire").replace(" Umpire", "")
+            objects.append(_fabric_text_display(ux + 0.04, uy, short_name, fill="#dbeafe", font_size=9))
+
+    for index, fielder in enumerate(fielders):
+        ensure_fielder_polar(fielder)
+        x, y = fielder_display_xy(fielder, handedness, visual_rotation_deg)
+        name = fielder.get("name", f"F{index + 1}")
+        objects.append(
+            _fabric_circle_display(
+                x,
+                y,
+                FIELDER_RADIUS_PX,
+                "#F7C948",
+                "#111827",
+                stroke_width=2,
+                kind="fielder",
+                data={"kind": "fielder", "index": index, "name": name},
+            )
+        )
+        if show_labels:
+            px, py = _display_to_canvas(x, y)
+            objects.append(
+                _fabric_static(
+                    {
+                        "type": "text",
+                        "left": px - 12,
+                        "top": py - FIELDER_RADIUS_PX - 14,
+                        "text": name[:10],
+                        "fontSize": 10,
+                        "fill": "#fefce8",
+                    }
+                )
+            )
+
+    return {"version": "4.4.0", "objects": objects}
 
 
 def create_default_umpires():
@@ -100,77 +336,6 @@ def apply_wedge_angles(start_angle, end_angle, handedness, visual_rotation_deg):
     start = apply_visual_rotation(mirror_angle_for_handedness(start_angle, handedness), visual_rotation_deg)
     end = apply_visual_rotation(mirror_angle_for_handedness(end_angle, handedness), visual_rotation_deg)
     return start, end
-
-
-def create_field_background(
-    width=CANVAS_SIZE,
-    height=CANVAS_SIZE,
-    handedness="Right-handed",
-    umpires=None,
-    show_labels=True,
-    visual_rotation_deg=DEFAULT_VISUAL_ROTATION,
-):
-    """Build a PIL field background aligned with the shared pitch axis."""
-    handedness = _normalize_handedness(handedness)
-    umpires = umpires or create_default_umpires()
-    sides = get_side_labels(handedness)
-
-    image = Image.new("RGB", (width, height), "#07111f")
-    draw = ImageDraw.Draw(image)
-
-    margin = int(width * 0.04)
-    field_box = (margin, margin, width - margin, height - margin)
-    draw.ellipse(field_box, fill="#137a46", outline="#d8f3dc", width=2)
-
-    inner_margin = int(width * 0.19)
-    inner_box = (inner_margin, inner_margin, width - inner_margin, height - inner_margin)
-    draw.ellipse(inner_box, outline="#bae6fd", width=1)
-
-    for angle in range(-180, 181, 45):
-        line_x, line_y = polar_to_screen(angle, 0.96, handedness, visual_rotation_deg)
-        x0, y0 = _display_to_pil(0, 0, width, height)
-        x1, y1 = _display_to_pil(line_x, line_y, width, height)
-        draw.line((x0, y0, x1, y1), fill="#e2e8f0", width=1)
-
-    pitch_pts = [_display_to_pil(x, y, width, height) for x, y in pitch_polygon_corners(handedness, visual_rotation_deg)]
-    draw.polygon(pitch_pts, fill="#d6b47a", outline="#fef3c7")
-
-    striker_x, striker_y = striker_crease_xy(handedness, visual_rotation_deg)
-    bowler_x, bowler_y = bowler_end_xy(handedness, visual_rotation_deg)
-    sx, sy = _display_to_pil(striker_x, striker_y, width, height)
-    bx, by = _display_to_pil(bowler_x, bowler_y, width, height)
-    draw.ellipse((sx - 6, sy - 6, sx + 6, sy + 6), fill="#f8fafc")
-    draw.ellipse((bx - 5, by - 5, bx + 5, by + 5), fill="#93c5fd")
-
-    for umpire in umpires:
-        ensure_umpire_polar(umpire)
-        ux, uy = umpire_display_xy(umpire, handedness, visual_rotation_deg)
-        px, py = _display_to_pil(ux, uy, width, height)
-        draw.ellipse((px - 9, py - 9, px + 9, py + 9), fill="#f8fafc", outline="#2563eb", width=2)
-
-    if show_labels:
-        for zone_name, start_angle, end_angle in ZONE_SPECS:
-            mid = (start_angle + end_angle) / 2
-            label_x, label_y = polar_to_screen(mid, 0.72, handedness, visual_rotation_deg)
-            lx, ly = _display_to_pil(label_x, label_y, width, height)
-            draw.text((lx - 24, ly - 6), zone_name, fill="#f8fafc")
-
-        left_x, left_y = _display_to_pil(-0.62, -0.96, width, height)
-        right_x, right_y = _display_to_pil(0.62, -0.96, width, height)
-        draw.text((left_x - 20, left_y - 6), sides["left"], fill="#bae6fd")
-        draw.text((right_x - 20, right_y - 6), sides["right"], fill="#fecaca")
-
-        draw.text((sx - 18, sy + 8), "Batter", fill="#f8fafc")
-        draw.text((bx - 28, by - 18), "Bowler end", fill="#dbeafe")
-
-        for umpire in umpires:
-            ensure_umpire_polar(umpire)
-            ux, uy = umpire_display_xy(umpire, handedness, visual_rotation_deg)
-            px, py = _display_to_pil(ux, uy, width, height)
-            short_name = umpire.get("name", "Umpire").replace(" Umpire", "")
-            draw.text((px + 10, py - 6), short_name, fill="#dbeafe")
-
-    return image
 
 
 def draw_cricket_field_figure(
@@ -225,6 +390,9 @@ def draw_cricket_field_figure(
     for angle in range(-180, 181, 45):
         line_x, line_y = polar_to_screen(angle, 0.96, handedness, visual_rotation_deg)
         ax.plot([0, line_x], [0, line_y], color="#e2e8f0", alpha=0.15, linewidth=0.7)
+
+    straight_x, straight_y = polar_to_screen(0, 0.95, handedness, visual_rotation_deg)
+    ax.plot([0, straight_x], [0, straight_y], color="#fef3c7", alpha=0.85, linewidth=1.8, zorder=4)
 
     pitch = Polygon(
         pitch_polygon_corners(handedness, visual_rotation_deg),
@@ -311,68 +479,26 @@ def field_figure_to_png(fig):
     return Image.open(buffer)
 
 
-def _build_canvas_fielder_objects(fielders, handedness, visual_rotation_deg=DEFAULT_VISUAL_ROTATION):
-    initial_drawing = {"version": "4.4.0", "objects": []}
-    radius_px = 14
-    for index, fielder in enumerate(fielders):
-        x, y = fielder_display_xy(fielder, handedness, visual_rotation_deg)
-        px, py = _display_to_canvas(x, y)
-        name = fielder.get("name", f"F{index + 1}")
-        initial_drawing["objects"].append(
-            {
-                "type": "circle",
-                "left": px - radius_px,
-                "top": py - radius_px,
-                "radius": radius_px,
-                "fill": "#fde047",
-                "stroke": "#111827",
-                "strokeWidth": 2,
-                "name": str(index),
-                "selectable": True,
-                "hasControls": True,
-                "hasBorders": True,
-            }
-        )
-        label_x = px - 8
-        label_y = py - radius_px - 14
-        initial_drawing["objects"].append(
-            {
-                "type": "text",
-                "left": label_x,
-                "top": label_y,
-                "text": name[:10],
-                "fontSize": 10,
-                "fill": "#fefce8",
-                "name": f"label_{index}",
-                "selectable": False,
-                "evented": False,
-            }
-        )
-    return initial_drawing
-
-
 def _apply_canvas_fielder_moves(canvas_result, fielders, handedness, visual_rotation_deg=DEFAULT_VISUAL_ROTATION):
     if canvas_result is None or canvas_result.json_data is None:
         return fielders
 
     objects = canvas_result.json_data.get("objects", [])
     updated_fielders = [dict(item) for item in fielders]
-    radius_px = 14
 
     for obj in objects:
         if obj.get("type") != "circle":
             continue
-        name = obj.get("name")
-        if name is None:
+        data = obj.get("data") or {}
+        if data.get("kind") != "fielder":
             continue
-        try:
-            index = int(name)
-        except ValueError:
+        index = data.get("index")
+        if index is None:
             continue
         if index >= len(updated_fielders):
             continue
-        left = float(obj.get("left", 0)) + float(obj.get("radius", radius_px))
-        top = float(obj.get("top", 0)) + float(obj.get("radius", radius_px))
+        left = float(obj.get("left", 0)) + float(obj.get("radius", FIELDER_RADIUS_PX))
+        top = float(obj.get("top", 0)) + float(obj.get("radius", FIELDER_RADIUS_PX))
         display_x, display_y = _canvas_to_display(left, top)
         angle, radius = screen_to_polar(display_x, display_y, handedness, visual_rotation_deg)
         updated_fielders[index]["angle"] = round(angle, 2)
@@ -389,20 +515,17 @@ def _render_canvas_editor(field_setup, handedness, show_labels, key):
         return None, "streamlit-drawable-canvas is not installed."
 
     fielders = field_setup["fielders"]
-    background_image = create_field_background(
-        width=CANVAS_SIZE,
-        height=CANVAS_SIZE,
-        handedness=handedness,
+    initial_drawing = build_fabric_field_drawing(
+        fielders=fielders,
         umpires=field_setup.get("umpires"),
+        handedness=handedness,
         show_labels=show_labels,
     )
-
-    initial_drawing = _build_canvas_fielder_objects(fielders, handedness)
 
     canvas_result = st_canvas(
         fill_color="rgba(0,0,0,0)",
         stroke_width=0,
-        background_image=background_image,
+        background_color="#0B3D2E",
         update_streamlit=True,
         height=CANVAS_SIZE,
         width=CANVAS_SIZE,
@@ -417,6 +540,7 @@ def _render_canvas_editor(field_setup, handedness, show_labels, key):
     field_setup["fielders"] = updated_fielders
     if updated_fielders != fielders:
         field_setup["preset"] = "Custom"
+    st.session_state["current_field_setup"] = field_setup
     return field_setup, None
 
 

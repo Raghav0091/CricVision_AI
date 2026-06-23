@@ -12,7 +12,12 @@ st.set_page_config(
 apply_global_theme()
 page = render_sidebar()
 
-if page == "Live Session":
+if page == "Dashboard":
+    from Backends.src.ui.dashboard import show_dashboard
+
+    show_dashboard()
+
+elif page == "Live Session":
     from Backends.src.ui.live_session import show_live_session_page
 
     show_live_session_page()
