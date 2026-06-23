@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 
 import streamlit as st
 
+from Backends.src.utils.cv2_loader import cv2
 from Backends.src.analysis.cricket_agent import (
     calculate_detection_quality,
     detect_analysis_warnings,
@@ -136,8 +137,6 @@ def create_delivery_recorder_class(recording_state):
 
 
 def write_video(frames, output_path, fps=DEFAULT_RECORDING_FPS):
-    import cv2
-
     if not frames:
         return False
 
@@ -241,8 +240,6 @@ def save_low_confidence_review_frame(frame, detections, timestamp, frame_index):
     if not detections:
         return
 
-    import cv2
-
     REVIEW_FRAMES_DIR.mkdir(parents=True, exist_ok=True)
     review_frame = frame.copy()
 
@@ -301,8 +298,6 @@ def draw_delivery_dashboard(
     estimated_line,
     estimated_length,
 ):
-    import cv2
-
     panel_x = 15
     panel_y = 15
     panel_w = 470
@@ -358,8 +353,6 @@ def process_recorded_delivery(
     field_setup=None,
     fps=DEFAULT_RECORDING_FPS,
 ):
-    import cv2
-
     from Backends.src.ui.video_analysis import (
         convert_to_browser_mp4,
         draw_label,

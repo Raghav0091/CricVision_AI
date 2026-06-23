@@ -7,10 +7,11 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-import cv2
 import imageio_ffmpeg
 import numpy as np
 import streamlit as st
+
+from Backends.src.utils.cv2_loader import cv2
 
 from Backends.src.analysis.cricket_agent import (
     calculate_detection_quality,
@@ -19,13 +20,6 @@ from Backends.src.analysis.cricket_agent import (
     generate_delivery_report,
 )
 from Backends.src.analysis.field_zones import FIELD_ZONES, generate_wagon_wheel_data
-from Backends.src.analysis.bat_detection import (
-    detect_ball_in_frame,
-    detect_bat_in_frame,
-    draw_bat_detections,
-    draw_impact_marker,
-    find_possible_impact_frame,
-)
 from Backends.src.analysis.field_zones import (
     find_nearest_fielder,
     normalize_handedness,
@@ -1035,6 +1029,8 @@ def _draw_ball_detections(frame, ball_detections):
 
 def _add_impact_marker_to_video(video_path, impact_info):
     """Rewrite an analyzed video once so its retrospectively chosen impact frame is marked."""
+    from Backends.src.analysis.bat_detection import draw_impact_marker
+
     if not impact_info or impact_info.get("impact_frame") is None:
         return Path(video_path)
 
@@ -1099,6 +1095,13 @@ def process_batting_video(
     confidence=0.25,
 ):
     """Process a clip with only the models needed for batting intelligence."""
+    from Backends.src.analysis.bat_detection import (
+        detect_ball_in_frame,
+        detect_bat_in_frame,
+        draw_bat_detections,
+        find_possible_impact_frame,
+    )
+
     ball_model = get_cached_yolo_model(ball_model_key)
     bat_model = get_cached_yolo_model(bat_model_key)
     if ball_model is None:
@@ -1326,6 +1329,12 @@ def process_video(
     field_setup=None,
     bat_model_key=None,
 ):
+    from Backends.src.analysis.bat_detection import (
+        detect_bat_in_frame,
+        draw_bat_detections,
+        find_possible_impact_frame,
+    )
+
     model = None
     ensemble_models = []
     bat_model = get_cached_yolo_model(bat_model_key) if bat_model_key else None
