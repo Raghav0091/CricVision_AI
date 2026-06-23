@@ -10,6 +10,12 @@ from Backends.src.ui.interactive_field_map import (
     build_field_setup,
     render_interactive_field_map,
 )
+from Backends.src.analysis.field_geometry import (
+    HANDEDNESS_LABELS,
+    HANDEDNESS_LEFT,
+    HANDEDNESS_RIGHT,
+    normalize_handedness,
+)
 from Backends.src.ui.theme import render_page_header, render_section_title, render_status_pill
 
 
@@ -27,8 +33,9 @@ def show_field_map_page():
         render_section_title("Controls")
         handedness = st.selectbox(
             "Batter handedness",
-            ["Right-handed", "Left-handed"],
-            index=0 if not str(active.get("batter_handedness", "")).lower().startswith("left") else 1,
+            [HANDEDNESS_RIGHT, HANDEDNESS_LEFT],
+            index=1 if normalize_handedness(active.get("batter_handedness")) == HANDEDNESS_LEFT else 0,
+            format_func=lambda value: HANDEDNESS_LABELS[value],
             key="field_lab_handedness",
         )
         preset_options = PRESET_NAMES + (["Custom"] if active.get("preset") not in PRESET_NAMES else [])

@@ -28,6 +28,7 @@ from Backends.src.analysis.bat_detection import (
 )
 from Backends.src.analysis.field_zones import (
     find_nearest_fielder,
+    normalize_handedness,
     save_field_analysis_history,
     save_field_setup,
     suggest_field_adjustment,
@@ -481,13 +482,15 @@ def transform_point_to_pitch(point, homography):
     return x, y
 
 
-def estimate_line_from_pitch_x(pitch_x):
+def estimate_line_from_pitch_x(pitch_x, batter_handedness="right"):
     if pitch_x is None:
         return "Unknown"
+    left_label = "Leg side" if normalize_handedness(batter_handedness) == "left" else "Off side"
+    right_label = "Off side" if normalize_handedness(batter_handedness) == "left" else "Leg side"
     if pitch_x < 0.38:
-        return "Off side"
+        return left_label
     if pitch_x > 0.62:
-        return "Leg side"
+        return right_label
     return "Middle"
 
 
@@ -1454,6 +1457,12 @@ def process_video(
     estimated_bounce_frame = None
     estimated_line = "Unknown"
     estimated_length = "Unknown"
+    field_setup = field_setup or {}
+    batter_handedness = normalize_handedness(field_setup.get("batter_handedness", "right"))
+    bowler_arm = field_setup.get("bowler_arm", "Right-arm bowler")
+    camera_view = field_setup.get("camera_view", "Behind bowler")
+    fielders = field_setup.get("fielders", [])
+    field_preset = field_setup.get("preset", "Custom")
 
     min_track_points_for_bounce = 8
     min_movement_distance = 40
@@ -1667,7 +1676,8 @@ def process_video(
 
                 estimated_line = estimate_line_from_stumps(
                     estimated_bounce_point,
-                    bounce_stump_detections
+                    bounce_stump_detections,
+                    batter_handedness,
                 )
 
                 estimated_length = estimate_length_from_bounce(
@@ -1682,7 +1692,7 @@ def process_video(
 
                 if pitch_normalized_bounce_point is not None:
                     pitch_x, pitch_y = pitch_normalized_bounce_point
-                    estimated_line = estimate_line_from_pitch_x(pitch_x)
+                    estimated_line = estimate_line_from_pitch_x(pitch_x, batter_handedness)
                     estimated_length = estimate_length_from_pitch_y(pitch_y)
 
 
@@ -1891,13 +1901,6 @@ def process_video(
         tracking_quality["interpolated_frames"],
         kalman_predicted_frames,
     )
-    field_setup = field_setup or {}
-    batter_handedness = field_setup.get("batter_handedness", "Right-hand batter")
-    bowler_arm = field_setup.get("bowler_arm", "Right-arm bowler")
-    camera_view = field_setup.get("camera_view", "Behind bowler")
-    fielders = field_setup.get("fielders", [])
-    field_preset = field_setup.get("preset", "Custom")
-
     wagon_wheel = generate_wagon_wheel_data(
         ball_positions,
         batter_handedness=batter_handedness,
@@ -2125,7 +2128,7 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
                 shot_angle=shot_angle,
                 selected_zone=detailed_zone,
                 fielders=result.get("field_setup", {}).get("fielders", []),
-                batter_handedness=result.get("batter_handedness", "Right-handed"),
+                batter_handedness=result.get("batter_handedness", "right"),
                 umpires=result.get("field_setup", {}).get("umpires"),
             )
         )
@@ -2455,16 +2458,14 @@ def show_video_analysis_page():
             show_pitch_roi=settings.get("show_pitch_roi", False),
         )
                 
-def estimate_line_from_stumps(bounce_point, stump_detections):
+def estimate_line_from_stumps(bounce_point, stump_detections, batter_handedness="right"):
     """
     Estimate cricket line using bounce point and stump position.
 
     Simple version:
-    - left of stumps = off side
+    - left of stumps = off side for right-handed batters, leg side for left
     - inside stump width = middle
-    - right of stumps = leg side
-
-    This assumes right-handed batter view for now.
+    - right of stumps = leg side for right-handed batters, off side for left
     """
 
     if bounce_point is None or not stump_detections:
@@ -2482,11 +2483,13 @@ def estimate_line_from_stumps(bounce_point, stump_detections):
 
     stump_width = x2 - x1
     margin = int(stump_width * 0.4)
+    left_label = "Leg side" if normalize_handedness(batter_handedness) == "left" else "Off side"
+    right_label = "Off side" if normalize_handedness(batter_handedness) == "left" else "Leg side"
 
     if bx < x1 - margin:
-        return "Off side"
+        return left_label
     elif bx > x2 + margin:
-        return "Leg side"
+        return right_label
     else:
         return "Middle"
     

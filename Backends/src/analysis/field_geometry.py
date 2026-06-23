@@ -5,6 +5,12 @@ import math
 # Shared visual tilt for pitch, labels, fielders, and zones (0 = straight up).
 PITCH_AXIS_DEGREES = 0
 DEFAULT_VISUAL_ROTATION = PITCH_AXIS_DEGREES
+HANDEDNESS_RIGHT = "right"
+HANDEDNESS_LEFT = "left"
+HANDEDNESS_LABELS = {
+    HANDEDNESS_RIGHT: "Right-handed Batter",
+    HANDEDNESS_LEFT: "Left-handed Batter",
+}
 
 FIELD_POSITION_ANGLES_RH = {
     "Straight": {"angle": 0, "radius": 0.88},
@@ -55,12 +61,20 @@ RH_ZONE_RANGES = [
 ]
 
 
+def normalize_handedness(handedness):
+    """Return the stable internal handedness value: ``right`` or ``left``."""
+    value = str(handedness or "").strip().lower().replace("_", "-")
+    if value.startswith("left") or value in {"lh", "l"}:
+        return HANDEDNESS_LEFT
+    return HANDEDNESS_RIGHT
+
+
 def is_left_handed(handedness):
-    return str(handedness or "").lower().startswith("left")
+    return normalize_handedness(handedness) == HANDEDNESS_LEFT
 
 
 def normalize_handedness_label(handedness):
-    return "Left-handed" if is_left_handed(handedness) else "Right-handed"
+    return HANDEDNESS_LABELS[normalize_handedness(handedness)]
 
 
 def mirror_angle_for_handedness(angle_deg, handedness):
@@ -109,7 +123,7 @@ def xy_to_polar(x, y):
     return angle, radius
 
 
-def polar_to_screen(angle_deg, radius, handedness="Right-handed", visual_rotation_deg=DEFAULT_VISUAL_ROTATION):
+def polar_to_screen(angle_deg, radius, handedness=HANDEDNESS_RIGHT, visual_rotation_deg=DEFAULT_VISUAL_ROTATION):
     """Display-only normalized coordinates in roughly -1..1.
 
     RH: display_angle = cricket_angle
@@ -122,7 +136,15 @@ def polar_to_screen(angle_deg, radius, handedness="Right-handed", visual_rotatio
     return polar_to_xy(display_angle, radius)
 
 
-def screen_to_polar(x, y, handedness="Right-handed", visual_rotation_deg=DEFAULT_VISUAL_ROTATION):
+def display_angle_to_screen(angle_deg, radius, visual_rotation_deg=DEFAULT_VISUAL_ROTATION):
+    """Convert an already-display-relative angle to normalized screen x/y."""
+    display_angle = angle_deg
+    if visual_rotation_deg:
+        display_angle = apply_visual_rotation(display_angle, visual_rotation_deg)
+    return polar_to_xy(display_angle, radius)
+
+
+def screen_to_polar(x, y, handedness=HANDEDNESS_RIGHT, visual_rotation_deg=DEFAULT_VISUAL_ROTATION):
     """Convert display x/y back to RH cricket angle/radius."""
     display_angle, radius = xy_to_polar(x, y)
     cricket_angle = display_angle
@@ -136,7 +158,7 @@ def screen_to_polar(x, y, handedness="Right-handed", visual_rotation_deg=DEFAULT
     return cricket_angle, min(max(radius, 0.0), 1.0)
 
 
-def angle_to_field_zone(angle_deg, handedness="Right-handed"):
+def angle_to_field_zone(angle_deg, handedness=HANDEDNESS_RIGHT):
     """Map a signed RH cricket angle to a zone label."""
     if angle_deg is None:
         return "Unknown"
@@ -217,18 +239,18 @@ def ensure_umpire_polar(umpire):
     return umpire
 
 
-def fielder_display_xy(fielder, handedness="Right-handed", visual_rotation_deg=DEFAULT_VISUAL_ROTATION):
+def fielder_display_xy(fielder, handedness=HANDEDNESS_RIGHT, visual_rotation_deg=DEFAULT_VISUAL_ROTATION):
     ensure_fielder_polar(fielder)
     return polar_to_screen(fielder["angle"], fielder["radius"], handedness, visual_rotation_deg)
 
 
-def umpire_display_xy(umpire, handedness="Right-handed", visual_rotation_deg=DEFAULT_VISUAL_ROTATION):
+def umpire_display_xy(umpire, handedness=HANDEDNESS_RIGHT, visual_rotation_deg=DEFAULT_VISUAL_ROTATION):
     ensure_umpire_polar(umpire)
     return polar_to_screen(umpire["angle"], umpire["radius"], handedness, visual_rotation_deg)
 
 
 def pitch_polygon_corners(
-    handedness="Right-handed",
+    handedness=HANDEDNESS_RIGHT,
     visual_rotation_deg=DEFAULT_VISUAL_ROTATION,
     half_length=0.24,
     half_width=0.055,
@@ -245,9 +267,9 @@ def pitch_polygon_corners(
     ]
 
 
-def striker_crease_xy(handedness="Right-handed", visual_rotation_deg=DEFAULT_VISUAL_ROTATION):
+def striker_crease_xy(handedness=HANDEDNESS_RIGHT, visual_rotation_deg=DEFAULT_VISUAL_ROTATION):
     return polar_to_screen(180, 0.11, handedness, visual_rotation_deg)
 
 
-def bowler_end_xy(handedness="Right-handed", visual_rotation_deg=DEFAULT_VISUAL_ROTATION):
+def bowler_end_xy(handedness=HANDEDNESS_RIGHT, visual_rotation_deg=DEFAULT_VISUAL_ROTATION):
     return polar_to_screen(0, 0.08, handedness, visual_rotation_deg)

@@ -14,6 +14,7 @@ from Backends.src.analysis.cricket_agent import (
 from Backends.src.analysis.field_zones import (
     generate_wagon_wheel_data,
     find_nearest_fielder,
+    normalize_handedness,
     save_field_analysis_history,
     save_field_setup,
     suggest_field_adjustment,
@@ -466,6 +467,12 @@ def process_recorded_delivery(
         estimated_bounce_frame = None
         estimated_line = "Unknown"
         estimated_length = "Unknown"
+        field_setup = field_setup or {}
+        batter_handedness = normalize_handedness(field_setup.get("batter_handedness", "right"))
+        bowler_arm = field_setup.get("bowler_arm", "Right-arm bowler")
+        camera_view = field_setup.get("camera_view", "Behind bowler")
+        fielders = field_setup.get("fielders", [])
+        field_preset = field_setup.get("preset", "Custom")
 
         progress_bar = st.progress(0)
         status_text = st.empty()
@@ -642,6 +649,7 @@ def process_recorded_delivery(
                         estimated_line = estimate_line_from_stumps(
                             estimated_bounce_point,
                             bounce_stump_detections or last_stump_detections,
+                            batter_handedness,
                         )
                         estimated_length = estimate_length_from_bounce(
                             estimated_bounce_point,
@@ -785,11 +793,6 @@ def process_recorded_delivery(
         )
         review_frame_count += 1
 
-    field_setup = field_setup or {}
-    batter_handedness = field_setup.get("batter_handedness", "Right-hand batter")
-    bowler_arm = field_setup.get("bowler_arm", "Right-arm bowler")
-    camera_view = field_setup.get("camera_view", "Behind bowler")
-    fielders = field_setup.get("fielders", [])
     wagon_wheel = generate_wagon_wheel_data(
         ball_positions,
         batter_handedness=batter_handedness,
@@ -1022,7 +1025,7 @@ def show_analysis_output(result):
                 shot_angle=shot_angle,
                 selected_zone=detailed_zone,
                 fielders=result.get("field_setup", {}).get("fielders", []),
-                batter_handedness=result.get("batter_handedness", "Right-handed"),
+                batter_handedness=result.get("batter_handedness", "right"),
                 umpires=result.get("field_setup", {}).get("umpires"),
             )
         )

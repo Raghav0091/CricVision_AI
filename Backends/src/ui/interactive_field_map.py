@@ -8,14 +8,19 @@ import streamlit as st
 
 from Backends.src.analysis.field_geometry import (
     DEFAULT_VISUAL_ROTATION,
+    HANDEDNESS_LABELS,
+    HANDEDNESS_LEFT,
+    HANDEDNESS_RIGHT,
     PITCH_AXIS_DEGREES,
     UMPIRE_POSITIONS_RH,
     angle_to_field_zone,
     bowler_end_xy,
+    display_angle_to_screen,
     ensure_fielder_polar,
     ensure_umpire_polar,
     fielder_display_xy,
     mirror_angle_for_handedness,
+    normalize_handedness,
     pitch_polygon_corners,
     polar_to_screen,
     screen_to_polar,
@@ -45,20 +50,18 @@ ZONE_SPECS = [
 
 
 def _normalize_handedness(handedness):
-    if str(handedness or "").lower().startswith("left"):
-        return "Left-handed"
-    return "Right-handed"
+    return normalize_handedness(handedness)
 
 
 def _display_to_canvas(x, y, size=CANVAS_SIZE):
     px = int((float(x) + 1.0) * 0.5 * size)
-    py = int((1.0 - float(y)) * 0.5 * size)
+    py = int((float(y) + 1.0) * 0.5 * size)
     return max(0, min(size - 1, px)), max(0, min(size - 1, py))
 
 
 def _canvas_to_display(px, py, size=CANVAS_SIZE):
     x = (float(px) / size) * 2.0 - 1.0
-    y = 1.0 - (float(py) / size) * 2.0
+    y = (float(py) / size) * 2.0 - 1.0
     return x, y
 
 
@@ -310,7 +313,7 @@ def create_default_umpires():
 
 def build_field_setup(
     preset_name="Balanced",
-    handedness="Right-handed",
+    handedness=HANDEDNESS_RIGHT,
     fielders=None,
     umpires=None,
 ):
@@ -332,6 +335,8 @@ def apply_wedge_angles(start_angle, end_angle, handedness, visual_rotation_deg):
 
     start = apply_visual_rotation(mirror_angle_for_handedness(start_angle, handedness), visual_rotation_deg)
     end = apply_visual_rotation(mirror_angle_for_handedness(end_angle, handedness), visual_rotation_deg)
+    if start > end:
+        start, end = end, start
     return start, end
 
 
@@ -339,7 +344,7 @@ def draw_field_map(
     shot_angle=None,
     selected_zone="Unknown",
     fielders=None,
-    batter_handedness="Right-handed",
+    batter_handedness=HANDEDNESS_RIGHT,
     umpires=None,
     show_labels=True,
     compact=False,
@@ -359,7 +364,7 @@ def draw_field_map(
 def draw_cricket_field_figure(
     fielders=None,
     umpires=None,
-    handedness="Right-handed",
+    handedness=HANDEDNESS_RIGHT,
     shot_angle=None,
     selected_zone="Unknown",
     show_labels=True,
@@ -446,8 +451,7 @@ def draw_cricket_field_figure(
     )
 
     if shot_angle is not None:
-        display_shot = mirror_angle_for_handedness(shot_angle, handedness)
-        arrow_x, arrow_y = polar_to_screen(display_shot, 0.88, handedness, visual_rotation_deg)
+        arrow_x, arrow_y = display_angle_to_screen(shot_angle, 0.88, visual_rotation_deg)
         ax.arrow(0, 0, arrow_x, arrow_y, width=0.012, head_width=0.06, head_length=0.08, length_includes_head=True, color="#fbbf24", zorder=8)
 
     for fielder in fielders:
@@ -606,7 +610,7 @@ def _render_slider_editor(field_setup, handedness, key):
 
 def render_interactive_field_map(
     field_setup=None,
-    handedness="Right-handed",
+    handedness=HANDEDNESS_RIGHT,
     preset_name="Balanced",
     editable=True,
     compact=False,
@@ -690,8 +694,9 @@ def render_field_setup_card(key_prefix="field", compact=True, default_preset="Ba
     with col1:
         handedness = st.selectbox(
             "Batter handedness",
-            ["Right-handed", "Left-handed"],
-            index=0 if not str(active.get("batter_handedness", "")).lower().startswith("left") else 1,
+            [HANDEDNESS_RIGHT, HANDEDNESS_LEFT],
+            index=1 if _normalize_handedness(active.get("batter_handedness")) == HANDEDNESS_LEFT else 0,
+            format_func=lambda value: HANDEDNESS_LABELS[value],
             key=f"{key_prefix}_handedness",
         )
     with col2:

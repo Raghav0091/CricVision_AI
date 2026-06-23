@@ -9,9 +9,11 @@ from pathlib import Path
 from Backends.src.analysis.field_geometry import (
     UMPIRE_POSITIONS_RH,
     angle_to_field_zone,
+    display_angle_for_handedness,
     ensure_fielder_polar,
     ensure_umpire_polar,
     mirror_angle_for_handedness as mirror_signed_angle_for_handedness,
+    normalize_handedness as normalize_handedness_value,
     polar_to_xy,
     umpire_from_name,
 )
@@ -264,9 +266,7 @@ DEPTH_SCALE = {"close": 0.45, "inner ring": 0.62, "deep": 0.82, "boundary": 0.95
 
 
 def normalize_handedness(batter_handedness):
-    if str(batter_handedness).lower().startswith("left"):
-        return "Left-hand batter"
-    return "Right-hand batter"
+    return normalize_handedness_value(batter_handedness)
 
 
 def mirror_angle_for_handedness(angle, batter_handedness):
@@ -300,19 +300,19 @@ def calculate_shot_angle(start_point, end_point):
     return (math.degrees(math.atan2(dx, -dy)) + 360) % 360
 
 
-def get_simple_8_zone(angle, batter_handedness="Right-hand batter"):
+def get_simple_8_zone(angle, batter_handedness="right"):
     return angle_to_field_zone(_signed_shot_angle(angle), batter_handedness)
 
 
-def get_detailed_field_zone(angle, batter_handedness="Right-hand batter"):
+def get_detailed_field_zone(angle, batter_handedness="right"):
     return angle_to_field_zone(_signed_shot_angle(angle), batter_handedness)
 
 
-def classify_shot_zone(angle, batter_handedness="Right-hand batter"):
+def classify_shot_zone(angle, batter_handedness="right"):
     return get_simple_8_zone(angle, batter_handedness)
 
 
-def get_field_zone_label(angle, batter_handedness="Right-hand batter"):
+def get_field_zone_label(angle, batter_handedness="right"):
     return get_simple_8_zone(angle, batter_handedness)
 
 
@@ -356,7 +356,7 @@ def _confidence_label(distance, point_count, used_contact_index):
 
 def generate_wagon_wheel_data(
     ball_trajectory,
-    batter_handedness="Right-hand batter",
+    batter_handedness="right",
     mode="Use last part of trajectory",
     manual_contact_frame=None,
 ):
@@ -443,7 +443,7 @@ LEGACY_PRESET_MAP = {
 }
 
 
-def create_default_fielders(preset_name="Balanced", batter_handedness="Right-hand batter"):
+def create_default_fielders(preset_name="Balanced", batter_handedness="right"):
     preset_name = LEGACY_PRESET_MAP.get(preset_name, preset_name)
     if preset_name in PRESET_NAMES:
         return [ensure_fielder_polar(dict(item)) for item in create_preset_fielders(preset_name)]
@@ -517,6 +517,9 @@ def upgrade_field_setup_coordinates(field_setup):
     """Upgrade legacy coordinates to angle/radius without flipping saved RH data."""
     if not isinstance(field_setup, dict):
         return field_setup
+    field_setup["batter_handedness"] = normalize_handedness(
+        field_setup.get("batter_handedness")
+    )
     version = field_setup.get("coordinate_system_version", 1)
     if version < 2:
         for fielder in field_setup.get("fielders", []):
@@ -539,7 +542,7 @@ def upgrade_field_setup_coordinates(field_setup):
 def find_nearest_fielder(
     shot_angle,
     fielders,
-    batter_handedness="Right-hand batter",
+    batter_handedness="right",
 ):
     if shot_angle is None or not fielders:
         return None
@@ -550,7 +553,11 @@ def find_nearest_fielder(
     best_distance = None
     for fielder in fielders:
         ensure_fielder_polar(fielder)
-        fielder_x, fielder_y = polar_to_xy(fielder["angle"], fielder["radius"])
+        fielder_display_angle = display_angle_for_handedness(
+            fielder["angle"],
+            batter_handedness,
+        )
+        fielder_x, fielder_y = polar_to_xy(fielder_display_angle, fielder["radius"])
         fielder_length = math.hypot(fielder_x, fielder_y) or 1
         fielder_x /= fielder_length
         fielder_y /= fielder_length
@@ -610,10 +617,10 @@ def get_active_field_setup():
         return saved_setup
     default_setup = {
         "preset": "Balanced",
-        "batter_handedness": "Right-hand batter",
+        "batter_handedness": "right",
         "bowler_arm": "Right-arm bowler",
         "camera_view": "Behind bowler",
-        "fielders": create_default_fielders("Balanced", "Right-hand batter"),
+        "fielders": create_default_fielders("Balanced", "right"),
         "umpires": create_default_umpires(),
         "coordinate_system_version": FIELD_COORDINATE_SYSTEM_VERSION,
         "is_default_setup": True,
