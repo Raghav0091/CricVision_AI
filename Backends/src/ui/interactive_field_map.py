@@ -53,6 +53,19 @@ def _normalize_handedness(handedness):
     return normalize_handedness(handedness)
 
 
+def get_field_map_handedness(selected_label_or_value):
+    """
+    Temporary handedness mapping workaround: field renderer currently mirrors handedness,
+    so UI value is inverted before rendering.
+    """
+    normalized = _normalize_handedness(selected_label_or_value)
+    if normalized == HANDEDNESS_RIGHT:
+        return HANDEDNESS_LEFT
+    if normalized == HANDEDNESS_LEFT:
+        return HANDEDNESS_RIGHT
+    return HANDEDNESS_RIGHT
+
+
 def _display_to_canvas(x, y, size=CANVAS_SIZE):
     px = int((float(x) + 1.0) * 0.5 * size)
     py = int((float(y) + 1.0) * 0.5 * size)
@@ -371,6 +384,7 @@ def draw_cricket_field_figure(
     compact=False,
     visual_rotation_deg=DEFAULT_VISUAL_ROTATION,
 ):
+    handedness = get_field_map_handedness(handedness)
     fielders = fielders or []
     umpires = umpires or create_default_umpires()
     handedness = _normalize_handedness(handedness)
@@ -541,11 +555,12 @@ def _render_canvas_editor(field_setup, handedness, show_labels, key):
     except ImportError:
         return None, "streamlit-drawable-canvas is not installed."
 
+    render_handedness = get_field_map_handedness(handedness)
     fielders = field_setup["fielders"]
     initial_drawing = build_canvas_field_drawing(
         fielders=fielders,
         umpires=field_setup.get("umpires"),
-        handedness=handedness,
+        handedness=render_handedness,
         show_labels=show_labels,
     )
 
@@ -562,7 +577,7 @@ def _render_canvas_editor(field_setup, handedness, show_labels, key):
         key=f"{key}_canvas",
     )
 
-    updated_fielders = parse_canvas_fielders(canvas_result, fielders, handedness)
+    updated_fielders = parse_canvas_fielders(canvas_result, fielders, render_handedness)
     field_setup = dict(field_setup)
     field_setup["fielders"] = updated_fielders
     if updated_fielders != fielders:
