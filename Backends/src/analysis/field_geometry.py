@@ -8,8 +8,8 @@ DEFAULT_VISUAL_ROTATION = PITCH_AXIS_DEGREES
 HANDEDNESS_RIGHT = "right"
 HANDEDNESS_LEFT = "left"
 HANDEDNESS_LABELS = {
-    HANDEDNESS_RIGHT: "Right-handed Batter",
-    HANDEDNESS_LEFT: "Left-handed Batter",
+    HANDEDNESS_RIGHT: "Left-handed Batter",
+    HANDEDNESS_LEFT: "Right-handed Batter",
 }
 
 FIELD_POSITION_ANGLES_RH = {
