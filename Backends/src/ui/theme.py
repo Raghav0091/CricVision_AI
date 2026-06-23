@@ -3,23 +3,15 @@
 import streamlit as st
 
 NAV_ITEMS = [
-    ("Home", "Dashboard"),
-    ("Analyze", "Video Analysis"),
     ("Live Session", "Live Session"),
-    ("Reports", "Results"),
-    ("Training Lab", "Training"),
-    ("Datasets", "Datasets"),
-    ("Field Setup Lab", "Field Map"),
+    ("Video Analysis", "Video Analysis"),
+    ("Session Results", "Results"),
 ]
 
 NAV_ICONS = {
-    "Home": "🏠",
-    "Analyze": "🎯",
     "Live Session": "📹",
-    "Reports": "📋",
-    "Training Lab": "🧪",
-    "Datasets": "📁",
-    "Field Setup Lab": "🧪",
+    "Video Analysis": "🎯",
+    "Session Results": "📋",
 }
 
 PAGE_ROUTE = {label: route for label, route in NAV_ITEMS}
@@ -311,9 +303,6 @@ def render_sidebar():
     selected_label = st.sidebar.radio("Navigation", labels, label_visibility="collapsed")
     selected_nav = selected_label.split("  ", 1)[-1]
     route = PAGE_ROUTE[selected_nav]
-
-    with st.sidebar.expander("System Status", expanded=False):
-        render_model_status_sidebar()
 
     return route
 

@@ -3,24 +3,27 @@
 from __future__ import annotations
 
 import io
-import json
-import math
 
 import matplotlib.pyplot as plt
-from matplotlib.patches import Ellipse, Rectangle, Wedge
+from matplotlib.patches import Ellipse, Polygon, Wedge
 import streamlit as st
+from PIL import Image, ImageDraw
 
 from Backends.src.analysis.field_geometry import (
     DEFAULT_VISUAL_ROTATION,
+    PITCH_AXIS_DEGREES,
     UMPIRE_POSITIONS_RH,
     angle_to_field_zone,
+    bowler_end_xy,
     ensure_fielder_polar,
     ensure_umpire_polar,
     fielder_display_xy,
     get_side_labels,
     mirror_angle_for_handedness,
+    pitch_polygon_corners,
     polar_to_screen,
     screen_to_polar,
+    striker_crease_xy,
     umpire_display_xy,
     umpire_from_name,
 )
@@ -28,6 +31,20 @@ from Backends.src.data.field_presets import PRESET_NAMES, create_preset_fielders
 
 CANVAS_SIZE = 520
 FIELD_COORDINATE_VERSION = 3
+
+ZONE_SPECS = [
+    ("Long On", -38, -8),
+    ("Mid On", -72, -38),
+    ("Mid Wicket", -122, -72),
+    ("Square Leg", -158, -122),
+    ("Fine Leg", -180, -158),
+    ("Straight", -8, 8),
+    ("Long Off", 8, 38),
+    ("Mid Off", 38, 72),
+    ("Cover", 72, 100),
+    ("Point", 100, 122),
+    ("Third Man", 122, 158),
+]
 
 
 def _normalize_handedness(handedness):
@@ -46,6 +63,12 @@ def _canvas_to_display(px, py, size=CANVAS_SIZE):
     x = (float(px) / size) * 2.0 - 1.0
     y = 1.0 - (float(py) / size) * 2.0
     return x, y
+
+
+def _display_to_pil(x, y, width, height):
+    px = int((float(x) + 1.0) * 0.5 * width)
+    py = int((1.0 - float(y)) * 0.5 * height)
+    return px, py
 
 
 def create_default_umpires():
@@ -69,6 +92,85 @@ def build_field_setup(
         "umpires": [ensure_umpire_polar(dict(item)) for item in umpires],
         "coordinate_system_version": FIELD_COORDINATE_VERSION,
     }
+
+
+def apply_wedge_angles(start_angle, end_angle, handedness, visual_rotation_deg):
+    from Backends.src.analysis.field_geometry import apply_visual_rotation
+
+    start = apply_visual_rotation(mirror_angle_for_handedness(start_angle, handedness), visual_rotation_deg)
+    end = apply_visual_rotation(mirror_angle_for_handedness(end_angle, handedness), visual_rotation_deg)
+    return start, end
+
+
+def create_field_background(
+    width=CANVAS_SIZE,
+    height=CANVAS_SIZE,
+    handedness="Right-handed",
+    umpires=None,
+    show_labels=True,
+    visual_rotation_deg=DEFAULT_VISUAL_ROTATION,
+):
+    """Build a PIL field background aligned with the shared pitch axis."""
+    handedness = _normalize_handedness(handedness)
+    umpires = umpires or create_default_umpires()
+    sides = get_side_labels(handedness)
+
+    image = Image.new("RGB", (width, height), "#07111f")
+    draw = ImageDraw.Draw(image)
+
+    margin = int(width * 0.04)
+    field_box = (margin, margin, width - margin, height - margin)
+    draw.ellipse(field_box, fill="#137a46", outline="#d8f3dc", width=2)
+
+    inner_margin = int(width * 0.19)
+    inner_box = (inner_margin, inner_margin, width - inner_margin, height - inner_margin)
+    draw.ellipse(inner_box, outline="#bae6fd", width=1)
+
+    for angle in range(-180, 181, 45):
+        line_x, line_y = polar_to_screen(angle, 0.96, handedness, visual_rotation_deg)
+        x0, y0 = _display_to_pil(0, 0, width, height)
+        x1, y1 = _display_to_pil(line_x, line_y, width, height)
+        draw.line((x0, y0, x1, y1), fill="#e2e8f0", width=1)
+
+    pitch_pts = [_display_to_pil(x, y, width, height) for x, y in pitch_polygon_corners(handedness, visual_rotation_deg)]
+    draw.polygon(pitch_pts, fill="#d6b47a", outline="#fef3c7")
+
+    striker_x, striker_y = striker_crease_xy(handedness, visual_rotation_deg)
+    bowler_x, bowler_y = bowler_end_xy(handedness, visual_rotation_deg)
+    sx, sy = _display_to_pil(striker_x, striker_y, width, height)
+    bx, by = _display_to_pil(bowler_x, bowler_y, width, height)
+    draw.ellipse((sx - 6, sy - 6, sx + 6, sy + 6), fill="#f8fafc")
+    draw.ellipse((bx - 5, by - 5, bx + 5, by + 5), fill="#93c5fd")
+
+    for umpire in umpires:
+        ensure_umpire_polar(umpire)
+        ux, uy = umpire_display_xy(umpire, handedness, visual_rotation_deg)
+        px, py = _display_to_pil(ux, uy, width, height)
+        draw.ellipse((px - 9, py - 9, px + 9, py + 9), fill="#f8fafc", outline="#2563eb", width=2)
+
+    if show_labels:
+        for zone_name, start_angle, end_angle in ZONE_SPECS:
+            mid = (start_angle + end_angle) / 2
+            label_x, label_y = polar_to_screen(mid, 0.72, handedness, visual_rotation_deg)
+            lx, ly = _display_to_pil(label_x, label_y, width, height)
+            draw.text((lx - 24, ly - 6), zone_name, fill="#f8fafc")
+
+        left_x, left_y = _display_to_pil(-0.62, -0.96, width, height)
+        right_x, right_y = _display_to_pil(0.62, -0.96, width, height)
+        draw.text((left_x - 20, left_y - 6), sides["left"], fill="#bae6fd")
+        draw.text((right_x - 20, right_y - 6), sides["right"], fill="#fecaca")
+
+        draw.text((sx - 18, sy + 8), "Batter", fill="#f8fafc")
+        draw.text((bx - 28, by - 18), "Bowler end", fill="#dbeafe")
+
+        for umpire in umpires:
+            ensure_umpire_polar(umpire)
+            ux, uy = umpire_display_xy(umpire, handedness, visual_rotation_deg)
+            px, py = _display_to_pil(ux, uy, width, height)
+            short_name = umpire.get("name", "Umpire").replace(" Umpire", "")
+            draw.text((px + 10, py - 6), short_name, fill="#dbeafe")
+
+    return image
 
 
 def draw_cricket_field_figure(
@@ -99,21 +201,7 @@ def draw_cricket_field_figure(
     ax.add_patch(boundary)
     ax.add_patch(inner_ring)
 
-    zone_specs = [
-        ("Long On", -38, -8),
-        ("Mid On", -72, -38),
-        ("Mid Wicket", -122, -72),
-        ("Square Leg", -158, -122),
-        ("Fine Leg", -180, -158),
-        ("Straight", -8, 8),
-        ("Long Off", 8, 38),
-        ("Mid Off", 38, 72),
-        ("Cover", 72, 100),
-        ("Point", 100, 122),
-        ("Third Man", 122, 158),
-    ]
-
-    for zone_name, start_angle, end_angle in zone_specs:
+    for zone_name, start_angle, end_angle in ZONE_SPECS:
         active = selected_zone in {zone_name, "Third Man", "Gully"}
         color = "#34d399" if active else "#94a3b8"
         wedge_start = apply_wedge_angles(start_angle, end_angle, handedness, visual_rotation_deg)
@@ -138,14 +226,22 @@ def draw_cricket_field_figure(
         line_x, line_y = polar_to_screen(angle, 0.96, handedness, visual_rotation_deg)
         ax.plot([0, line_x], [0, line_y], color="#e2e8f0", alpha=0.15, linewidth=0.7)
 
-    pitch = Rectangle((-0.055, -0.24), 0.11, 0.48, facecolor="#d6b47a", edgecolor="#fef3c7", linewidth=1.4)
+    pitch = Polygon(
+        pitch_polygon_corners(handedness, visual_rotation_deg),
+        facecolor="#d6b47a",
+        edgecolor="#fef3c7",
+        linewidth=1.4,
+    )
     ax.add_patch(pitch)
-    ax.scatter([0], [0.11], s=36 if compact else 42, color="#f8fafc", zorder=5)
+
+    striker_x, striker_y = striker_crease_xy(handedness, visual_rotation_deg)
+    bowler_x, bowler_y = bowler_end_xy(handedness, visual_rotation_deg)
+    ax.scatter([striker_x], [striker_y], s=36 if compact else 42, color="#f8fafc", zorder=5)
     if show_labels:
-        ax.annotate("Batter", (0, 0.11), xytext=(0, 10), textcoords="offset points", ha="center", fontsize=7, color="#f8fafc")
-    ax.scatter([0], [-0.08], s=28 if compact else 32, color="#93c5fd", zorder=5)
+        ax.annotate("Batter", (striker_x, striker_y), xytext=(0, 10), textcoords="offset points", ha="center", fontsize=7, color="#f8fafc")
+    ax.scatter([bowler_x], [bowler_y], s=28 if compact else 32, color="#93c5fd", zorder=5)
     if show_labels:
-        ax.annotate("Bowler end", (0, -0.08), xytext=(0, -12), textcoords="offset points", ha="center", fontsize=7, color="#dbeafe")
+        ax.annotate("Bowler end", (bowler_x, bowler_y), xytext=(0, -12), textcoords="offset points", ha="center", fontsize=7, color="#dbeafe")
 
     ax.text(-0.62, -0.96, sides["left"], ha="center", va="center", fontsize=8, color="#bae6fd")
     ax.text(0.62, -0.96, sides["right"], ha="center", va="center", fontsize=8, color="#fecaca")
@@ -207,43 +303,21 @@ def draw_cricket_field_figure(
     return fig
 
 
-def apply_wedge_angles(start_angle, end_angle, handedness, visual_rotation_deg):
-    from Backends.src.analysis.field_geometry import apply_visual_rotation
-
-    start = apply_visual_rotation(mirror_angle_for_handedness(start_angle, handedness), visual_rotation_deg)
-    end = apply_visual_rotation(mirror_angle_for_handedness(end_angle, handedness), visual_rotation_deg)
-    return start, end
-
-
 def field_figure_to_png(fig):
     buffer = io.BytesIO()
     fig.savefig(buffer, format="png", dpi=120, facecolor=fig.patch.get_facecolor())
     plt.close(fig)
     buffer.seek(0)
-    return buffer.getvalue()
+    return Image.open(buffer)
 
 
-def _render_canvas_editor(field_setup, handedness, show_labels, key):
-    try:
-        from streamlit_drawable_canvas import st_canvas
-    except ImportError:
-        return None, "streamlit-drawable-canvas is not installed."
-
-    fielders = field_setup["fielders"]
-    background_fig = draw_cricket_field_figure(
-        fielders=[],
-        umpires=field_setup.get("umpires"),
-        handedness=handedness,
-        show_labels=show_labels,
-        compact=True,
-    )
-    background_image = field_figure_to_png(background_fig)
-
+def _build_canvas_fielder_objects(fielders, handedness, visual_rotation_deg=DEFAULT_VISUAL_ROTATION):
     initial_drawing = {"version": "4.4.0", "objects": []}
     radius_px = 14
     for index, fielder in enumerate(fielders):
-        x, y = fielder_display_xy(fielder, handedness)
+        x, y = fielder_display_xy(fielder, handedness, visual_rotation_deg)
         px, py = _display_to_canvas(x, y)
+        name = fielder.get("name", f"F{index + 1}")
         initial_drawing["objects"].append(
             {
                 "type": "circle",
@@ -254,8 +328,76 @@ def _render_canvas_editor(field_setup, handedness, show_labels, key):
                 "stroke": "#111827",
                 "strokeWidth": 2,
                 "name": str(index),
+                "selectable": True,
+                "hasControls": True,
+                "hasBorders": True,
             }
         )
+        label_x = px - 8
+        label_y = py - radius_px - 14
+        initial_drawing["objects"].append(
+            {
+                "type": "text",
+                "left": label_x,
+                "top": label_y,
+                "text": name[:10],
+                "fontSize": 10,
+                "fill": "#fefce8",
+                "name": f"label_{index}",
+                "selectable": False,
+                "evented": False,
+            }
+        )
+    return initial_drawing
+
+
+def _apply_canvas_fielder_moves(canvas_result, fielders, handedness, visual_rotation_deg=DEFAULT_VISUAL_ROTATION):
+    if canvas_result is None or canvas_result.json_data is None:
+        return fielders
+
+    objects = canvas_result.json_data.get("objects", [])
+    updated_fielders = [dict(item) for item in fielders]
+    radius_px = 14
+
+    for obj in objects:
+        if obj.get("type") != "circle":
+            continue
+        name = obj.get("name")
+        if name is None:
+            continue
+        try:
+            index = int(name)
+        except ValueError:
+            continue
+        if index >= len(updated_fielders):
+            continue
+        left = float(obj.get("left", 0)) + float(obj.get("radius", radius_px))
+        top = float(obj.get("top", 0)) + float(obj.get("radius", radius_px))
+        display_x, display_y = _canvas_to_display(left, top)
+        angle, radius = screen_to_polar(display_x, display_y, handedness, visual_rotation_deg)
+        updated_fielders[index]["angle"] = round(angle, 2)
+        updated_fielders[index]["radius"] = round(min(max(radius, 0.12), 0.98), 3)
+        ensure_fielder_polar(updated_fielders[index])
+
+    return updated_fielders
+
+
+def _render_canvas_editor(field_setup, handedness, show_labels, key):
+    try:
+        from streamlit_drawable_canvas import st_canvas
+    except ImportError:
+        return None, "streamlit-drawable-canvas is not installed."
+
+    fielders = field_setup["fielders"]
+    background_image = create_field_background(
+        width=CANVAS_SIZE,
+        height=CANVAS_SIZE,
+        handedness=handedness,
+        umpires=field_setup.get("umpires"),
+        show_labels=show_labels,
+    )
+
+    initial_drawing = _build_canvas_fielder_objects(fielders, handedness)
 
     canvas_result = st_canvas(
         fill_color="rgba(0,0,0,0)",
@@ -270,32 +412,11 @@ def _render_canvas_editor(field_setup, handedness, show_labels, key):
         key=f"{key}_canvas",
     )
 
-    if canvas_result.json_data is None:
-        return field_setup, None
-
-    objects = canvas_result.json_data.get("objects", [])
-    updated_fielders = [dict(item) for item in fielders]
-    for obj in objects:
-        name = obj.get("name")
-        if name is None:
-            continue
-        try:
-            index = int(name)
-        except ValueError:
-            continue
-        if index >= len(updated_fielders):
-            continue
-        left = float(obj.get("left", 0)) + float(obj.get("radius", radius_px))
-        top = float(obj.get("top", 0)) + float(obj.get("radius", radius_px))
-        display_x, display_y = _canvas_to_display(left, top)
-        angle, radius = screen_to_polar(display_x, display_y, handedness)
-        updated_fielders[index]["angle"] = round(angle, 2)
-        updated_fielders[index]["radius"] = round(min(max(radius, 0.12), 0.98), 3)
-        ensure_fielder_polar(updated_fielders[index])
-
+    updated_fielders = _apply_canvas_fielder_moves(canvas_result, fielders, handedness)
     field_setup = dict(field_setup)
     field_setup["fielders"] = updated_fielders
-    field_setup["preset"] = "Custom"
+    if updated_fielders != fielders:
+        field_setup["preset"] = "Custom"
     return field_setup, None
 
 
@@ -346,6 +467,7 @@ def render_interactive_field_map(
     key="field_map",
     shot_angle=None,
     selected_zone="Unknown",
+    use_canvas=True,
 ):
     handedness = _normalize_handedness(handedness or (field_setup or {}).get("batter_handedness"))
     if field_setup is None:
@@ -370,29 +492,37 @@ def render_interactive_field_map(
         )
 
     current = st.session_state[state_key]
-    fig = draw_cricket_field_figure(
-        fielders=current["fielders"],
-        umpires=current.get("umpires"),
-        handedness=handedness,
-        shot_angle=shot_angle,
-        selected_zone=selected_zone,
-        show_labels=show_labels,
-        compact=compact,
-    )
-    st.pyplot(fig)
 
-    if editable:
-        edit_mode = st.toggle("Edit field positions", value=False, key=f"{key}_edit_toggle")
-        if edit_mode:
-            canvas_setup, canvas_error = _render_canvas_editor(current, handedness, show_labels, key)
-            if canvas_error:
-                st.caption(canvas_error)
-                st.caption("Using slider edit mode instead.")
-                current = _render_slider_editor(current, handedness, key)
-            else:
-                current = canvas_setup or current
-            st.session_state[state_key] = current
+    if editable and use_canvas:
+        st.caption("Drag yellow circles to reposition fielders.")
+        canvas_setup, canvas_error = _render_canvas_editor(current, handedness, show_labels, key)
+        if canvas_error:
+            st.warning(canvas_error)
+            fig = draw_cricket_field_figure(
+                fielders=current["fielders"],
+                umpires=current.get("umpires"),
+                handedness=handedness,
+                shot_angle=shot_angle,
+                selected_zone=selected_zone,
+                show_labels=show_labels,
+                compact=compact,
+            )
+            st.pyplot(fig)
+        else:
+            current = canvas_setup or current
+    else:
+        fig = draw_cricket_field_figure(
+            fielders=current["fielders"],
+            umpires=current.get("umpires"),
+            handedness=handedness,
+            shot_angle=shot_angle,
+            selected_zone=selected_zone,
+            show_labels=show_labels,
+            compact=compact,
+        )
+        st.pyplot(fig)
 
+    st.session_state[state_key] = current
     current["coordinate_system_version"] = FIELD_COORDINATE_VERSION
     return current
 
@@ -402,7 +532,7 @@ def render_field_setup_card(key_prefix="field", compact=True, default_preset="Ba
     from Backends.src.analysis.field_zones import get_active_field_setup, set_active_field_setup
     from Backends.src.ui.theme import render_section_title
 
-    render_section_title("Field Setup", "Used for wagon-wheel direction and nearest fielder context.")
+    render_section_title("Field Setup", "Drag fielders on the map. Used for wagon-wheel direction and nearest fielder context.")
 
     active = get_active_field_setup()
     preset_options = PRESET_NAMES + (["Custom"] if active.get("preset") not in PRESET_NAMES else [])
@@ -450,16 +580,32 @@ def render_field_setup_card(key_prefix="field", compact=True, default_preset="Ba
 
     show_labels = st.checkbox("Show field labels", value=True, key=f"{key_prefix}_show_labels")
 
-    with st.expander("Edit Field", expanded=False):
-        active = render_interactive_field_map(
-            field_setup=active,
-            handedness=handedness,
-            preset_name=selected_preset,
-            editable=True,
-            compact=compact,
-            show_labels=show_labels,
-            key=f"{key_prefix}_interactive_map",
-        )
+    active = render_interactive_field_map(
+        field_setup=active,
+        handedness=handedness,
+        preset_name=selected_preset,
+        editable=True,
+        compact=compact,
+        show_labels=show_labels,
+        key=f"{key_prefix}_interactive_map",
+        use_canvas=True,
+    )
+
+    with st.expander("Developer / Advanced", expanded=False):
+        st.caption(f"Pitch axis: {PITCH_AXIS_DEGREES}° | coordinate version {FIELD_COORDINATE_VERSION}")
+        active = _render_slider_editor(active, handedness, f"{key_prefix}_advanced")
+        if st.checkbox("Show raw fielder coordinates", value=False, key=f"{key_prefix}_show_raw"):
+            st.json(
+                [
+                    {
+                        "name": item.get("name"),
+                        "angle": item.get("angle"),
+                        "radius": item.get("radius"),
+                        "zone": angle_to_field_zone(item.get("angle"), handedness),
+                    }
+                    for item in active.get("fielders", [])
+                ]
+            )
 
     if st.button("Save Field Setup", type="primary", use_container_width=True, key=f"{key_prefix}_save_field"):
         active["preset"] = selected_preset if selected_preset != "Custom" else active.get("preset", "Custom")

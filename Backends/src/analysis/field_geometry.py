@@ -2,7 +2,9 @@
 
 import math
 
-DEFAULT_VISUAL_ROTATION = 20
+# Shared visual tilt for pitch, labels, fielders, and zones (cricket angle 0 stays straight).
+PITCH_AXIS_DEGREES = -20
+DEFAULT_VISUAL_ROTATION = PITCH_AXIS_DEGREES
 
 FIELD_POSITION_ANGLES_RH = {
     "Straight": {"angle": 0, "radius": 0.88},
@@ -208,3 +210,29 @@ def fielder_display_xy(fielder, handedness="Right-handed", visual_rotation_deg=D
 def umpire_display_xy(umpire, handedness="Right-handed", visual_rotation_deg=DEFAULT_VISUAL_ROTATION):
     ensure_umpire_polar(umpire)
     return polar_to_screen(umpire["angle"], umpire["radius"], handedness, visual_rotation_deg)
+
+
+def pitch_polygon_corners(
+    handedness="Right-handed",
+    visual_rotation_deg=DEFAULT_VISUAL_ROTATION,
+    half_length=0.24,
+    half_width=0.055,
+):
+    """Return four pitch corners aligned with the straight (bowler-to-batter) axis."""
+    bowler_far = polar_to_screen(0, half_length, handedness, visual_rotation_deg)
+    striker_far = polar_to_screen(180, half_length, handedness, visual_rotation_deg)
+    perp_x, perp_y = polar_to_screen(90, half_width, handedness, visual_rotation_deg)
+    return [
+        (bowler_far[0] - perp_x, bowler_far[1] - perp_y),
+        (bowler_far[0] + perp_x, bowler_far[1] + perp_y),
+        (striker_far[0] + perp_x, striker_far[1] + perp_y),
+        (striker_far[0] - perp_x, striker_far[1] - perp_y),
+    ]
+
+
+def striker_crease_xy(handedness="Right-handed", visual_rotation_deg=DEFAULT_VISUAL_ROTATION):
+    return polar_to_screen(180, 0.11, handedness, visual_rotation_deg)
+
+
+def bowler_end_xy(handedness="Right-handed", visual_rotation_deg=DEFAULT_VISUAL_ROTATION):
+    return polar_to_screen(0, 0.08, handedness, visual_rotation_deg)
