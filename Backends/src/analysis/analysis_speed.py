@@ -5,42 +5,16 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from Backends.src.analysis.smart_pipeline import get_smart_analysis_settings, resolve_smart_mode
+
 
 def get_analysis_mode_settings(mode: str) -> dict[str, Any]:
-    """Return frame stride, resize, and inference settings for a speed mode."""
-    normalized = (mode or "Balanced").strip().title()
-    if normalized == "Fast":
-        return {
-            "frame_stride": 3,
-            "resize_width": 640,
-            "process_every_frame": False,
-            "max_frames": None,
-            "yolo_imgsz": 512,
-            "enable_local_redetection": False,
-            "skip_impact_video_rewrite": True,
-            "single_pass_same_model": True,
-        }
-    if normalized == "Accurate":
-        return {
-            "frame_stride": 1,
-            "resize_width": None,
-            "process_every_frame": True,
-            "max_frames": None,
-            "yolo_imgsz": 960,
-            "enable_local_redetection": True,
-            "skip_impact_video_rewrite": False,
-            "single_pass_same_model": False,
-        }
-    return {
-        "frame_stride": 2,
-        "resize_width": 768,
-        "process_every_frame": False,
-        "max_frames": None,
-        "yolo_imgsz": 640,
-        "enable_local_redetection": True,
-        "skip_impact_video_rewrite": False,
-        "single_pass_same_model": True,
-    }
+    """Return smart pipeline settings (legacy wrapper)."""
+    return get_smart_analysis_settings(mode)
+
+
+def resolve_analysis_mode(mode: str) -> str:
+    return resolve_smart_mode(mode)
 
 
 def resolve_frame_limit(enabled: bool, choice) -> int | None:

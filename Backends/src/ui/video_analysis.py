@@ -612,15 +612,19 @@ def run_pitch_roi_detection(
     use_ensemble=False,
     ball_confidence=None,
     speed_settings=None,
+    detect_stump=True,
+    locked_stump_detections=None,
+    use_roi=True,
 ):
     speed_settings = speed_settings or {}
+    stump_detections = list(locked_stump_detections or [])
     same_model = (
         not use_ensemble
         and ball_model is not None
         and stump_model is not None
         and ball_model is stump_model
     )
-    if same_model and speed_settings.get("single_pass_same_model", False):
+    if detect_stump and same_model and speed_settings.get("single_pass_same_model", False):
         full_frame_start = time.perf_counter()
         combined_result = run_single_model_detection(
             frame,
@@ -657,25 +661,30 @@ def run_pitch_roi_detection(
             "single_pass": True,
         }
 
-    full_frame_start = time.perf_counter()
-    stump_result = run_single_model_detection(
-        frame,
-        stump_model,
-        confidence,
-        imgsz,
-    )
-    _, stump_detections = collect_model_detections(
-        stump_result,
-        stump_class_names,
-        confidence,
-        "Ball + Stump Detector",
-        get_box_center,
-    )
-    full_frame_time_ms = (time.perf_counter() - full_frame_start) * 1000
+    full_frame_time_ms = 0.0
+    if detect_stump:
+        full_frame_start = time.perf_counter()
+        stump_result = run_single_model_detection(
+            frame,
+            stump_model,
+            confidence,
+            imgsz,
+        )
+        _, stump_detections = collect_model_detections(
+            stump_result,
+            stump_class_names,
+            confidence,
+            "Ball + Stump Detector",
+            get_box_center,
+        )
+        full_frame_time_ms = (time.perf_counter() - full_frame_start) * 1000
 
-    roi_box = estimate_pitch_roi(frame.shape, stump_detections, previous_roi)
-    roi_frame, (offset_x, offset_y), active_roi_box = crop_frame_to_roi(frame, roi_box)
-    used_roi = active_roi_box is not None
+    roi_box = estimate_pitch_roi(frame.shape, stump_detections, previous_roi) if use_roi else None
+    if use_roi and roi_box is not None:
+        roi_frame, (offset_x, offset_y), active_roi_box = crop_frame_to_roi(frame, roi_box)
+    else:
+        roi_frame, offset_x, offset_y, active_roi_box = frame, 0, 0, None
+    used_roi = active_roi_box is not None and use_roi
 
     roi_start = time.perf_counter()
 
@@ -1160,14 +1169,14 @@ def process_batting_video(
     ball_model_key="current_best",
     bat_model_key="cricshot_bat",
     confidence=0.25,
-    speed_mode="Balanced",
+    speed_mode="Smart Balanced",
     max_frames=None,
+    generate_processed_video=True,
 ):
     """Process a clip with only the models needed for batting intelligence."""
     from Backends.src.agents.observer_timeline import build_observer_timeline
     from Backends.src.analysis.analysis_speed import (
         get_analysis_mode_settings,
-        normalize_detections,
         resize_frame_for_inference,
         scale_detections_to_original,
     )
@@ -1181,6 +1190,12 @@ def process_batting_video(
         save_impact_frame_preview,
     )
     from Backends.src.analysis.shot_classification import classify_shot_type
+    from Backends.src.analysis.smart_pipeline import (
+        refine_bat_detections_near_impact,
+        should_detect_ball,
+        should_detect_bat,
+        update_rough_impact_frame,
+    )
 
     ball_model = get_cached_yolo_model(ball_model_key)
     bat_model = get_cached_yolo_model(bat_model_key)
@@ -1198,10 +1213,16 @@ def process_batting_video(
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     speed_settings = get_analysis_mode_settings(speed_mode)
-    frame_stride = max(1, int(speed_settings.get("frame_stride", 1)))
+    speed_mode = speed_settings.get("mode", speed_mode)
     resize_width = speed_settings.get("resize_width")
+    light_annotation = bool(speed_settings.get("light_annotation", False))
+    generate_processed_video = bool(
+        generate_processed_video and speed_settings.get("generate_processed_video", True)
+    )
     performance = _empty_performance_profile()
     performance["speed_mode"] = speed_mode
+    performance["smart_pipeline_used"] = True
+    performance["processed_video_generated"] = generate_processed_video
     analysis_started = time.perf_counter()
     processed_detection_frames = 0
     detection_stats = {"invalid_detection_count": 0}
@@ -1210,12 +1231,14 @@ def process_batting_video(
         return {"success": False, "error": "Could not read video width/height."}
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    writer = cv2.VideoWriter(
-        str(output_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height)
-    )
-    if not writer.isOpened():
-        cap.release()
-        return {"success": False, "error": "Could not create output video writer."}
+    writer = None
+    if generate_processed_video:
+        writer = cv2.VideoWriter(
+            str(output_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height)
+        )
+        if not writer.isOpened():
+            cap.release()
+            return {"success": False, "error": "Could not create output video writer."}
 
     frame_index = 0
     ball_detected_frames = 0
@@ -1226,6 +1249,9 @@ def process_batting_video(
     frame_detections = impact_frame_detections
     impact_frame_candidates = {}
     trajectory = []
+    rough_impact_state = None
+    rough_impact_frame = None
+    last_bat_detections = []
     progress_bar = st.progress(0)
     status_text = st.empty()
 
@@ -1242,27 +1268,41 @@ def process_batting_video(
         annotated_frame = frame.copy()
         ball_detections = []
         bat_detections = []
-        if frame_index % frame_stride == 0:
-            inference_started = time.perf_counter()
-            inference_frame, detection_scale = resize_frame_for_inference(frame, resize_width)
-            ball_detections = detect_ball_in_frame(inference_frame, ball_model, confidence)
+        inference_frame, detection_scale = resize_frame_for_inference(frame, resize_width)
+
+        if should_detect_ball(frame_index, speed_settings):
+            ball_started = time.perf_counter()
             ball_detections = scale_detections_to_original(
-                ball_detections,
+                detect_ball_in_frame(inference_frame, ball_model, confidence),
                 detection_scale,
                 stats=detection_stats,
             )
-            bat_detections = (
-                detect_bat_in_frame(inference_frame, bat_model, confidence)
-                if bat_model
-                else []
-            )
-            bat_detections = scale_detections_to_original(
-                bat_detections,
-                detection_scale,
-                stats=detection_stats,
-            )
-            performance["model_inference_time_sec"] += time.perf_counter() - inference_started
+            ball_elapsed = time.perf_counter() - ball_started
+            performance["ball_detection_time_sec"] += ball_elapsed
+            performance["model_inference_time_sec"] += ball_elapsed
             processed_detection_frames += 1
+
+        if should_detect_bat(frame_index, speed_settings, rough_impact_frame) and bat_model:
+            bat_started = time.perf_counter()
+            bat_detections = scale_detections_to_original(
+                detect_bat_in_frame(inference_frame, bat_model, confidence),
+                detection_scale,
+                stats=detection_stats,
+            )
+            performance["bat_detection_time_sec"] += time.perf_counter() - bat_started
+            last_bat_detections = bat_detections
+        elif last_bat_detections:
+            bat_detections = last_bat_detections
+
+        rough_impact_state = update_rough_impact_frame(
+            frame_index,
+            ball_detections,
+            bat_detections,
+            rough_impact_state,
+        )
+        if rough_impact_state is not None:
+            rough_impact_frame = rough_impact_state[1]
+
         if ball_detections:
             ball_detected_frames += 1
             main_ball = max(ball_detections, key=lambda item: item["confidence"])
@@ -1286,23 +1326,42 @@ def process_batting_video(
 
         _draw_ball_detections(annotated_frame, ball_detections)
         draw_bat_detections(annotated_frame, bat_detections)
-        for index in range(1, len(trajectory[-35:])):
-            recent = trajectory[-35:]
-            cv2.line(annotated_frame, recent[index - 1], recent[index], (0, 255, 255), 3)
-        annotation_started = time.perf_counter()
-        writer.write(annotated_frame)
-        performance["annotation_write_time_sec"] += time.perf_counter() - annotation_started
+        if not light_annotation:
+            for index in range(1, len(trajectory[-35:])):
+                recent = trajectory[-35:]
+                cv2.line(annotated_frame, recent[index - 1], recent[index], (0, 255, 255), 3)
+        elif len(trajectory) >= 2:
+            cv2.line(annotated_frame, trajectory[-2], trajectory[-1], (0, 255, 255), 3)
+
+        if writer is not None:
+            annotation_started = time.perf_counter()
+            writer.write(annotated_frame)
+            performance["annotation_write_time_sec"] += time.perf_counter() - annotation_started
         frame_index += 1
         if total_frames > 0:
             progress_bar.progress(min(frame_index / total_frames, 1.0))
             status_text.text(f"Processing frame {frame_index}/{total_frames}")
 
     cap.release()
-    writer.release()
+    if writer is not None:
+        writer.release()
     progress_bar.empty()
     status_text.empty()
     if frame_index == 0:
         return {"success": False, "error": "No video frames were processed."}
+
+    preliminary_impact = detect_bat_ball_impact(frame_detections, fps=fps)
+    if speed_settings.get("refine_bat_near_impact") and preliminary_impact.get("impact_frame") is not None:
+        refine_bat_detections_near_impact(
+            video_path,
+            frame_detections,
+            preliminary_impact.get("impact_frame"),
+            bat_model,
+            confidence,
+            resize_width,
+            radius=int(speed_settings.get("impact_window_radius", 8)),
+            stats=detection_stats,
+        )
 
     impact_info = detect_bat_ball_impact(impact_frame_detections, fps=fps)
     if bat_unavailable_reason:
@@ -1317,7 +1376,8 @@ def process_batting_video(
         )
         if preview_path is not None:
             impact_info["impact_frame_image_path"] = str(preview_path)
-    _add_impact_marker_to_video(output_path, impact_info)
+    if generate_processed_video:
+        _add_impact_marker_to_video(output_path, impact_info)
     shot_info = classify_shot_type(
         frame_detections,
         impact_info,
@@ -1332,10 +1392,17 @@ def process_batting_video(
         batter_handedness=None,
         fps=fps,
     )
+    observer_started = time.perf_counter()
     observer_timeline = build_observer_timeline(frame_detections, total_frames=frame_index, fps=fps)
+    performance["observer_timeline_time_sec"] = time.perf_counter() - observer_started
     performance["report_generation_time_sec"] = time.perf_counter() - report_started
-    performance["frames_processed"] = processed_detection_frames
+    performance["frames_processed"] = frame_index
     performance["total_analysis_time_sec"] = time.perf_counter() - analysis_started
+    if frame_index > 0:
+        performance["avg_time_per_frame_sec"] = round(
+            performance["total_analysis_time_sec"] / frame_index,
+            4,
+        )
     if processed_detection_frames > 0:
         performance["average_ms_per_processed_frame"] = round(
             (performance["model_inference_time_sec"] / processed_detection_frames) * 1000,
@@ -1347,7 +1414,9 @@ def process_batting_video(
     return {
         "success": True,
         "analysis_mode": "Batting Analysis",
-        "output_path": Path(output_path),
+        "output_path": Path(output_path) if generate_processed_video else None,
+        "processed_video_generated": generate_processed_video,
+        "processed_video_skipped": not generate_processed_video,
         "total_frames": frame_index,
         "ball_detected_frames": ball_detected_frames,
         "bat_detected_frames": bat_detected_frames,
@@ -1359,6 +1428,7 @@ def process_batting_video(
         "observer_timeline": observer_timeline,
         "performance_profile": performance,
         "speed_mode": speed_mode,
+        "smart_pipeline_used": True,
         "shot_info": shot_info,
         "direction_info": direction_info,
         "agent_info": agent_info,
@@ -1507,13 +1577,20 @@ def _empty_performance_profile():
     return {
         "video_read_time_sec": 0.0,
         "model_inference_time_sec": 0.0,
+        "ball_detection_time_sec": 0.0,
+        "bat_detection_time_sec": 0.0,
+        "stump_detection_time_sec": 0.0,
         "annotation_write_time_sec": 0.0,
+        "observer_timeline_time_sec": 0.0,
         "report_generation_time_sec": 0.0,
         "total_analysis_time_sec": 0.0,
         "frames_processed": 0,
         "frames_read": 0,
         "average_ms_per_processed_frame": None,
-        "speed_mode": "Balanced",
+        "avg_time_per_frame_sec": None,
+        "speed_mode": "Smart Balanced",
+        "smart_pipeline_used": True,
+        "processed_video_generated": True,
     }
 
 
@@ -1533,8 +1610,9 @@ def process_video(
     manual_contact_frame=None,
     field_setup=None,
     bat_model_key=None,
-    speed_mode="Balanced",
+    speed_mode="Smart Balanced",
     max_frames=None,
+    generate_processed_video=True,
 ):
     from Backends.src.agents.observer_timeline import build_observer_timeline
     from Backends.src.analysis.analysis_speed import (
@@ -1542,6 +1620,15 @@ def process_video(
         normalize_detections,
         resize_frame_for_inference,
         scale_detections_to_original,
+    )
+    from Backends.src.analysis.smart_pipeline import (
+        apply_locked_stump,
+        lock_static_stump_detection,
+        refine_bat_detections_near_impact,
+        should_detect_ball,
+        should_detect_bat,
+        should_detect_stump,
+        update_rough_impact_frame,
     )
     from Backends.src.analysis.bat_detection import (
         detect_bat_in_frame,
@@ -1614,11 +1701,17 @@ def process_video(
         }
 
     speed_settings = get_analysis_mode_settings(speed_mode)
-    frame_stride = max(1, int(speed_settings.get("frame_stride", 1)))
+    speed_mode = speed_settings.get("mode", speed_mode)
     inference_imgsz = int(speed_settings.get("yolo_imgsz", imgsz))
     resize_width = speed_settings.get("resize_width")
+    light_annotation = bool(speed_settings.get("light_annotation", False))
+    generate_processed_video = bool(
+        generate_processed_video and speed_settings.get("generate_processed_video", True)
+    )
     performance = _empty_performance_profile()
     performance["speed_mode"] = speed_mode
+    performance["smart_pipeline_used"] = True
+    performance["processed_video_generated"] = generate_processed_video
     analysis_started = time.perf_counter()
     processed_detection_frames = 0
     detection_stats = {"invalid_detection_count": 0}
@@ -1627,14 +1720,15 @@ def process_video(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
-
-    if not writer.isOpened():
-        cap.release()
-        return {
-            "success": False,
-            "error": "Could not create output video writer.",
-        }
+    writer = None
+    if generate_processed_video:
+        writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+        if not writer.isOpened():
+            cap.release()
+            return {
+                "success": False,
+                "error": "Could not create output video writer.",
+            }
 
     frame_index = 0
 
@@ -1704,7 +1798,11 @@ def process_video(
 
     min_track_points_for_bounce = 8
     min_movement_distance = 40
-    min_ball_confidence_for_tracking = 0.35 
+    min_ball_confidence_for_tracking = 0.35
+    locked_stump = None
+    rough_impact_state = None
+    rough_impact_frame = None
+    last_bat_detections = []
 
     while True:
         read_started = time.perf_counter()
@@ -1721,26 +1819,17 @@ def process_video(
 
         last_raw_frame = frame.copy()
         annotated_frame = frame.copy()
-        run_detection = frame_index % frame_stride == 0
         low_confidence_ball_detections = []
         ball_detections = []
         stump_detections = []
         bat_detections = []
 
-        if run_detection:
-            inference_started = time.perf_counter()
-            inference_frame, detection_scale = resize_frame_for_inference(frame, resize_width)
-            bat_detections = (
-                detect_bat_in_frame(inference_frame, bat_model, confidence)
-                if bat_model
-                else []
-            )
-            bat_detections = scale_detections_to_original(
-                bat_detections,
-                detection_scale,
-                stats=detection_stats,
-            )
+        inference_frame, detection_scale = resize_frame_for_inference(frame, resize_width)
+        run_stump = should_detect_stump(frame_index, speed_settings, locked_stump)
+        run_bat = should_detect_bat(frame_index, speed_settings, rough_impact_frame)
 
+        if should_detect_ball(frame_index, speed_settings):
+            ball_started = time.perf_counter()
             detection_result = run_pitch_roi_detection(
                 inference_frame,
                 stump_model=stump_model,
@@ -1754,6 +1843,9 @@ def process_video(
                 use_ensemble=use_ensemble,
                 ball_confidence=min_ball_confidence_for_tracking,
                 speed_settings=speed_settings,
+                detect_stump=run_stump,
+                locked_stump_detections=[locked_stump] if locked_stump and not run_stump else None,
+                use_roi=speed_settings.get("use_roi", True),
             )
             ball_detections = scale_detections_to_original(
                 detection_result["ball_detections"],
@@ -1770,7 +1862,11 @@ def process_video(
                 detection_scale,
                 stats=detection_stats,
             )
-            performance["model_inference_time_sec"] += time.perf_counter() - inference_started
+            ball_elapsed = time.perf_counter() - ball_started
+            performance["ball_detection_time_sec"] += ball_elapsed
+            performance["model_inference_time_sec"] += ball_elapsed
+            if run_stump:
+                performance["stump_detection_time_sec"] += detection_result.get("full_frame_time_ms", 0) / 1000.0
             processed_detection_frames += 1
             full_frame_detection_time_total += detection_result["full_frame_time_ms"]
             roi_detection_time_total += detection_result["roi_time_ms"]
@@ -1851,18 +1947,32 @@ def process_video(
                 )
                 review_frame_count += 1
 
-            if stump_detections:
-                stump_detected_frames += 1
-                total_stump_detections += len(stump_detections)
+        if run_bat and bat_model:
+            bat_started = time.perf_counter()
+            bat_detections = scale_detections_to_original(
+                detect_bat_in_frame(inference_frame, bat_model, confidence),
+                detection_scale,
+                stats=detection_stats,
+            )
+            performance["bat_detection_time_sec"] += time.perf_counter() - bat_started
+            last_bat_detections = bat_detections
+        elif last_bat_detections:
+            bat_detections = last_bat_detections
 
-                if calibration_mode.startswith("Auto") and pitch_homography is None:
-                    auto_pitch_points = estimate_auto_pitch_corners(frame.shape, stump_detections)
-                    pitch_homography = compute_pitch_homography(auto_pitch_points)
+        stump_detections = apply_locked_stump(stump_detections, locked_stump)
 
-                    if pitch_homography is not None:
-                        calibration_status = "Calibrated"
-                        calibration_source = "Auto"
-                        calibration_warning = ""
+        if stump_detections:
+            stump_detected_frames += 1
+            total_stump_detections += len(stump_detections)
+
+            if calibration_mode.startswith("Auto") and pitch_homography is None:
+                auto_pitch_points = estimate_auto_pitch_corners(frame.shape, stump_detections)
+                pitch_homography = compute_pitch_homography(auto_pitch_points)
+
+                if pitch_homography is not None:
+                    calibration_status = "Calibrated"
+                    calibration_source = "Auto"
+                    calibration_warning = ""
 
         if bat_detections:
             bat_detected_frames += 1
@@ -1880,6 +1990,20 @@ def process_video(
         )
         if ball_detections and bat_detections:
             impact_frame_candidates[frame_index] = frame.copy()
+
+        initial_frames = speed_settings.get("stump_detect_initial_frames")
+        if locked_stump is None and initial_frames:
+            if frame_index + 1 >= int(initial_frames):
+                locked_stump = lock_static_stump_detection(frame_detections, int(initial_frames))
+
+        rough_impact_state = update_rough_impact_frame(
+            frame_index,
+            ball_detections,
+            bat_detections,
+            rough_impact_state,
+        )
+        if rough_impact_state is not None:
+            rough_impact_frame = rough_impact_state[1]
 
         for detection in ball_detections:
             x1, y1, x2, y2 = detection["box"]
@@ -2084,79 +2208,81 @@ def process_video(
         if estimated_bounce_frame is not None:
             bounce_text = f"Frame {estimated_bounce_frame}"
 
-        cv2.putText(
-            annotated_frame,
-            f"Frame: {frame_index}/{source_total_frames or frame_index}",
-            (30, 45),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (255, 255, 255),
-            2,
-        )
+        if not light_annotation:
+            cv2.putText(
+                annotated_frame,
+                f"Frame: {frame_index}/{source_total_frames or frame_index}",
+                (30, 45),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (255, 255, 255),
+                2,
+            )
 
-        cv2.putText(
-            annotated_frame,
-            f"Balls in frame: {len(ball_detections)}",
-            (30, 75),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (0, 255, 255),
-            2,
-        )
+            cv2.putText(
+                annotated_frame,
+                f"Balls in frame: {len(ball_detections)}",
+                (30, 75),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (0, 255, 255),
+                2,
+            )
 
-        cv2.putText(
-            annotated_frame,
-            f"Stumps in frame: {len(stump_detections)}",
-            (30, 105),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (255, 160, 0),
-            2,
-        )
+            cv2.putText(
+                annotated_frame,
+                f"Stumps in frame: {len(stump_detections)}",
+                (30, 105),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (255, 160, 0),
+                2,
+            )
 
-        cv2.putText(
-            annotated_frame,
-            f"Trajectory: {len(trajectory_points)} | Missing: {missing_ball_frames}",
-            (30, 135),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (0, 255, 255),
-            2,
-        )
+            cv2.putText(
+                annotated_frame,
+                f"Trajectory: {len(trajectory_points)} | Missing: {missing_ball_frames}",
+                (30, 135),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (0, 255, 255),
+                2,
+            )
 
-        cv2.putText(
-            annotated_frame,
-            f"Bounce: {bounce_text}",
-            (30, 165),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (0, 0, 255),
-            2,
-        )
-        
-        cv2.putText(
-            annotated_frame,
-            f"Line: {estimated_line}",
-            (30, 195),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (255, 255, 0),
-            2,
-        )
-        
-        cv2.putText(
-            annotated_frame,
-            f"Length: {estimated_length}",
-            (30, 225),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (0, 255, 0),
-            2,
-        )
+            cv2.putText(
+                annotated_frame,
+                f"Bounce: {bounce_text}",
+                (30, 165),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (0, 0, 255),
+                2,
+            )
 
-        annotation_started = time.perf_counter()
-        writer.write(annotated_frame)
-        performance["annotation_write_time_sec"] += time.perf_counter() - annotation_started
+            cv2.putText(
+                annotated_frame,
+                f"Line: {estimated_line}",
+                (30, 195),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (255, 255, 0),
+                2,
+            )
+
+            cv2.putText(
+                annotated_frame,
+                f"Length: {estimated_length}",
+                (30, 225),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (0, 255, 0),
+                2,
+            )
+
+        if writer is not None:
+            annotation_started = time.perf_counter()
+            writer.write(annotated_frame)
+            performance["annotation_write_time_sec"] += time.perf_counter() - annotation_started
 
         frame_index += 1
 
@@ -2168,7 +2294,8 @@ def process_video(
             status_text.text(f"Processing frame {frame_index}")
 
     cap.release()
-    writer.release()
+    if writer is not None:
+        writer.release()
 
     progress_bar.empty()
     status_text.empty()
@@ -2178,6 +2305,19 @@ def process_video(
             "success": False,
             "error": "No frames were processed. The uploaded video may be corrupted or unsupported.",
         }
+
+    preliminary_impact = detect_bat_ball_impact(frame_detections, fps=fps)
+    if speed_settings.get("refine_bat_near_impact") and preliminary_impact.get("impact_frame") is not None:
+        refine_bat_detections_near_impact(
+            video_path,
+            frame_detections,
+            preliminary_impact.get("impact_frame"),
+            bat_model,
+            confidence,
+            resize_width,
+            radius=int(speed_settings.get("impact_window_radius", 8)),
+            stats=detection_stats,
+        )
 
     impact_info = detect_bat_ball_impact(impact_frame_detections, fps=fps)
     if bat_unavailable_reason:
@@ -2192,7 +2332,7 @@ def process_video(
         )
         if preview_path is not None:
             impact_info["impact_frame_image_path"] = str(preview_path)
-        if not speed_settings.get("skip_impact_video_rewrite"):
+        if not speed_settings.get("skip_impact_video_rewrite") and generate_processed_video:
             _add_impact_marker_to_video(output_path, impact_info)
 
     report_started = time.perf_counter()
@@ -2233,14 +2373,21 @@ def process_video(
         fps=fps,
         delivery_report=delivery_report,
     )
+    observer_started = time.perf_counter()
     observer_timeline = build_observer_timeline(
         frame_detections,
         total_frames=frame_index,
         fps=fps,
     )
+    performance["observer_timeline_time_sec"] = time.perf_counter() - observer_started
     performance["report_generation_time_sec"] += time.perf_counter() - report_started
-    performance["frames_processed"] = processed_detection_frames
+    performance["frames_processed"] = frame_index
     performance["total_analysis_time_sec"] = time.perf_counter() - analysis_started
+    if frame_index > 0:
+        performance["avg_time_per_frame_sec"] = round(
+            performance["total_analysis_time_sec"] / frame_index,
+            4,
+        )
     if processed_detection_frames > 0:
         performance["average_ms_per_processed_frame"] = round(
             (performance["model_inference_time_sec"] / processed_detection_frames) * 1000,
@@ -2313,7 +2460,10 @@ def process_video(
 
     return {
         "success": True,
-        "output_path": output_path,
+        "output_path": str(output_path) if generate_processed_video else None,
+        "processed_video_generated": generate_processed_video,
+        "processed_video_skipped": not generate_processed_video,
+        "smart_pipeline_used": True,
         "total_frames": frame_index,
         "ball_detected_frames": ball_detected_frames,
         "stump_detected_frames": stump_detected_frames,
@@ -2409,6 +2559,8 @@ def show_batting_analysis_results(result):
                 use_container_width=True,
                 key="download_batting_processed_video",
             )
+    elif result.get("processed_video_skipped") or not result.get("processed_video_generated", True):
+        st.info("Processed video generation skipped to speed up analysis.")
     else:
         st.warning("Processed video preview is not available for this result.")
 
@@ -2461,6 +2613,8 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
                 mime="video/mp4",
                 use_container_width=True,
             )
+    elif result.get("processed_video_skipped") or not result.get("processed_video_generated", True):
+        st.info("Processed video generation skipped to speed up analysis.")
     else:
         st.warning("Processed video preview is not available for this result.")
 
@@ -2517,10 +2671,17 @@ def show_video_analysis_page():
 
     speed_mode = st.selectbox(
         "Analysis Mode",
-        ["Fast", "Balanced", "Accurate"],
-        index=1,
+        ["Smart Balanced", "Smart Accurate", "Debug Full Frame"],
+        index=0,
         key="video_analysis_speed_mode",
-        help="Fast samples fewer frames for quicker testing. Balanced is recommended.",
+        help="Smart Balanced keeps ball detection on every frame but reduces wasted work from other models.",
+    )
+
+    generate_processed_video = st.checkbox(
+        "Generate processed video preview",
+        value=True,
+        key="video_analysis_generate_processed_video",
+        help="Disable to run analysis and reports only without writing an annotated video.",
     )
 
     with st.expander("Advanced Settings", expanded=False):
@@ -2646,7 +2807,8 @@ def show_video_analysis_page():
 
     from Backends.src.analysis.analysis_speed import resolve_frame_limit
 
-    speed_mode = st.session_state.get("video_analysis_speed_mode", "Balanced")
+    speed_mode = st.session_state.get("video_analysis_speed_mode", "Smart Balanced")
+    generate_processed_video = st.session_state.get("video_analysis_generate_processed_video", True)
     max_frames = resolve_frame_limit(
         st.session_state.get("video_analysis_limit_frames_enabled", False),
         st.session_state.get("video_analysis_frame_limit_choice", "All frames"),
@@ -2711,6 +2873,7 @@ def show_video_analysis_page():
                     confidence=confidence,
                     speed_mode=speed_mode,
                     max_frames=max_frames,
+                    generate_processed_video=generate_processed_video,
                 )
             else:
                 result = process_video(
@@ -2730,6 +2893,7 @@ def show_video_analysis_page():
                     bat_model_key=selected_bat_model_key,
                     speed_mode=speed_mode,
                     max_frames=max_frames,
+                    generate_processed_video=generate_processed_video,
                 )
             result["analysis_mode"] = analysis_mode
             result["active_preset"] = preset_name
@@ -2742,11 +2906,14 @@ def show_video_analysis_page():
             st.session_state.video_analysis_result = None
         else:
             try:
-                final_video_path = convert_to_browser_mp4(
-                    input_path=result["output_path"],
-                    output_path=browser_output_path,
-                )
-                result["output_path"] = final_video_path
+                if result.get("processed_video_generated", True) and result.get("output_path"):
+                    final_video_path = convert_to_browser_mp4(
+                        input_path=result["output_path"],
+                        output_path=browser_output_path,
+                    )
+                    result["output_path"] = final_video_path
+                else:
+                    result["output_path"] = None
                 if analysis_mode in {"Batting Analysis", "Full Delivery Analysis"}:
                     save_batting_report(result, analysis_mode)
                 video_name = uploaded_video.name if uploaded_video is not None else None
@@ -2759,6 +2926,7 @@ def show_video_analysis_page():
                     "show_pitch_roi": show_pitch_roi,
                     "shot_trajectory_mode": shot_trajectory_mode,
                     "speed_mode": speed_mode,
+                    "generate_processed_video": generate_processed_video,
                     "show_performance_details": show_performance,
                 }
                 st.success("Analysis complete.")

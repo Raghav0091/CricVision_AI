@@ -319,16 +319,35 @@ def render_performance_details(result):
     with st.expander("Performance Details", expanded=False):
         cols = st.columns(3)
         cols[0].metric("Total Analysis Time", _format_seconds(profile.get("total_analysis_time_sec")))
-        cols[1].metric("Model Inference Time", _format_seconds(profile.get("model_inference_time_sec")))
+        cols[1].metric("Video Read Time", _format_seconds(profile.get("video_read_time_sec")))
         cols[2].metric("Video Write Time", _format_seconds(profile.get("annotation_write_time_sec")))
         cols2 = st.columns(3)
-        cols2[0].metric("Report Generation Time", _format_seconds(profile.get("report_generation_time_sec")))
-        cols2[1].metric("Frames Processed", _display_value(profile.get("frames_processed")))
-        cols2[2].metric(
+        cols2[0].metric("Ball Detection Time", _format_seconds(profile.get("ball_detection_time_sec")))
+        cols2[1].metric("Bat Detection Time", _format_seconds(profile.get("bat_detection_time_sec")))
+        cols2[2].metric("Stump Detection Time", _format_seconds(profile.get("stump_detection_time_sec")))
+        cols3 = st.columns(3)
+        cols3[0].metric("Observer Timeline Time", _format_seconds(profile.get("observer_timeline_time_sec")))
+        cols3[1].metric("Report Generation Time", _format_seconds(profile.get("report_generation_time_sec")))
+        cols3[2].metric("Model Inference Time", _format_seconds(profile.get("model_inference_time_sec")))
+        cols4 = st.columns(3)
+        cols4[0].metric("Frames Processed", _display_value(profile.get("frames_processed")))
+        cols4[1].metric("Frames Read", _display_value(profile.get("frames_read")))
+        cols4[2].metric(
+            "Avg Time / Frame",
+            _format_seconds(profile.get("avg_time_per_frame_sec")),
+        )
+        cols5 = st.columns(2)
+        cols5[0].metric(
             "Avg ms / Processed Frame",
             _display_value(profile.get("average_ms_per_processed_frame")),
         )
-        st.caption(f"Speed mode: {profile.get('speed_mode', result.get('speed_mode', 'Unknown'))}")
+        cols5[1].metric(
+            "Processed Video",
+            "Yes" if profile.get("processed_video_generated", True) else "Skipped",
+        )
+        st.caption(f"Analysis mode: {profile.get('speed_mode', result.get('speed_mode', 'Unknown'))}")
+        if profile.get("smart_pipeline_used"):
+            st.caption("Smart accurate video pipeline enabled.")
         invalid_count = profile.get("invalid_detection_count")
         if invalid_count:
             st.caption(f"Skipped invalid detections: {invalid_count}")

@@ -197,6 +197,33 @@ def normalize_session_result(result: dict | None) -> dict:
         "detection_quality": result.get("detection_quality", observer.get("detection_quality", STRING_DEFAULT))
         or STRING_DEFAULT,
         "observer_notes": result.get("observer_notes", observer.get("observer_notes", "")) or "",
+        "smart_analysis_mode": result.get(
+            "smart_analysis_mode",
+            result.get("speed_mode", (result.get("performance_profile") or {}).get("speed_mode", STRING_DEFAULT)),
+        )
+        or STRING_DEFAULT,
+        "total_analysis_time_sec": result.get(
+            "total_analysis_time_sec",
+            (result.get("performance_profile") or {}).get("total_analysis_time_sec"),
+        ),
+        "frames_processed": result.get(
+            "frames_processed",
+            (result.get("performance_profile") or {}).get("frames_processed"),
+        ),
+        "avg_time_per_frame_sec": result.get(
+            "avg_time_per_frame_sec",
+            (result.get("performance_profile") or {}).get("avg_time_per_frame_sec"),
+        ),
+        "processed_video_generated": result.get(
+            "processed_video_generated",
+            (result.get("performance_profile") or {}).get("processed_video_generated"),
+        ),
+        "smart_pipeline_used": bool(
+            result.get(
+                "smart_pipeline_used",
+                (result.get("performance_profile") or {}).get("smart_pipeline_used", False),
+            )
+        ),
     }
 
 
@@ -323,6 +350,7 @@ def build_session_record_from_analysis(
     )
     summary, feedback = _build_delivery_text_fields(report_view)
     observer = result.get("observer_timeline") or {}
+    profile = result.get("performance_profile") or {}
 
     return normalize_session_result(
         {
@@ -340,6 +368,18 @@ def build_session_record_from_analysis(
             "detected_objects": _format_detected_objects_summary(result),
             "delivery_result_summary": summary,
             "delivery_coach_feedback": feedback,
+            "smart_analysis_mode": result.get("speed_mode") or profile.get("speed_mode"),
+            "total_analysis_time_sec": profile.get("total_analysis_time_sec"),
+            "frames_processed": profile.get("frames_processed", result.get("total_frames")),
+            "avg_time_per_frame_sec": profile.get("avg_time_per_frame_sec"),
+            "processed_video_generated": result.get(
+                "processed_video_generated",
+                profile.get("processed_video_generated"),
+            ),
+            "smart_pipeline_used": result.get(
+                "smart_pipeline_used",
+                profile.get("smart_pipeline_used", True),
+            ),
             "impact_detected": impact.get("impact_detected", impact.get("impact_frame") is not None),
             "impact_frame": impact.get("impact_frame"),
             "impact_time_sec": impact.get("impact_time_sec"),
