@@ -329,6 +329,9 @@ def render_performance_details(result):
             _display_value(profile.get("average_ms_per_processed_frame")),
         )
         st.caption(f"Speed mode: {profile.get('speed_mode', result.get('speed_mode', 'Unknown'))}")
+        invalid_count = profile.get("invalid_detection_count")
+        if invalid_count:
+            st.caption(f"Skipped invalid detections: {invalid_count}")
 
 
 def render_save_status(result, context_label="Analysis"):

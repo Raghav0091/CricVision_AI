@@ -1167,6 +1167,7 @@ def process_batting_video(
     from Backends.src.agents.observer_timeline import build_observer_timeline
     from Backends.src.analysis.analysis_speed import (
         get_analysis_mode_settings,
+        normalize_detections,
         resize_frame_for_inference,
         scale_detections_to_original,
     )
@@ -1203,6 +1204,7 @@ def process_batting_video(
     performance["speed_mode"] = speed_mode
     analysis_started = time.perf_counter()
     processed_detection_frames = 0
+    detection_stats = {"invalid_detection_count": 0}
     if width <= 0 or height <= 0:
         cap.release()
         return {"success": False, "error": "Could not read video width/height."}
@@ -1244,13 +1246,21 @@ def process_batting_video(
             inference_started = time.perf_counter()
             inference_frame, detection_scale = resize_frame_for_inference(frame, resize_width)
             ball_detections = detect_ball_in_frame(inference_frame, ball_model, confidence)
-            ball_detections = scale_detections_to_original(ball_detections, detection_scale)
+            ball_detections = scale_detections_to_original(
+                ball_detections,
+                detection_scale,
+                stats=detection_stats,
+            )
             bat_detections = (
                 detect_bat_in_frame(inference_frame, bat_model, confidence)
                 if bat_model
                 else []
             )
-            bat_detections = scale_detections_to_original(bat_detections, detection_scale)
+            bat_detections = scale_detections_to_original(
+                bat_detections,
+                detection_scale,
+                stats=detection_stats,
+            )
             performance["model_inference_time_sec"] += time.perf_counter() - inference_started
             processed_detection_frames += 1
         if ball_detections:
@@ -1331,6 +1341,7 @@ def process_batting_video(
             (performance["model_inference_time_sec"] / processed_detection_frames) * 1000,
             2,
         )
+    performance["invalid_detection_count"] = detection_stats.get("invalid_detection_count", 0)
     ball_info = get_model_info(ball_model_key) or {}
     bat_info = get_model_info(bat_model_key) or {}
     return {
@@ -1528,6 +1539,7 @@ def process_video(
     from Backends.src.agents.observer_timeline import build_observer_timeline
     from Backends.src.analysis.analysis_speed import (
         get_analysis_mode_settings,
+        normalize_detections,
         resize_frame_for_inference,
         scale_detections_to_original,
     )
@@ -1609,6 +1621,7 @@ def process_video(
     performance["speed_mode"] = speed_mode
     analysis_started = time.perf_counter()
     processed_detection_frames = 0
+    detection_stats = {"invalid_detection_count": 0}
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1722,7 +1735,11 @@ def process_video(
                 if bat_model
                 else []
             )
-            bat_detections = scale_detections_to_original(bat_detections, detection_scale)
+            bat_detections = scale_detections_to_original(
+                bat_detections,
+                detection_scale,
+                stats=detection_stats,
+            )
 
             detection_result = run_pitch_roi_detection(
                 inference_frame,
@@ -1741,14 +1758,17 @@ def process_video(
             ball_detections = scale_detections_to_original(
                 detection_result["ball_detections"],
                 detection_scale,
+                stats=detection_stats,
             )
             stump_detections = scale_detections_to_original(
                 detection_result["stump_detections"],
                 detection_scale,
+                stats=detection_stats,
             )
             low_confidence_ball_detections = scale_detections_to_original(
                 detection_result.get("low_confidence_ball_detections", []),
                 detection_scale,
+                stats=detection_stats,
             )
             performance["model_inference_time_sec"] += time.perf_counter() - inference_started
             processed_detection_frames += 1
@@ -1804,6 +1824,7 @@ def process_video(
                     ball_detections = scale_detections_to_original(
                         recovery_result["ball_detections"],
                         detection_scale,
+                        stats=detection_stats,
                     )
                     tracker_recoveries += 1
                     ball_detected_frames += 1
@@ -2225,6 +2246,7 @@ def process_video(
             (performance["model_inference_time_sec"] / processed_detection_frames) * 1000,
             2,
         )
+    performance["invalid_detection_count"] = detection_stats.get("invalid_detection_count", 0)
     wagon_wheel = generate_wagon_wheel_data(
         ball_positions,
         batter_handedness=batter_handedness,
