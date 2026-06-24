@@ -100,6 +100,8 @@ def normalize_session_result(result: dict | None) -> dict:
     if not isinstance(review_flags, list):
         review_flags = []
 
+    observer = result.get("observer_timeline") if isinstance(result.get("observer_timeline"), dict) else {}
+
     return {
         "id": result.get("id") or "",
         "created_at": result.get("created_at") or "",
@@ -187,6 +189,14 @@ def normalize_session_result(result: dict | None) -> dict:
         "analysis_consistency": result.get("analysis_consistency", STRING_DEFAULT) or STRING_DEFAULT,
         "review_flags": review_flags,
         "agent_notes": result.get("agent_notes") or "",
+        "total_frames": result.get("total_frames", observer.get("total_frames")),
+        "processed_frames": result.get("processed_frames", observer.get("processed_frames")),
+        "low_confidence_ball_frames": int(
+            result.get("low_confidence_ball_frames", observer.get("low_confidence_ball_frames")) or 0
+        ),
+        "detection_quality": result.get("detection_quality", observer.get("detection_quality", STRING_DEFAULT))
+        or STRING_DEFAULT,
+        "observer_notes": result.get("observer_notes", observer.get("observer_notes", "")) or "",
     }
 
 
@@ -312,6 +322,7 @@ def build_session_record_from_analysis(
         )
     )
     summary, feedback = _build_delivery_text_fields(report_view)
+    observer = result.get("observer_timeline") or {}
 
     return normalize_session_result(
         {
@@ -365,14 +376,28 @@ def build_session_record_from_analysis(
             or (result.get("outcome_info") or {}).get("outcome_reason"),
             "agent_quality": result.get("agent_quality"),
             "agent_confidence": result.get("agent_confidence"),
-            "ball_tracking_coverage": result.get("ball_tracking_coverage"),
-            "bat_detection_coverage": result.get("bat_detection_coverage"),
-            "stump_detection_coverage": result.get("stump_detection_coverage"),
-            "missing_ball_frames": result.get("missing_ball_frames"),
-            "possible_false_ball_detections": result.get("possible_false_ball_detections"),
             "analysis_consistency": result.get("analysis_consistency"),
             "review_flags": result.get("review_flags") or [],
             "agent_notes": result.get("agent_notes"),
+            "total_frames": result.get("total_frames", observer.get("total_frames")),
+            "processed_frames": observer.get("processed_frames", result.get("processed_frames")),
+            "low_confidence_ball_frames": result.get(
+                "low_confidence_ball_frames",
+                observer.get("low_confidence_ball_frames"),
+            ),
+            "detection_quality": observer.get("detection_quality"),
+            "observer_notes": observer.get("observer_notes"),
+            "ball_tracking_coverage": result.get("ball_tracking_coverage")
+            or observer.get("ball_tracking_coverage"),
+            "bat_detection_coverage": result.get("bat_detection_coverage")
+            or observer.get("bat_detection_coverage"),
+            "stump_detection_coverage": result.get("stump_detection_coverage")
+            or observer.get("stump_detection_coverage"),
+            "missing_ball_frames": result.get("missing_ball_frames", observer.get("missing_ball_frames")),
+            "possible_false_ball_detections": result.get(
+                "possible_false_ball_detections",
+                observer.get("possible_false_ball_detections"),
+            ),
         }
     )
 
@@ -481,6 +506,18 @@ def session_record_to_report_view(record: dict) -> dict:
         "ball_tracking_coverage": record.get("ball_tracking_coverage"),
         "session_saved": True,
         "session_result_id": record.get("id"),
+        "observer_timeline": {
+            "total_frames": record.get("total_frames"),
+            "processed_frames": record.get("processed_frames"),
+            "ball_tracking_coverage": record.get("ball_tracking_coverage"),
+            "bat_detection_coverage": record.get("bat_detection_coverage"),
+            "stump_detection_coverage": record.get("stump_detection_coverage"),
+            "missing_ball_frames": record.get("missing_ball_frames"),
+            "low_confidence_ball_frames": record.get("low_confidence_ball_frames"),
+            "possible_false_ball_detections": record.get("possible_false_ball_detections"),
+            "detection_quality": record.get("detection_quality"),
+            "observer_notes": record.get("observer_notes"),
+        },
     }
 
 

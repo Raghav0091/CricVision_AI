@@ -17,6 +17,7 @@ DEBUG_SHOT_CLASSIFICATION = False
 DEBUG_OUTCOME_PREDICTION = False
 DEBUG_SHOT_DIRECTION = False
 DEBUG_VISION_AGENT = False
+DEBUG_PERFORMANCE = False
 
 
 def hero_section(title, subtitle, description):
@@ -268,6 +269,68 @@ def render_vision_agent_report(agent):
             st.json(agent.get("debug", {}))
 
 
+def render_observer_timeline_report(timeline):
+    """Render observer timeline summary safely."""
+    timeline = _normalize_observer_timeline(timeline)
+
+    st.subheader("Observer Timeline / Detection Quality")
+    quality = timeline.get("detection_quality", "Unknown")
+    if quality == "High":
+        st.success(f"Detection quality: {quality}")
+    elif quality == "Medium":
+        st.info(f"Detection quality: {quality}")
+    elif quality == "Low":
+        st.warning(f"Detection quality: {quality}")
+    else:
+        st.info(f"Detection quality: {_display_value(quality)}")
+
+    cols = st.columns(4)
+    cols[0].metric("Total Frames", _display_value(timeline.get("total_frames")))
+    cols[1].metric("Frames Processed", _display_value(timeline.get("processed_frames")))
+    cols[2].metric("Ball Tracking Coverage", _format_percentage(timeline.get("ball_tracking_coverage")))
+    cols[3].metric("Bat Detection Coverage", _format_percentage(timeline.get("bat_detection_coverage")))
+
+    cols2 = st.columns(4)
+    cols2[0].metric("Stump Detection Coverage", _format_percentage(timeline.get("stump_detection_coverage")))
+    cols2[1].metric("Missing Ball Frames", _display_value(timeline.get("missing_ball_frames")))
+    cols2[2].metric("Low Confidence Frames", _display_value(timeline.get("low_confidence_ball_frames")))
+    cols2[3].metric(
+        "Possible False Ball Detections",
+        _display_value(timeline.get("possible_false_ball_detections")),
+    )
+
+    notes = timeline.get("observer_notes")
+    if notes:
+        st.info(str(notes))
+    else:
+        st.info("Observer timeline data is not available for this result.")
+
+
+def render_performance_details(result):
+    """Render optional analysis performance metrics."""
+    result = result or {}
+    if not (result.get("show_performance_details") or DEBUG_PERFORMANCE):
+        return
+
+    profile = result.get("performance_profile") or {}
+    if not profile:
+        return
+
+    with st.expander("Performance Details", expanded=False):
+        cols = st.columns(3)
+        cols[0].metric("Total Analysis Time", _format_seconds(profile.get("total_analysis_time_sec")))
+        cols[1].metric("Model Inference Time", _format_seconds(profile.get("model_inference_time_sec")))
+        cols[2].metric("Video Write Time", _format_seconds(profile.get("annotation_write_time_sec")))
+        cols2 = st.columns(3)
+        cols2[0].metric("Report Generation Time", _format_seconds(profile.get("report_generation_time_sec")))
+        cols2[1].metric("Frames Processed", _display_value(profile.get("frames_processed")))
+        cols2[2].metric(
+            "Avg ms / Processed Frame",
+            _display_value(profile.get("average_ms_per_processed_frame")),
+        )
+        st.caption(f"Speed mode: {profile.get('speed_mode', result.get('speed_mode', 'Unknown'))}")
+
+
 def render_save_status(result, context_label="Analysis"):
     """Render save/session status without exposing raw debug output."""
     result = result or {}
@@ -479,6 +542,7 @@ def render_session_result_card(result: dict, expanded: bool = False):
             else:
                 st.info("Impact frame preview file not found")
 
+        render_observer_timeline_report(report_view)
         render_delivery_report(report_view)
         render_impact_report(report_view)
         render_impact_frame_preview(report_view)
@@ -686,6 +750,27 @@ def _normalize_direction(result_or_direction):
         "direction_angle_degrees": data.get("direction_angle_degrees"),
         "reason": reason,
         "direction_reason": reason,
+    }
+
+
+def _normalize_observer_timeline(result_or_timeline):
+    data = result_or_timeline or {}
+    if isinstance(data, dict) and "observer_timeline" in data:
+        data = data.get("observer_timeline") or data
+    if not isinstance(data, dict):
+        data = {}
+    return {
+        **data,
+        "total_frames": data.get("total_frames"),
+        "processed_frames": data.get("processed_frames"),
+        "ball_tracking_coverage": data.get("ball_tracking_coverage"),
+        "bat_detection_coverage": data.get("bat_detection_coverage"),
+        "stump_detection_coverage": data.get("stump_detection_coverage"),
+        "missing_ball_frames": data.get("missing_ball_frames", 0),
+        "low_confidence_ball_frames": data.get("low_confidence_ball_frames", 0),
+        "possible_false_ball_detections": data.get("possible_false_ball_detections", 0),
+        "detection_quality": data.get("detection_quality", "Unknown"),
+        "observer_notes": data.get("observer_notes", ""),
     }
 
 

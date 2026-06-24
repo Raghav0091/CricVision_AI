@@ -611,7 +611,52 @@ def run_pitch_roi_detection(
     ensemble_models=None,
     use_ensemble=False,
     ball_confidence=None,
+    speed_settings=None,
 ):
+    speed_settings = speed_settings or {}
+    same_model = (
+        not use_ensemble
+        and ball_model is not None
+        and stump_model is not None
+        and ball_model is stump_model
+    )
+    if same_model and speed_settings.get("single_pass_same_model", False):
+        full_frame_start = time.perf_counter()
+        combined_result = run_single_model_detection(
+            frame,
+            stump_model,
+            min(confidence, 0.10),
+            imgsz,
+        )
+        ball_detections, stump_detections = collect_model_detections(
+            combined_result,
+            stump_class_names,
+            confidence,
+            "Ball + Stump Detector",
+            get_box_center,
+            ball_confidence=ball_confidence,
+        )
+        low_confidence_ball_detections = collect_low_confidence_ball_detections(
+            combined_result,
+            stump_class_names,
+            "Ball + Stump Detector",
+            get_box_center,
+        )
+        full_frame_time_ms = (time.perf_counter() - full_frame_start) * 1000
+        roi_box = estimate_pitch_roi(frame.shape, stump_detections, previous_roi)
+        return {
+            "ball_detections": non_max_suppression_custom(ball_detections),
+            "stump_detections": stump_detections,
+            "low_confidence_ball_detections": non_max_suppression_custom(
+                low_confidence_ball_detections
+            ),
+            "roi_box": roi_box,
+            "full_frame_time_ms": full_frame_time_ms,
+            "roi_time_ms": 0,
+            "used_roi": False,
+            "single_pass": True,
+        }
+
     full_frame_start = time.perf_counter()
     stump_result = run_single_model_detection(
         frame,
@@ -1115,8 +1160,16 @@ def process_batting_video(
     ball_model_key="current_best",
     bat_model_key="cricshot_bat",
     confidence=0.25,
+    speed_mode="Balanced",
+    max_frames=None,
 ):
     """Process a clip with only the models needed for batting intelligence."""
+    from Backends.src.agents.observer_timeline import build_observer_timeline
+    from Backends.src.analysis.analysis_speed import (
+        get_analysis_mode_settings,
+        resize_frame_for_inference,
+        scale_detections_to_original,
+    )
     from Backends.src.analysis.bat_detection import (
         detect_ball_in_frame,
         detect_bat_in_frame,
@@ -1143,6 +1196,13 @@ def process_batting_video(
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    speed_settings = get_analysis_mode_settings(speed_mode)
+    frame_stride = max(1, int(speed_settings.get("frame_stride", 1)))
+    resize_width = speed_settings.get("resize_width")
+    performance = _empty_performance_profile()
+    performance["speed_mode"] = speed_mode
+    analysis_started = time.perf_counter()
+    processed_detection_frames = 0
     if width <= 0 or height <= 0:
         cap.release()
         return {"success": False, "error": "Could not read video width/height."}
@@ -1161,18 +1221,38 @@ def process_batting_video(
     ball_tracks = []
     bat_detections_by_frame = {}
     impact_frame_detections = []
+    frame_detections = impact_frame_detections
     impact_frame_candidates = {}
     trajectory = []
     progress_bar = st.progress(0)
     status_text = st.empty()
 
     while True:
+        read_started = time.perf_counter()
         success, frame = cap.read()
         if not success:
             break
+        if max_frames is not None and frame_index >= max_frames:
+            break
+        performance["video_read_time_sec"] += time.perf_counter() - read_started
+        performance["frames_read"] += 1
+
         annotated_frame = frame.copy()
-        ball_detections = detect_ball_in_frame(frame, ball_model, confidence)
-        bat_detections = detect_bat_in_frame(frame, bat_model, confidence) if bat_model else []
+        ball_detections = []
+        bat_detections = []
+        if frame_index % frame_stride == 0:
+            inference_started = time.perf_counter()
+            inference_frame, detection_scale = resize_frame_for_inference(frame, resize_width)
+            ball_detections = detect_ball_in_frame(inference_frame, ball_model, confidence)
+            ball_detections = scale_detections_to_original(ball_detections, detection_scale)
+            bat_detections = (
+                detect_bat_in_frame(inference_frame, bat_model, confidence)
+                if bat_model
+                else []
+            )
+            bat_detections = scale_detections_to_original(bat_detections, detection_scale)
+            performance["model_inference_time_sec"] += time.perf_counter() - inference_started
+            processed_detection_frames += 1
         if ball_detections:
             ball_detected_frames += 1
             main_ball = max(ball_detections, key=lambda item: item["confidence"])
@@ -1188,6 +1268,7 @@ def process_batting_video(
                 "frame_index": frame_index,
                 "ball_detections": ball_detections,
                 "bat_detections": bat_detections,
+                "stump_detections": [],
             }
         )
         if ball_detections and bat_detections:
@@ -1198,7 +1279,9 @@ def process_batting_video(
         for index in range(1, len(trajectory[-35:])):
             recent = trajectory[-35:]
             cv2.line(annotated_frame, recent[index - 1], recent[index], (0, 255, 255), 3)
+        annotation_started = time.perf_counter()
         writer.write(annotated_frame)
+        performance["annotation_write_time_sec"] += time.perf_counter() - annotation_started
         frame_index += 1
         if total_frames > 0:
             progress_bar.progress(min(frame_index / total_frames, 1.0))
@@ -1226,18 +1309,28 @@ def process_batting_video(
             impact_info["impact_frame_image_path"] = str(preview_path)
     _add_impact_marker_to_video(output_path, impact_info)
     shot_info = classify_shot_type(
-        impact_frame_detections,
+        frame_detections,
         impact_info,
         batter_handedness=None,
         fps=fps,
     )
+    report_started = time.perf_counter()
     direction_info, outcome_info, agent_info, enrichment = _run_post_shot_pipeline(
-        impact_frame_detections,
+        frame_detections,
         impact_info,
         shot_info,
         batter_handedness=None,
         fps=fps,
     )
+    observer_timeline = build_observer_timeline(frame_detections, total_frames=frame_index, fps=fps)
+    performance["report_generation_time_sec"] = time.perf_counter() - report_started
+    performance["frames_processed"] = processed_detection_frames
+    performance["total_analysis_time_sec"] = time.perf_counter() - analysis_started
+    if processed_detection_frames > 0:
+        performance["average_ms_per_processed_frame"] = round(
+            (performance["model_inference_time_sec"] / processed_detection_frames) * 1000,
+            2,
+        )
     ball_info = get_model_info(ball_model_key) or {}
     bat_info = get_model_info(bat_model_key) or {}
     return {
@@ -1250,6 +1343,11 @@ def process_batting_video(
         "ball_detection_rate": (ball_detected_frames / frame_index) * 100,
         "bat_detection_rate": (bat_detected_frames / frame_index) * 100,
         "impact_info": impact_info,
+        "frame_detections": frame_detections,
+        "impact_frame_detections": frame_detections,
+        "observer_timeline": observer_timeline,
+        "performance_profile": performance,
+        "speed_mode": speed_mode,
         "shot_info": shot_info,
         "direction_info": direction_info,
         "agent_info": agent_info,
@@ -1391,6 +1489,23 @@ def show_cricket_delivery_report(result):
         st.warning("Warnings:\n" + "\n".join(f"- {warning}" for warning in warnings))
 
 
+DEBUG_PERFORMANCE = False
+
+
+def _empty_performance_profile():
+    return {
+        "video_read_time_sec": 0.0,
+        "model_inference_time_sec": 0.0,
+        "annotation_write_time_sec": 0.0,
+        "report_generation_time_sec": 0.0,
+        "total_analysis_time_sec": 0.0,
+        "frames_processed": 0,
+        "frames_read": 0,
+        "average_ms_per_processed_frame": None,
+        "speed_mode": "Balanced",
+    }
+
+
 def process_video(
     video_path,
     output_path,
@@ -1407,7 +1522,15 @@ def process_video(
     manual_contact_frame=None,
     field_setup=None,
     bat_model_key=None,
+    speed_mode="Balanced",
+    max_frames=None,
 ):
+    from Backends.src.agents.observer_timeline import build_observer_timeline
+    from Backends.src.analysis.analysis_speed import (
+        get_analysis_mode_settings,
+        resize_frame_for_inference,
+        scale_detections_to_original,
+    )
     from Backends.src.analysis.bat_detection import (
         detect_bat_in_frame,
         draw_bat_detections,
@@ -1469,7 +1592,7 @@ def process_video(
 
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    source_total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     if width <= 0 or height <= 0:
         cap.release()
@@ -1477,6 +1600,15 @@ def process_video(
             "success": False,
             "error": "Could not read video width/height.",
         }
+
+    speed_settings = get_analysis_mode_settings(speed_mode)
+    frame_stride = max(1, int(speed_settings.get("frame_stride", 1)))
+    inference_imgsz = int(speed_settings.get("yolo_imgsz", imgsz))
+    resize_width = speed_settings.get("resize_width")
+    performance = _empty_performance_profile()
+    performance["speed_mode"] = speed_mode
+    analysis_started = time.perf_counter()
+    processed_detection_frames = 0
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1514,6 +1646,7 @@ def process_video(
     bat_detections_by_frame = {}
     bat_detected_frames = 0
     impact_frame_detections = []
+    frame_detections = impact_frame_detections
     impact_frame_candidates = {}
     stump_detections_by_frame = []
     last_raw_frame = None
@@ -1561,94 +1694,131 @@ def process_video(
     min_ball_confidence_for_tracking = 0.35 
 
     while True:
+        read_started = time.perf_counter()
         success, frame = cap.read()
 
         if not success:
             break
 
+        if max_frames is not None and frame_index >= max_frames:
+            break
+
+        performance["video_read_time_sec"] += time.perf_counter() - read_started
+        performance["frames_read"] += 1
+
         last_raw_frame = frame.copy()
         annotated_frame = frame.copy()
+        run_detection = frame_index % frame_stride == 0
         low_confidence_ball_detections = []
-        bat_detections = detect_bat_in_frame(frame, bat_model, confidence) if bat_model else []
+        ball_detections = []
+        stump_detections = []
+        bat_detections = []
 
-        if bat_detections:
-            bat_detected_frames += 1
-            bat_detections_by_frame[frame_index] = bat_detections
-        draw_bat_detections(annotated_frame, bat_detections)
+        if run_detection:
+            inference_started = time.perf_counter()
+            inference_frame, detection_scale = resize_frame_for_inference(frame, resize_width)
+            bat_detections = (
+                detect_bat_in_frame(inference_frame, bat_model, confidence)
+                if bat_model
+                else []
+            )
+            bat_detections = scale_detections_to_original(bat_detections, detection_scale)
 
-        detection_result = run_pitch_roi_detection(
-            frame,
-            stump_model=stump_model,
-            stump_class_names=stump_class_names,
-            confidence=confidence,
-            imgsz=imgsz,
-            previous_roi=previous_roi_box,
-            ball_model=model,
-            ball_class_names=class_names,
-            ensemble_models=ensemble_models,
-            use_ensemble=use_ensemble,
-            ball_confidence=min_ball_confidence_for_tracking,
-        )
-        ball_detections = detection_result["ball_detections"]
-        stump_detections = detection_result["stump_detections"]
-        low_confidence_ball_detections = detection_result.get(
-            "low_confidence_ball_detections",
-            [],
-        )
-        full_frame_detection_time_total += detection_result["full_frame_time_ms"]
-        roi_detection_time_total += detection_result["roi_time_ms"]
-
-        if detection_result.get("used_roi"):
-            previous_roi_box = detection_result["roi_box"]
-            roi_detected_frames += 1
-            roi_x1, roi_y1, roi_x2, roi_y2 = detection_result["roi_box"]
-            last_roi_size = f"{roi_x2 - roi_x1}x{roi_y2 - roi_y1}"
-
-        if show_pitch_roi:
-            draw_pitch_roi(annotated_frame, detection_result.get("roi_box"))
-
-        confidence_values.extend(item["confidence"] for item in ball_detections)
-
-        if low_confidence_ball_detections:
-            low_confidence_ball_frames += 1
-
-            if review_frame_count < MAX_REVIEW_FRAMES_PER_ANALYSIS:
-                save_review_frame(
-                    frame,
-                    timestamp,
-                    frame_index,
-                    "low_confidence",
-                    low_confidence_ball_detections,
-                    source="video_analysis",
-                )
-                review_frame_count += 1
-
-        if ball_detections:
-            ball_detected_frames += 1
-            total_ball_detections += len(ball_detections)
-        else:
-            search_center = previous_ball_center or kalman_tracker.last_prediction
-            recovery_result = run_local_redetection(
-                frame,
-                search_center,
-                confidence,
-                imgsz,
-                missing_ball_frames + 1,
+            detection_result = run_pitch_roi_detection(
+                inference_frame,
+                stump_model=stump_model,
+                stump_class_names=stump_class_names,
+                confidence=confidence,
+                imgsz=inference_imgsz,
+                previous_roi=previous_roi_box,
                 ball_model=model,
                 ball_class_names=class_names,
                 ensemble_models=ensemble_models,
                 use_ensemble=use_ensemble,
+                ball_confidence=min_ball_confidence_for_tracking,
+                speed_settings=speed_settings,
             )
+            ball_detections = scale_detections_to_original(
+                detection_result["ball_detections"],
+                detection_scale,
+            )
+            stump_detections = scale_detections_to_original(
+                detection_result["stump_detections"],
+                detection_scale,
+            )
+            low_confidence_ball_detections = scale_detections_to_original(
+                detection_result.get("low_confidence_ball_detections", []),
+                detection_scale,
+            )
+            performance["model_inference_time_sec"] += time.perf_counter() - inference_started
+            processed_detection_frames += 1
+            full_frame_detection_time_total += detection_result["full_frame_time_ms"]
+            roi_detection_time_total += detection_result["roi_time_ms"]
+
+            if detection_result.get("used_roi"):
+                previous_roi_box = detection_result["roi_box"]
+                roi_detected_frames += 1
+                roi_x1, roi_y1, roi_x2, roi_y2 = detection_result["roi_box"]
+                last_roi_size = f"{roi_x2 - roi_x1}x{roi_y2 - roi_y1}"
 
             if show_pitch_roi:
-                draw_search_roi(annotated_frame, recovery_result.get("search_roi"))
+                draw_pitch_roi(annotated_frame, detection_result.get("roi_box"))
 
-            if recovery_result["recovered"]:
-                ball_detections = recovery_result["ball_detections"]
-                tracker_recoveries += 1
+            confidence_values.extend(item["confidence"] for item in ball_detections)
+
+            if low_confidence_ball_detections:
+                low_confidence_ball_frames += 1
+
+                if review_frame_count < MAX_REVIEW_FRAMES_PER_ANALYSIS:
+                    save_review_frame(
+                        frame,
+                        timestamp,
+                        frame_index,
+                        "low_confidence",
+                        low_confidence_ball_detections,
+                        source="video_analysis",
+                    )
+                    review_frame_count += 1
+
+            if ball_detections:
                 ball_detected_frames += 1
                 total_ball_detections += len(ball_detections)
-                confidence_values.extend(item["confidence"] for item in ball_detections)
+            elif speed_settings.get("enable_local_redetection", True):
+                search_center = previous_ball_center or kalman_tracker.last_prediction
+                recovery_result = run_local_redetection(
+                    inference_frame,
+                    search_center,
+                    confidence,
+                    inference_imgsz,
+                    missing_ball_frames + 1,
+                    ball_model=model,
+                    ball_class_names=class_names,
+                    ensemble_models=ensemble_models,
+                    use_ensemble=use_ensemble,
+                )
+
+                if show_pitch_roi:
+                    draw_search_roi(annotated_frame, recovery_result.get("search_roi"))
+
+                if recovery_result["recovered"]:
+                    ball_detections = scale_detections_to_original(
+                        recovery_result["ball_detections"],
+                        detection_scale,
+                    )
+                    tracker_recoveries += 1
+                    ball_detected_frames += 1
+                    total_ball_detections += len(ball_detections)
+                    confidence_values.extend(item["confidence"] for item in ball_detections)
+                elif review_frame_count < MAX_REVIEW_FRAMES_PER_ANALYSIS:
+                    save_review_frame(
+                        frame,
+                        timestamp,
+                        frame_index,
+                        "missed_ball",
+                        source="video_analysis",
+                        note="No ball detection passed the selected confidence threshold.",
+                    )
+                    review_frame_count += 1
             elif review_frame_count < MAX_REVIEW_FRAMES_PER_ANALYSIS:
                 save_review_frame(
                     frame,
@@ -1660,18 +1830,23 @@ def process_video(
                 )
                 review_frame_count += 1
 
-        if stump_detections:
-            stump_detected_frames += 1
-            total_stump_detections += len(stump_detections)
+            if stump_detections:
+                stump_detected_frames += 1
+                total_stump_detections += len(stump_detections)
 
-            if calibration_mode.startswith("Auto") and pitch_homography is None:
-                auto_pitch_points = estimate_auto_pitch_corners(frame.shape, stump_detections)
-                pitch_homography = compute_pitch_homography(auto_pitch_points)
+                if calibration_mode.startswith("Auto") and pitch_homography is None:
+                    auto_pitch_points = estimate_auto_pitch_corners(frame.shape, stump_detections)
+                    pitch_homography = compute_pitch_homography(auto_pitch_points)
 
-                if pitch_homography is not None:
-                    calibration_status = "Calibrated"
-                    calibration_source = "Auto"
-                    calibration_warning = ""
+                    if pitch_homography is not None:
+                        calibration_status = "Calibrated"
+                        calibration_source = "Auto"
+                        calibration_warning = ""
+
+        if bat_detections:
+            bat_detected_frames += 1
+            bat_detections_by_frame[frame_index] = bat_detections
+        draw_bat_detections(annotated_frame, bat_detections)
 
         stump_detections_by_frame.append(stump_detections)
         impact_frame_detections.append(
@@ -1679,6 +1854,7 @@ def process_video(
                 "frame_index": frame_index,
                 "ball_detections": ball_detections,
                 "bat_detections": bat_detections,
+                "stump_detections": stump_detections,
             }
         )
         if ball_detections and bat_detections:
@@ -1889,7 +2065,7 @@ def process_video(
 
         cv2.putText(
             annotated_frame,
-            f"Frame: {frame_index}/{total_frames}",
+            f"Frame: {frame_index}/{source_total_frames or frame_index}",
             (30, 45),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.65,
@@ -1957,14 +2133,16 @@ def process_video(
             2,
         )
 
+        annotation_started = time.perf_counter()
         writer.write(annotated_frame)
+        performance["annotation_write_time_sec"] += time.perf_counter() - annotation_started
 
         frame_index += 1
 
-        if total_frames > 0:
-            progress = min(frame_index / total_frames, 1.0)
+        if source_total_frames > 0:
+            progress = min(frame_index / source_total_frames, 1.0)
             progress_bar.progress(progress)
-            status_text.text(f"Processing frame {frame_index}/{total_frames}")
+            status_text.text(f"Processing frame {frame_index}/{source_total_frames}")
         else:
             status_text.text(f"Processing frame {frame_index}")
 
@@ -1993,9 +2171,10 @@ def process_video(
         )
         if preview_path is not None:
             impact_info["impact_frame_image_path"] = str(preview_path)
-        _add_impact_marker_to_video(output_path, impact_info)
+        if not speed_settings.get("skip_impact_video_rewrite"):
+            _add_impact_marker_to_video(output_path, impact_info)
 
-    ball_detection_rate = 0
+    report_started = time.perf_counter()
     stump_detection_rate = 0
 
     if frame_index > 0:
@@ -2014,7 +2193,7 @@ def process_video(
         kalman_predicted_frames,
     )
     shot_info = classify_shot_type(
-        impact_frame_detections,
+        frame_detections,
         impact_info,
         batter_handedness=batter_handedness,
         fps=fps,
@@ -2026,13 +2205,26 @@ def process_video(
         "overall_tracking_quality": overall_tracking_quality,
     }
     direction_info, outcome_info, agent_info, enrichment = _run_post_shot_pipeline(
-        impact_frame_detections,
+        frame_detections,
         impact_info,
         shot_info,
         batter_handedness=batter_handedness,
         fps=fps,
         delivery_report=delivery_report,
     )
+    observer_timeline = build_observer_timeline(
+        frame_detections,
+        total_frames=frame_index,
+        fps=fps,
+    )
+    performance["report_generation_time_sec"] += time.perf_counter() - report_started
+    performance["frames_processed"] = processed_detection_frames
+    performance["total_analysis_time_sec"] = time.perf_counter() - analysis_started
+    if processed_detection_frames > 0:
+        performance["average_ms_per_processed_frame"] = round(
+            (performance["model_inference_time_sec"] / processed_detection_frames) * 1000,
+            2,
+        )
     wagon_wheel = generate_wagon_wheel_data(
         ball_positions,
         batter_handedness=batter_handedness,
@@ -2134,6 +2326,11 @@ def process_video(
         "camera_view": camera_view,
         "review_frame_count": review_frame_count,
         "review_frames_dir": REVIEW_FRAMES_DIR,
+        "frame_detections": frame_detections,
+        "impact_frame_detections": frame_detections,
+        "observer_timeline": observer_timeline,
+        "performance_profile": performance,
+        "speed_mode": speed_mode,
         "impact_info": impact_info,
         "shot_info": shot_info,
         "direction_info": direction_info,
@@ -2165,7 +2362,9 @@ def show_batting_analysis_results(result):
         render_delivery_report,
         render_impact_frame_preview,
         render_impact_report,
+        render_observer_timeline_report,
         render_outcome_prediction,
+        render_performance_details,
         render_save_status,
         render_shot_direction_report,
         render_shot_report,
@@ -2191,6 +2390,7 @@ def show_batting_analysis_results(result):
     else:
         st.warning("Processed video preview is not available for this result.")
 
+    render_observer_timeline_report(result)
     render_delivery_report(result)
     render_impact_report(result)
     render_impact_frame_preview(result)
@@ -2198,6 +2398,7 @@ def show_batting_analysis_results(result):
     render_shot_direction_report(result)
     render_outcome_prediction(result)
     render_vision_agent_report(result)
+    render_performance_details(result)
     render_save_status(result, "Video Analysis")
 
 
@@ -2206,7 +2407,9 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
         render_delivery_report,
         render_impact_frame_preview,
         render_impact_report,
+        render_observer_timeline_report,
         render_outcome_prediction,
+        render_performance_details,
         render_save_status,
         render_shot_direction_report,
         render_shot_report,
@@ -2239,6 +2442,7 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
     else:
         st.warning("Processed video preview is not available for this result.")
 
+    render_observer_timeline_report(result)
     render_delivery_report(result)
     render_impact_report(result)
     render_impact_frame_preview(result)
@@ -2246,6 +2450,7 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
     render_shot_direction_report(result)
     render_outcome_prediction(result)
     render_vision_agent_report(result)
+    render_performance_details(result)
     render_save_status(result, "Video Analysis")
 
 
@@ -2286,6 +2491,14 @@ def show_video_analysis_page():
         use_container_width=True,
         disabled=uploaded_video is None,
         key="analyze_video_button",
+    )
+
+    speed_mode = st.selectbox(
+        "Analysis Mode",
+        ["Fast", "Balanced", "Accurate"],
+        index=1,
+        key="video_analysis_speed_mode",
+        help="Fast samples fewer frames for quicker testing. Balanced is recommended.",
     )
 
     with st.expander("Advanced Settings", expanded=False):
@@ -2372,6 +2585,25 @@ def show_video_analysis_page():
             for status in validate_model_paths().values():
                 st.write(f"{status['status']}: {status['name']}")
 
+        with st.expander("Advanced analysis settings", expanded=False):
+            limit_frames_enabled = st.checkbox(
+                "Limit frames for testing",
+                value=False,
+                key="video_analysis_limit_frames_enabled",
+            )
+            frame_limit_choice = st.selectbox(
+                "Frame limit",
+                [50, 100, 200, "All frames"],
+                index=3,
+                key="video_analysis_frame_limit_choice",
+                disabled=not limit_frames_enabled,
+            )
+            st.checkbox(
+                "Show performance details",
+                value=False,
+                key="video_analysis_show_performance",
+            )
+
     analysis_mode = st.session_state.get("video_analysis_mode", "Full Delivery Analysis")
     preset_name = st.session_state.get("video_analysis_preset", "Balanced Mode")
     active_preset = DETECTION_PRESETS[preset_name]
@@ -2389,6 +2621,15 @@ def show_video_analysis_page():
     manual_contact_frame = st.session_state.get("video_analysis_bat_contact_frame", 0)
     if shot_trajectory_mode != "Manually mark bat contact frame":
         manual_contact_frame = None
+
+    from Backends.src.analysis.analysis_speed import resolve_frame_limit
+
+    speed_mode = st.session_state.get("video_analysis_speed_mode", "Balanced")
+    max_frames = resolve_frame_limit(
+        st.session_state.get("video_analysis_limit_frames_enabled", False),
+        st.session_state.get("video_analysis_frame_limit_choice", "All frames"),
+    )
+    show_performance = st.session_state.get("video_analysis_show_performance", False)
 
     if analysis_mode == "Batting Analysis":
         batting_ball_options = {
@@ -2446,6 +2687,8 @@ def show_video_analysis_page():
                     ball_model_key=selected_ball_model_key,
                     bat_model_key=selected_bat_model_key,
                     confidence=confidence,
+                    speed_mode=speed_mode,
+                    max_frames=max_frames,
                 )
             else:
                 result = process_video(
@@ -2463,11 +2706,14 @@ def show_video_analysis_page():
                     manual_contact_frame=manual_contact_frame,
                     field_setup=field_setup,
                     bat_model_key=selected_bat_model_key,
+                    speed_mode=speed_mode,
+                    max_frames=max_frames,
                 )
             result["analysis_mode"] = analysis_mode
             result["active_preset"] = preset_name
             result["active_model"] = selected_model_name
             result["ball_model_used"] = selected_model_name
+            result["show_performance_details"] = show_performance
 
         if not result["success"]:
             st.error(result["error"])
@@ -2490,6 +2736,8 @@ def show_video_analysis_page():
                     "preset_name": preset_name,
                     "show_pitch_roi": show_pitch_roi,
                     "shot_trajectory_mode": shot_trajectory_mode,
+                    "speed_mode": speed_mode,
+                    "show_performance_details": show_performance,
                 }
                 st.success("Analysis complete.")
             except Exception as error:
