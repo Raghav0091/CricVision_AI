@@ -12,6 +12,7 @@ from Backends.src.ui.theme import (
 )
 
 DEBUG_IMPACT = False
+DEBUG_SHOT_CLASSIFICATION = False
 
 
 def hero_section(title, subtitle, description):
@@ -135,6 +136,28 @@ def render_impact_frame_preview(result_or_impact):
         return
 
     st.image(str(path), caption="Likely impact frame", use_container_width=True)
+
+
+def render_shot_report(shot):
+    """Render a safe rule-based shot type report."""
+    shot = _normalize_shot(shot)
+
+    st.subheader("Shot Report")
+    shot_cols = st.columns(4)
+    shot_cols[0].metric("Shot Type", _display_value(shot.get("shot_type")))
+    shot_cols[1].metric("Shot Confidence", _display_value(shot.get("shot_confidence")))
+    shot_cols[2].metric("Shot Direction", _display_value(shot.get("shot_direction")))
+    shot_cols[3].metric("Shot Height", _display_value(shot.get("shot_height")))
+
+    reason = shot.get("reason") or shot.get("shot_reason")
+    if reason:
+        st.info(str(reason))
+    else:
+        st.info("Shot type detection requires impact frame and post-impact ball tracking.")
+
+    if DEBUG_SHOT_CLASSIFICATION:
+        with st.expander("Shot Classification Debug", expanded=False):
+            st.json(shot.get("debug", {}))
 
 
 def render_save_status(result, context_label="Analysis"):
@@ -301,6 +324,25 @@ def _normalize_impact(result_or_impact):
         "impact_confidence": confidence or "Not Detected",
         "reason": data.get("reason", data.get("impact_reason", "")),
         "impact_frame_image_path": data.get("impact_frame_image_path"),
+    }
+
+
+def _normalize_shot(result_or_shot):
+    data = result_or_shot or {}
+    if isinstance(data, dict) and "shot_info" in data:
+        data = data.get("shot_info") or data
+    if not isinstance(data, dict):
+        data = {}
+
+    reason = data.get("reason", data.get("shot_reason", ""))
+    return {
+        **data,
+        "shot_type": data.get("shot_type", "Unknown"),
+        "shot_confidence": data.get("shot_confidence", "Unknown"),
+        "shot_direction": data.get("shot_direction", "Unknown"),
+        "shot_height": data.get("shot_height", "Unknown"),
+        "reason": reason,
+        "shot_reason": reason,
     }
 
 

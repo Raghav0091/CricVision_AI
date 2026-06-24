@@ -358,6 +358,7 @@ def process_recorded_delivery(
         detect_bat_ball_impact,
         save_impact_frame_preview,
     )
+    from Backends.src.analysis.shot_classification import classify_shot_type
     from Backends.src.ui.video_analysis import (
         convert_to_browser_mp4,
         draw_label,
@@ -825,6 +826,12 @@ def process_recorded_delivery(
         )
         if preview_path is not None:
             impact_info["impact_frame_image_path"] = str(preview_path)
+    shot_info = classify_shot_type(
+        impact_frame_detections,
+        impact_info,
+        batter_handedness=batter_handedness,
+        fps=fps,
+    )
 
     wagon_wheel = generate_wagon_wheel_data(
         ball_positions,
@@ -893,6 +900,12 @@ def process_recorded_delivery(
         "ball_detection_difficult": ball_detection_rate < 35 or low_confidence_ball_frames > 0,
         "review_frame_count": review_frame_count,
         "impact_info": impact_info,
+        "shot_info": shot_info,
+        "shot_type": shot_info.get("shot_type", "Unknown"),
+        "shot_confidence": shot_info.get("shot_confidence", "Unknown"),
+        "shot_direction": shot_info.get("shot_direction", "Unknown"),
+        "shot_height": shot_info.get("shot_height", "Unknown"),
+        "shot_reason": shot_info.get("reason", shot_info.get("shot_reason", "")),
         "bat_model_used": "CricShot10k Bat Detector" if bat_model else "Unavailable",
     }
 
@@ -1026,6 +1039,7 @@ def show_analysis_output(result):
         render_impact_frame_preview,
         render_impact_report,
         render_save_status,
+        render_shot_report,
         video_preview_card,
     )
 
@@ -1054,6 +1068,7 @@ def show_analysis_output(result):
     render_delivery_report(result)
     render_impact_report(result)
     render_impact_frame_preview(result)
+    render_shot_report(result)
     render_save_status(result, "Live Session")
 
 

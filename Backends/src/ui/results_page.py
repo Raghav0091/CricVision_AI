@@ -6,6 +6,7 @@ from Backends.src.ui.components import (
     render_impact_frame_preview,
     render_impact_report,
     render_save_status,
+    render_shot_report,
     report_history_card,
 )
 from Backends.src.ui.theme import render_empty_state, render_page_header, render_section_title
@@ -48,6 +49,7 @@ def show_results_page():
                 render_delivery_report(report)
                 render_impact_report(report)
                 render_impact_frame_preview(report)
+                render_shot_report(report)
                 render_save_status(report, source_label)
 
     render_section_title("Insights", "Future history cards will populate here automatically.")

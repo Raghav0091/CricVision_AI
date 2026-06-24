@@ -1028,6 +1028,11 @@ def save_batting_report(result, analysis_mode):
         "impact_confidence": impact.get("impact_confidence", "Unknown"),
         "impact_reason": impact.get("reason", impact.get("impact_reason", "")),
         "impact_frame_image_path": str(impact.get("impact_frame_image_path") or ""),
+        "shot_type": result.get("shot_info", {}).get("shot_type", "Unknown"),
+        "shot_confidence": result.get("shot_info", {}).get("shot_confidence", "Unknown"),
+        "shot_direction": result.get("shot_info", {}).get("shot_direction", "Unknown"),
+        "shot_height": result.get("shot_info", {}).get("shot_height", "Unknown"),
+        "shot_reason": result.get("shot_info", {}).get("reason", result.get("shot_info", {}).get("shot_reason", "")),
         "minimum_ball_bat_distance": impact.get(
             "min_distance",
             impact.get("min_ball_bat_distance_px"),
@@ -1060,6 +1065,7 @@ def process_batting_video(
         detect_bat_ball_impact,
         save_impact_frame_preview,
     )
+    from Backends.src.analysis.shot_classification import classify_shot_type
 
     ball_model = get_cached_yolo_model(ball_model_key)
     bat_model = get_cached_yolo_model(bat_model_key)
@@ -1158,6 +1164,12 @@ def process_batting_video(
         if preview_path is not None:
             impact_info["impact_frame_image_path"] = str(preview_path)
     _add_impact_marker_to_video(output_path, impact_info)
+    shot_info = classify_shot_type(
+        impact_frame_detections,
+        impact_info,
+        batter_handedness=None,
+        fps=fps,
+    )
     ball_info = get_model_info(ball_model_key) or {}
     bat_info = get_model_info(bat_model_key) or {}
     return {
@@ -1170,6 +1182,12 @@ def process_batting_video(
         "ball_detection_rate": (ball_detected_frames / frame_index) * 100,
         "bat_detection_rate": (bat_detected_frames / frame_index) * 100,
         "impact_info": impact_info,
+        "shot_info": shot_info,
+        "shot_type": shot_info.get("shot_type", "Unknown"),
+        "shot_confidence": shot_info.get("shot_confidence", "Unknown"),
+        "shot_direction": shot_info.get("shot_direction", "Unknown"),
+        "shot_height": shot_info.get("shot_height", "Unknown"),
+        "shot_reason": shot_info.get("reason", shot_info.get("shot_reason", "")),
         "ball_model_used": ball_info.get("name", ball_model_key),
         "bat_model_used": bat_info.get("name", bat_model_key) if bat_model else "Unavailable",
     }
@@ -1320,6 +1338,7 @@ def process_video(
         detect_bat_ball_impact,
         save_impact_frame_preview,
     )
+    from Backends.src.analysis.shot_classification import classify_shot_type
 
     model = None
     ensemble_models = []
@@ -1897,6 +1916,12 @@ def process_video(
         if preview_path is not None:
             impact_info["impact_frame_image_path"] = str(preview_path)
         _add_impact_marker_to_video(output_path, impact_info)
+    shot_info = classify_shot_type(
+        impact_frame_detections,
+        impact_info,
+        batter_handedness=batter_handedness,
+        fps=fps,
+    )
 
     ball_detection_rate = 0
     stump_detection_rate = 0
@@ -2018,6 +2043,12 @@ def process_video(
         "review_frame_count": review_frame_count,
         "review_frames_dir": REVIEW_FRAMES_DIR,
         "impact_info": impact_info,
+        "shot_info": shot_info,
+        "shot_type": shot_info.get("shot_type", "Unknown"),
+        "shot_confidence": shot_info.get("shot_confidence", "Unknown"),
+        "shot_direction": shot_info.get("shot_direction", "Unknown"),
+        "shot_height": shot_info.get("shot_height", "Unknown"),
+        "shot_reason": shot_info.get("reason", shot_info.get("shot_reason", "")),
         "ball_model_used": "Current Best Ball + Stump Model",
         "bat_model_used": (
             (get_model_info(bat_model_key) or {}).get("name", bat_model_key)
@@ -2033,6 +2064,7 @@ def show_batting_analysis_results(result):
         render_impact_frame_preview,
         render_impact_report,
         render_save_status,
+        render_shot_report,
         video_preview_card,
     )
 
@@ -2057,6 +2089,7 @@ def show_batting_analysis_results(result):
     render_delivery_report(result)
     render_impact_report(result)
     render_impact_frame_preview(result)
+    render_shot_report(result)
     render_save_status(result, "Video Analysis")
 
 
@@ -2066,6 +2099,7 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
         render_impact_frame_preview,
         render_impact_report,
         render_save_status,
+        render_shot_report,
         video_preview_card,
     )
     from Backends.src.ui.theme import render_status_pill
@@ -2097,6 +2131,7 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
     render_delivery_report(result)
     render_impact_report(result)
     render_impact_frame_preview(result)
+    render_shot_report(result)
     render_save_status(result, "Video Analysis")
 
 
