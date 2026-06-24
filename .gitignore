@@ -19,6 +19,8 @@ __pycache__/
 
 # Large outputs
 outputs/
+data/session_results.json
+data/clips/
 runs/
 Models/CricShot10k/
 Models/cricshot10k/

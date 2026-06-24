@@ -1022,6 +1022,23 @@ def show_delivery_report(result):
     st.caption("Clips are prepared in memory. They are not permanently saved unless you download them.")
 
 
+def _persist_result_to_session(result, source_type, video_name=None):
+    """Save analysis result to local session storage without crashing the UI."""
+    if not result or not result.get("success"):
+        return result
+    try:
+        from Backends.src.storage.session_store import persist_analysis_to_session
+
+        saved = persist_analysis_to_session(result, source_type, video_name=video_name)
+        result["session_saved"] = True
+        result["session_result_id"] = saved.get("id")
+        result["session_save_error"] = None
+    except Exception as error:
+        result["session_saved"] = False
+        result["session_save_error"] = str(error)
+    return result
+
+
 def ensure_delivery_report_fields(result):
     result.setdefault("ball_tracking_rate", result.get("ball_detection_rate", 0))
     result.setdefault("interpolated_ball_frames", 0)
@@ -1205,6 +1222,11 @@ def show_live_session_page():
                 st.session_state.live_last_result["active_preset"] = analysis_settings.get(
                     "preset_name",
                     "Unknown",
+                )
+                _persist_result_to_session(
+                    st.session_state.live_last_result,
+                    "Live Session",
+                    video_name=st.session_state.live_last_result.get("processed_file_name"),
                 )
 
         st.session_state.live_pending_analysis = False

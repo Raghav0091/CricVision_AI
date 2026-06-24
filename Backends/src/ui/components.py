@@ -1,5 +1,6 @@
 """Page-level reusable UI blocks for CricVision AI."""
 
+from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
@@ -272,7 +273,16 @@ def render_save_status(result, context_label="Analysis"):
     result = result or {}
     st.subheader("Save Status")
 
+    if result.get("session_saved"):
+        st.success("Saved to Session Results")
+    elif result.get("session_save_error"):
+        st.warning(f"Could not save to Session Results: {result['session_save_error']}")
+    elif result.get("success"):
+        st.info(f"{context_label} completed. Session save status is unavailable.")
+
     status_lines = []
+    if result.get("session_result_id"):
+        status_lines.append(f"Session result id: `{result['session_result_id']}`")
     if result.get("report_path"):
         status_lines.append(f"Report saved: `{result['report_path']}`")
     if result.get("output_path"):
@@ -280,18 +290,202 @@ def render_save_status(result, context_label="Analysis"):
     if result.get("processed_file_name"):
         status_lines.append(f"Processed clip ready: `{result['processed_file_name']}`")
 
-    if status_lines:
-        st.success(f"{context_label} result saved to Session Results.")
-        for line in status_lines:
-            st.markdown(f"- {line}")
-        return
+    for line in status_lines:
+        st.markdown(f"- {line}")
 
-    if result.get("processed_video_bytes"):
-        st.info("Session result saved to Session Results. Download the processed clip to save a local copy.")
-    elif result.get("success"):
-        st.info(f"{context_label} result saved to Session Results for this session.")
-    else:
+    if not result.get("session_saved") and not result.get("success"):
         st.warning(f"{context_label} result is not available yet.")
+
+
+def render_session_summary(summary: dict):
+    """Render summary metric cards."""
+    summary = summary or {}
+    st.subheader("Overall Summary")
+    cols = st.columns(4)
+    cols[0].metric("Total Deliveries Analyzed", summary.get("total_deliveries", 0))
+    cols[1].metric("Total Predicted Runs", summary.get("total_predicted_runs", 0))
+    cols[2].metric("Most Common Shot Type", _display_value(summary.get("most_common_shot_type")))
+    cols[3].metric("Most Common Field Zone", _display_value(summary.get("most_common_field_zone")))
+
+    cols2 = st.columns(4)
+    cols2[0].metric("Most Common Outcome", _display_value(summary.get("most_common_outcome")))
+    cols2[1].metric("Average Agent Quality", _display_value(summary.get("average_agent_quality")))
+    coverage = summary.get("average_ball_tracking_coverage")
+    cols2[2].metric(
+        "Average Ball Tracking Coverage",
+        f"{coverage:.1f}%" if coverage is not None else "N/A",
+    )
+    cols2[3].metric("Most Common Length", _display_value(summary.get("most_common_length")))
+
+    insights = summary.get("insights") or []
+    if insights:
+        st.markdown("**Session Insights**")
+        for insight in insights:
+            st.markdown(f"- {insight}")
+
+
+def render_session_analytics_sections(summary: dict):
+    """Render optional tendency and reliability sections."""
+    summary = summary or {}
+
+    st.subheader("Batting Tendencies")
+    tendency_cols = st.columns(2)
+    with tendency_cols[0]:
+        st.markdown("**Shot Type Distribution**")
+        shot_dist = summary.get("shot_type_distribution") or {}
+        if shot_dist:
+            st.bar_chart(shot_dist)
+        else:
+            st.info("No shot type data yet.")
+    with tendency_cols[1]:
+        st.markdown("**Field Zone Distribution**")
+        zone_dist = summary.get("field_zone_distribution") or {}
+        if zone_dist:
+            st.bar_chart(zone_dist)
+        else:
+            st.info("No field zone data yet.")
+
+    st.subheader("Bowling / Delivery Tendencies")
+    delivery_cols = st.columns(2)
+    with delivery_cols[0]:
+        st.markdown("**Line Distribution**")
+        line_dist = summary.get("line_distribution") or {}
+        if line_dist:
+            st.bar_chart(line_dist)
+        else:
+            st.info("No line data yet.")
+    with delivery_cols[1]:
+        st.markdown("**Length Distribution**")
+        length_dist = summary.get("length_distribution") or {}
+        if length_dist:
+            st.bar_chart(length_dist)
+        else:
+            st.info("No length data yet.")
+
+    st.subheader("Agent Quality / Reliability")
+    agent_cols = st.columns(2)
+    with agent_cols[0]:
+        st.markdown("**Agent Quality Distribution**")
+        agent_dist = summary.get("agent_quality_distribution") or {}
+        if agent_dist:
+            st.bar_chart(agent_dist)
+        else:
+            st.info("No agent quality data yet.")
+    with agent_cols[1]:
+        st.markdown("**Outcome Distribution**")
+        outcome_dist = summary.get("outcome_distribution") or {}
+        if outcome_dist:
+            st.bar_chart(outcome_dist)
+        else:
+            st.info("No outcome data yet.")
+
+
+def render_results_filters(results: list):
+    """Render filters and return filtered results."""
+    results = results or []
+    with st.expander("Filters", expanded=False):
+        filter_cols = st.columns(3)
+        source_options = ["All"] + sorted(
+            {str(item.get("source_type", "Unknown")) for item in results if item.get("source_type")}
+        )
+        shot_options = ["All"] + sorted(
+            {str(item.get("shot_type", "Unknown")) for item in results if item.get("shot_type")}
+        )
+        zone_options = ["All"] + sorted(
+            {str(item.get("field_zone", "Unknown")) for item in results if item.get("field_zone")}
+        )
+        outcome_options = ["All"] + sorted(
+            {
+                str(item.get("predicted_outcome", "Unknown"))
+                for item in results
+                if item.get("predicted_outcome")
+            }
+        )
+        agent_options = ["All"] + sorted(
+            {str(item.get("agent_quality", "Unknown")) for item in results if item.get("agent_quality")}
+        )
+
+        source_filter = filter_cols[0].selectbox("Source Type", source_options, key="session_filter_source")
+        shot_filter = filter_cols[1].selectbox("Shot Type", shot_options, key="session_filter_shot")
+        zone_filter = filter_cols[2].selectbox("Field Zone", zone_options, key="session_filter_zone")
+
+        filter_cols2 = st.columns(3)
+        outcome_filter = filter_cols2[0].selectbox(
+            "Predicted Outcome",
+            outcome_options,
+            key="session_filter_outcome",
+        )
+        agent_filter = filter_cols2[1].selectbox("Agent Quality", agent_options, key="session_filter_agent")
+        search_text = filter_cols2[2].text_input("Search video name", value="", key="session_filter_search")
+
+    filtered = []
+    search_lower = search_text.strip().lower()
+    for item in results:
+        if source_filter != "All" and str(item.get("source_type", "Unknown")) != source_filter:
+            continue
+        if shot_filter != "All" and str(item.get("shot_type", "Unknown")) != shot_filter:
+            continue
+        if zone_filter != "All" and str(item.get("field_zone", "Unknown")) != zone_filter:
+            continue
+        if outcome_filter != "All" and str(item.get("predicted_outcome", "Unknown")) != outcome_filter:
+            continue
+        if agent_filter != "All" and str(item.get("agent_quality", "Unknown")) != agent_filter:
+            continue
+        if search_lower:
+            video_name = str(item.get("video_name", "")).lower()
+            if search_lower not in video_name:
+                continue
+        filtered.append(item)
+
+    return list(reversed(filtered))
+
+
+def render_session_result_card(result: dict, expanded: bool = False):
+    """Render one saved result safely with summary and expandable details."""
+    from Backends.src.storage.session_store import session_record_to_report_view
+
+    result = result or {}
+    report_view = session_record_to_report_view(result)
+    title = result.get("video_name", "Delivery")
+    created_at = _format_created_at(result.get("created_at"))
+    source_type = _display_value(result.get("source_type"))
+
+    with st.expander(f"{title} — {created_at} ({source_type})", expanded=expanded):
+        summary_cols = st.columns(4)
+        summary_cols[0].metric("Line", _display_value(result.get("line")))
+        summary_cols[1].metric("Length", _display_value(result.get("length")))
+        summary_cols[2].metric("Shot Type", _display_value(result.get("shot_type")))
+        summary_cols[3].metric("Field Zone", _display_value(result.get("field_zone")))
+
+        summary_cols2 = st.columns(4)
+        summary_cols2[0].metric("Predicted Outcome", _display_value(result.get("predicted_outcome")))
+        summary_cols2[1].metric("Run Estimate", _format_run_estimate(result.get("run_estimate")))
+        summary_cols2[2].metric("Agent Quality", _display_value(result.get("agent_quality")))
+        summary_cols2[3].metric("Source", source_type)
+
+        video_path = result.get("processed_video_path")
+        if video_path:
+            path = Path(str(video_path))
+            if path.exists():
+                st.video(str(path))
+            else:
+                st.info("Preview file not found")
+
+        impact_path = result.get("impact_frame_image_path")
+        if impact_path:
+            path = Path(str(impact_path))
+            if path.exists():
+                st.image(str(path), caption="Impact frame preview", use_container_width=True)
+            else:
+                st.info("Impact frame preview file not found")
+
+        render_delivery_report(report_view)
+        render_impact_report(report_view)
+        render_impact_frame_preview(report_view)
+        render_shot_report(report_view)
+        render_shot_direction_report(report_view)
+        render_outcome_prediction(report_view)
+        render_vision_agent_report(report_view)
 
 
 def analysis_report_card(result):
@@ -528,6 +722,16 @@ def _format_percentage(value):
         return _display_value(value)
 
 
+def _format_created_at(value):
+    if not value:
+        return "Unknown time"
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed.strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def _format_seconds(value):
     try:
         return f"{float(value):.2f} sec"
@@ -563,6 +767,10 @@ def _format_count_label(label, count):
 
 
 def _format_detected_objects(result):
+    explicit = result.get("detected_objects")
+    if isinstance(explicit, str) and explicit.strip() and explicit != "N/A":
+        return explicit
+
     object_items = [
         _format_count_label("Ball", result.get("ball_detected_frames")),
         _format_count_label("Bat", result.get("bat_detected_frames")),
@@ -597,7 +805,7 @@ def _format_tracking_quality(result):
 
 def _format_bounce(result):
     for key in ("bounce_distance", "bounce_distance_m", "bounce_point_distance"):
-        if result.get(key) is not None:
+        if result.get(key) is not None and str(result.get(key)) not in {"", "N/A"}:
             return _display_value(result.get(key))
 
     point = result.get("estimated_bounce_point")
@@ -618,8 +826,8 @@ def _format_bounce(result):
 
 
 def _format_result_summary(result):
-    explicit_summary = result.get("result_summary")
-    if explicit_summary:
+    explicit_summary = result.get("delivery_result_summary") or result.get("result_summary")
+    if explicit_summary and str(explicit_summary) not in {"", "N/A"}:
         return str(explicit_summary)
 
     try:
@@ -631,11 +839,15 @@ def _format_result_summary(result):
 
 
 def _format_coach_feedback(result):
-    explicit_feedback = result.get("ai_coach_feedback") or result.get("coach_feedback")
-    if isinstance(explicit_feedback, str) and explicit_feedback.strip():
-        return [explicit_feedback.strip()]
+    explicit_feedback = (
+        result.get("delivery_coach_feedback")
+        or result.get("ai_coach_feedback")
+        or result.get("coach_feedback")
+    )
     if isinstance(explicit_feedback, list) and explicit_feedback:
         return [str(item) for item in explicit_feedback if str(item).strip()]
+    if isinstance(explicit_feedback, str) and explicit_feedback.strip():
+        return [explicit_feedback.strip()]
 
     try:
         from Backends.src.analysis.cricket_agent import generate_coaching_feedback

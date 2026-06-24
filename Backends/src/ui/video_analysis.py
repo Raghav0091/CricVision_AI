@@ -1012,6 +1012,21 @@ def _add_impact_marker_to_video(video_path, impact_info):
     return video_path
 
 
+def _persist_result_to_session(result, source_type, video_name=None):
+    """Save analysis result to local session storage without crashing the UI."""
+    try:
+        from Backends.src.storage.session_store import persist_analysis_to_session
+
+        saved = persist_analysis_to_session(result, source_type, video_name=video_name)
+        result["session_saved"] = True
+        result["session_result_id"] = saved.get("id")
+        result["session_save_error"] = None
+    except Exception as error:
+        result["session_saved"] = False
+        result["session_save_error"] = str(error)
+    return result
+
+
 def save_batting_report(result, analysis_mode):
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -2466,6 +2481,8 @@ def show_video_analysis_page():
                 result["output_path"] = final_video_path
                 if analysis_mode in {"Batting Analysis", "Full Delivery Analysis"}:
                     save_batting_report(result, analysis_mode)
+                video_name = uploaded_video.name if uploaded_video is not None else None
+                _persist_result_to_session(result, "Video Analysis", video_name=video_name)
                 st.session_state.video_analysis_result = result
                 st.session_state.video_analysis_settings = {
                     "analysis_mode": analysis_mode,
