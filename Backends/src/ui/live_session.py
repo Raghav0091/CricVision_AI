@@ -358,7 +358,6 @@ def process_recorded_delivery(
         detect_bat_ball_impact,
         save_impact_frame_preview,
     )
-    from Backends.src.analysis.outcome_prediction import predict_shot_outcome
     from Backends.src.analysis.shot_classification import classify_shot_type
     from Backends.src.ui.video_analysis import (
         convert_to_browser_mp4,
@@ -833,12 +832,21 @@ def process_recorded_delivery(
         batter_handedness=batter_handedness,
         fps=fps,
     )
-    outcome_info = predict_shot_outcome(
+    from Backends.src.analysis.delivery_enrichment import run_post_shot_pipeline
+
+    delivery_report = {
+        "estimated_line": estimated_line,
+        "estimated_length": estimated_length,
+        "ball_detection_rate": ball_detection_rate,
+        "overall_tracking_quality": overall_tracking_quality,
+    }
+    direction_info, outcome_info, agent_info, enrichment = run_post_shot_pipeline(
         impact_frame_detections,
         impact_info,
         shot_info,
-        fps=fps,
-        batter_handedness=batter_handedness,
+        batter_handedness,
+        fps,
+        delivery_report=delivery_report,
     )
 
     wagon_wheel = generate_wagon_wheel_data(
@@ -909,6 +917,8 @@ def process_recorded_delivery(
         "review_frame_count": review_frame_count,
         "impact_info": impact_info,
         "shot_info": shot_info,
+        "direction_info": direction_info,
+        "agent_info": agent_info,
         "shot_type": shot_info.get("shot_type", "Unknown"),
         "shot_confidence": shot_info.get("shot_confidence", "Unknown"),
         "shot_direction": shot_info.get("shot_direction", "Unknown"),
@@ -922,6 +932,7 @@ def process_recorded_delivery(
         "boundary_chance": outcome_info.get("boundary_chance", "Unknown"),
         "outcome_reason": outcome_info.get("reason", outcome_info.get("outcome_reason", "")),
         "bat_model_used": "CricShot10k Bat Detector" if bat_model else "Unavailable",
+        **enrichment,
     }
 
 
@@ -1055,7 +1066,9 @@ def show_analysis_output(result):
         render_impact_report,
         render_outcome_prediction,
         render_save_status,
+        render_shot_direction_report,
         render_shot_report,
+        render_vision_agent_report,
         video_preview_card,
     )
 
@@ -1085,7 +1098,13 @@ def show_analysis_output(result):
     render_impact_report(result)
     render_impact_frame_preview(result)
     render_shot_report(result)
-    render_outcome_prediction(result)
+    if result.get("direction_agent_available", bool(result.get("direction_info") or result.get("field_zone"))):
+        render_shot_direction_report(result)
+        render_outcome_prediction(result)
+        render_vision_agent_report(result)
+    else:
+        st.info("Shot direction and agent review require frame-level detections.")
+        render_outcome_prediction(result)
     render_save_status(result, "Live Session")
 
 

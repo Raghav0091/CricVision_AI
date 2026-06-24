@@ -14,6 +14,8 @@ from Backends.src.ui.theme import (
 DEBUG_IMPACT = False
 DEBUG_SHOT_CLASSIFICATION = False
 DEBUG_OUTCOME_PREDICTION = False
+DEBUG_SHOT_DIRECTION = False
+DEBUG_VISION_AGENT = False
 
 
 def hero_section(title, subtitle, description):
@@ -182,6 +184,87 @@ def render_outcome_prediction(outcome):
     if DEBUG_OUTCOME_PREDICTION:
         with st.expander("Outcome Prediction Debug", expanded=False):
             st.json(outcome.get("debug", {}))
+
+
+def render_shot_direction_report(direction):
+    """Render text-based shot direction and field zone report safely."""
+    direction = _normalize_direction(direction)
+
+    st.subheader("Shot Direction / Field Zone")
+    direction_cols = st.columns(3)
+    direction_cols[0].metric("Shot Direction", _display_value(direction.get("shot_direction")))
+    direction_cols[1].metric("Field Zone", _display_value(direction.get("field_zone")))
+    direction_cols[2].metric("Zone Confidence", _display_value(direction.get("zone_confidence")))
+
+    angle = direction.get("direction_angle_degrees")
+    if angle is not None:
+        st.metric("Direction Angle", f"{float(angle):.1f}°")
+    else:
+        st.metric("Direction Angle", "N/A")
+
+    reason = direction.get("reason") or direction.get("direction_reason")
+    if reason:
+        st.info(str(reason))
+    elif direction.get("field_zone") in {None, "", "Unknown"}:
+        st.info("Field zone estimation requires impact frame and post-impact ball tracking.")
+
+    if DEBUG_SHOT_DIRECTION:
+        with st.expander("Shot Direction Debug", expanded=False):
+            st.json(direction.get("debug", {}))
+
+
+def render_vision_agent_report(agent):
+    """Render CricVision Agent Review safely."""
+    agent = _normalize_agent(agent)
+
+    st.subheader("CricVision Agent Review")
+    quality = agent.get("agent_quality", "Unknown")
+    if quality == "High":
+        st.success(f"Agent quality: {quality}")
+    elif quality == "Medium":
+        st.info(f"Agent quality: {quality}")
+    elif quality == "Low":
+        st.warning(f"Agent quality: {quality}")
+    else:
+        st.info(f"Agent quality: {_display_value(quality)}")
+
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("Agent Confidence", _display_value(agent.get("agent_confidence")))
+    metric_cols[1].metric(
+        "Ball Tracking Coverage",
+        _format_percentage(agent.get("ball_tracking_coverage")),
+    )
+    metric_cols[2].metric(
+        "Bat Detection Coverage",
+        _format_percentage(agent.get("bat_detection_coverage")),
+    )
+    metric_cols[3].metric("Analysis Consistency", _display_value(agent.get("analysis_consistency")))
+
+    detail_cols = st.columns(2)
+    detail_cols[0].metric("Missing Ball Frames", _display_value(agent.get("missing_ball_frames")))
+    detail_cols[1].metric(
+        "Possible False Ball Detections",
+        _display_value(agent.get("possible_false_ball_detections")),
+    )
+
+    stump_coverage = agent.get("stump_detection_coverage")
+    if stump_coverage is not None:
+        st.metric("Stump Detection Coverage", _format_percentage(stump_coverage))
+
+    review_flags = agent.get("review_flags") or []
+    if review_flags:
+        st.warning("Review flags:\n" + "\n".join(f"- {flag}" for flag in review_flags))
+
+    notes = agent.get("agent_notes")
+    if notes:
+        st.info(str(notes))
+
+    if agent.get("review_frames_recommended"):
+        st.caption(_display_value(agent.get("review_reason"), "Manual frame review recommended."))
+
+    if DEBUG_VISION_AGENT:
+        with st.expander("Vision Agent Debug", expanded=False):
+            st.json(agent.get("debug", {}))
 
 
 def render_save_status(result, context_label="Analysis"):
@@ -388,6 +471,61 @@ def _normalize_outcome(result_or_outcome):
         "reason": reason,
         "outcome_reason": reason,
     }
+
+
+def _normalize_direction(result_or_direction):
+    data = result_or_direction or {}
+    if isinstance(data, dict) and "direction_info" in data:
+        data = data.get("direction_info") or data
+    if not isinstance(data, dict):
+        data = {}
+
+    reason = data.get("reason", data.get("direction_reason", ""))
+    return {
+        **data,
+        "shot_direction": data.get(
+            "shot_direction",
+            data.get("direction_shot_category", "Unknown"),
+        ),
+        "field_zone": data.get("field_zone", "Unknown"),
+        "zone_confidence": data.get("zone_confidence", "Unknown"),
+        "direction_angle_degrees": data.get("direction_angle_degrees"),
+        "reason": reason,
+        "direction_reason": reason,
+    }
+
+
+def _normalize_agent(result_or_agent):
+    data = result_or_agent or {}
+    if isinstance(data, dict) and "agent_info" in data:
+        data = data.get("agent_info") or data
+    if not isinstance(data, dict):
+        data = {}
+
+    return {
+        **data,
+        "agent_quality": data.get("agent_quality", "Unknown"),
+        "agent_confidence": data.get("agent_confidence", "Unknown"),
+        "ball_tracking_coverage": data.get("ball_tracking_coverage"),
+        "bat_detection_coverage": data.get("bat_detection_coverage"),
+        "stump_detection_coverage": data.get("stump_detection_coverage"),
+        "missing_ball_frames": data.get("missing_ball_frames", 0),
+        "possible_false_ball_detections": data.get("possible_false_ball_detections", 0),
+        "analysis_consistency": data.get("analysis_consistency", "Unknown"),
+        "review_flags": list(data.get("review_flags") or []),
+        "agent_notes": data.get("agent_notes", ""),
+        "review_frames_recommended": bool(data.get("review_frames_recommended", False)),
+        "review_reason": data.get("review_reason", ""),
+    }
+
+
+def _format_percentage(value):
+    if value is None or value == "":
+        return "N/A"
+    try:
+        return f"{float(value):.1f}%"
+    except (TypeError, ValueError):
+        return _display_value(value)
 
 
 def _format_seconds(value):

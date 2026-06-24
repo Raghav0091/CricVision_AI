@@ -30,6 +30,7 @@ def predict_shot_outcome(
     shot_result,
     fps=None,
     batter_handedness=None,
+    direction_result=None,
 ):
     """Predict likely cricket outcome after bat-ball impact."""
     impact_result = impact_result or {}
@@ -93,6 +94,10 @@ def predict_shot_outcome(
         fielder_near_ball,
         chosen_rule,
     )
+    direction_result = direction_result or {}
+    field_zone = direction_result.get("field_zone")
+    if field_zone and field_zone != "Unknown":
+        reason = f"{reason} Field zone hint: {field_zone}."
 
     return {
         "predicted_outcome": predicted_outcome,

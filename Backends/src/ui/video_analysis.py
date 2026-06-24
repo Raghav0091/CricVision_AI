@@ -1042,6 +1042,23 @@ def save_batting_report(result, analysis_mode):
             "reason",
             result.get("outcome_info", {}).get("outcome_reason", ""),
         ),
+        "field_zone": result.get("field_zone", "Unknown"),
+        "zone_confidence": result.get("zone_confidence", "Unknown"),
+        "direction_angle_degrees": result.get("direction_angle_degrees"),
+        "direction_reason": result.get("direction_reason", ""),
+        "movement_dx": result.get("movement_dx"),
+        "movement_dy": result.get("movement_dy"),
+        "direction_shot_category": result.get("direction_shot_category", "Unknown"),
+        "agent_quality": result.get("agent_quality", "Unknown"),
+        "agent_confidence": result.get("agent_confidence", "Unknown"),
+        "ball_tracking_coverage": result.get("ball_tracking_coverage"),
+        "bat_detection_coverage": result.get("bat_detection_coverage"),
+        "stump_detection_coverage": result.get("stump_detection_coverage"),
+        "missing_ball_frames": result.get("missing_ball_frames", 0),
+        "possible_false_ball_detections": result.get("possible_false_ball_detections", 0),
+        "analysis_consistency": result.get("analysis_consistency", "Unknown"),
+        "review_flags": list(result.get("review_flags") or []),
+        "agent_notes": result.get("agent_notes", ""),
         "minimum_ball_bat_distance": impact.get(
             "min_distance",
             impact.get("min_ball_bat_distance_px"),
@@ -1055,6 +1072,26 @@ def save_batting_report(result, analysis_mode):
     result["report_path"] = report_path
     result["batting_report"] = report
     return report_path
+
+
+def _run_post_shot_pipeline(
+    impact_frame_detections,
+    impact_info,
+    shot_info,
+    batter_handedness,
+    fps,
+    delivery_report=None,
+):
+    from Backends.src.analysis.delivery_enrichment import run_post_shot_pipeline
+
+    return run_post_shot_pipeline(
+        impact_frame_detections,
+        impact_info,
+        shot_info,
+        batter_handedness,
+        fps,
+        delivery_report=delivery_report,
+    )
 
 
 def process_batting_video(
@@ -1074,7 +1111,6 @@ def process_batting_video(
         detect_bat_ball_impact,
         save_impact_frame_preview,
     )
-    from Backends.src.analysis.outcome_prediction import predict_shot_outcome
     from Backends.src.analysis.shot_classification import classify_shot_type
 
     ball_model = get_cached_yolo_model(ball_model_key)
@@ -1180,12 +1216,12 @@ def process_batting_video(
         batter_handedness=None,
         fps=fps,
     )
-    outcome_info = predict_shot_outcome(
+    direction_info, outcome_info, agent_info, enrichment = _run_post_shot_pipeline(
         impact_frame_detections,
         impact_info,
         shot_info,
-        fps=fps,
         batter_handedness=None,
+        fps=fps,
     )
     ball_info = get_model_info(ball_model_key) or {}
     bat_info = get_model_info(bat_model_key) or {}
@@ -1200,6 +1236,8 @@ def process_batting_video(
         "bat_detection_rate": (bat_detected_frames / frame_index) * 100,
         "impact_info": impact_info,
         "shot_info": shot_info,
+        "direction_info": direction_info,
+        "agent_info": agent_info,
         "shot_type": shot_info.get("shot_type", "Unknown"),
         "shot_confidence": shot_info.get("shot_confidence", "Unknown"),
         "shot_direction": shot_info.get("shot_direction", "Unknown"),
@@ -1214,6 +1252,7 @@ def process_batting_video(
         "outcome_reason": outcome_info.get("reason", outcome_info.get("outcome_reason", "")),
         "ball_model_used": ball_info.get("name", ball_model_key),
         "bat_model_used": bat_info.get("name", bat_model_key) if bat_model else "Unavailable",
+        **enrichment,
     }
 
 
@@ -1362,7 +1401,6 @@ def process_video(
         detect_bat_ball_impact,
         save_impact_frame_preview,
     )
-    from Backends.src.analysis.outcome_prediction import predict_shot_outcome
     from Backends.src.analysis.shot_classification import classify_shot_type
 
     model = None
@@ -1941,19 +1979,6 @@ def process_video(
         if preview_path is not None:
             impact_info["impact_frame_image_path"] = str(preview_path)
         _add_impact_marker_to_video(output_path, impact_info)
-    shot_info = classify_shot_type(
-        impact_frame_detections,
-        impact_info,
-        batter_handedness=batter_handedness,
-        fps=fps,
-    )
-    outcome_info = predict_shot_outcome(
-        impact_frame_detections,
-        impact_info,
-        shot_info,
-        fps=fps,
-        batter_handedness=batter_handedness,
-    )
 
     ball_detection_rate = 0
     stump_detection_rate = 0
@@ -1972,6 +1997,26 @@ def process_video(
         tracking_quality["tracking_rate"],
         tracking_quality["interpolated_frames"],
         kalman_predicted_frames,
+    )
+    shot_info = classify_shot_type(
+        impact_frame_detections,
+        impact_info,
+        batter_handedness=batter_handedness,
+        fps=fps,
+    )
+    delivery_report = {
+        "estimated_line": estimated_line,
+        "estimated_length": estimated_length,
+        "ball_detection_rate": ball_detection_rate,
+        "overall_tracking_quality": overall_tracking_quality,
+    }
+    direction_info, outcome_info, agent_info, enrichment = _run_post_shot_pipeline(
+        impact_frame_detections,
+        impact_info,
+        shot_info,
+        batter_handedness=batter_handedness,
+        fps=fps,
+        delivery_report=delivery_report,
     )
     wagon_wheel = generate_wagon_wheel_data(
         ball_positions,
@@ -2076,6 +2121,8 @@ def process_video(
         "review_frames_dir": REVIEW_FRAMES_DIR,
         "impact_info": impact_info,
         "shot_info": shot_info,
+        "direction_info": direction_info,
+        "agent_info": agent_info,
         "shot_type": shot_info.get("shot_type", "Unknown"),
         "shot_confidence": shot_info.get("shot_confidence", "Unknown"),
         "shot_direction": shot_info.get("shot_direction", "Unknown"),
@@ -2094,6 +2141,7 @@ def process_video(
             if bat_model_key and bat_model is not None
             else ("Unavailable" if bat_model_key else "Not used")
         ),
+        **enrichment,
     }
 
 
@@ -2104,7 +2152,9 @@ def show_batting_analysis_results(result):
         render_impact_report,
         render_outcome_prediction,
         render_save_status,
+        render_shot_direction_report,
         render_shot_report,
+        render_vision_agent_report,
         video_preview_card,
     )
 
@@ -2130,7 +2180,9 @@ def show_batting_analysis_results(result):
     render_impact_report(result)
     render_impact_frame_preview(result)
     render_shot_report(result)
+    render_shot_direction_report(result)
     render_outcome_prediction(result)
+    render_vision_agent_report(result)
     render_save_status(result, "Video Analysis")
 
 
@@ -2141,7 +2193,9 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
         render_impact_report,
         render_outcome_prediction,
         render_save_status,
+        render_shot_direction_report,
         render_shot_report,
+        render_vision_agent_report,
         video_preview_card,
     )
     from Backends.src.ui.theme import render_status_pill
@@ -2174,7 +2228,9 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
     render_impact_report(result)
     render_impact_frame_preview(result)
     render_shot_report(result)
+    render_shot_direction_report(result)
     render_outcome_prediction(result)
+    render_vision_agent_report(result)
     render_save_status(result, "Video Analysis")
 
 
