@@ -358,6 +358,7 @@ def process_recorded_delivery(
         detect_bat_ball_impact,
         save_impact_frame_preview,
     )
+    from Backends.src.analysis.outcome_prediction import predict_shot_outcome
     from Backends.src.analysis.shot_classification import classify_shot_type
     from Backends.src.ui.video_analysis import (
         convert_to_browser_mp4,
@@ -832,6 +833,13 @@ def process_recorded_delivery(
         batter_handedness=batter_handedness,
         fps=fps,
     )
+    outcome_info = predict_shot_outcome(
+        impact_frame_detections,
+        impact_info,
+        shot_info,
+        fps=fps,
+        batter_handedness=batter_handedness,
+    )
 
     wagon_wheel = generate_wagon_wheel_data(
         ball_positions,
@@ -906,6 +914,13 @@ def process_recorded_delivery(
         "shot_direction": shot_info.get("shot_direction", "Unknown"),
         "shot_height": shot_info.get("shot_height", "Unknown"),
         "shot_reason": shot_info.get("reason", shot_info.get("shot_reason", "")),
+        "outcome_info": outcome_info,
+        "predicted_outcome": outcome_info.get("predicted_outcome", "Unknown"),
+        "outcome_confidence": outcome_info.get("outcome_confidence", "Unknown"),
+        "run_estimate": outcome_info.get("run_estimate"),
+        "dismissal_risk": outcome_info.get("dismissal_risk", "Unknown"),
+        "boundary_chance": outcome_info.get("boundary_chance", "Unknown"),
+        "outcome_reason": outcome_info.get("reason", outcome_info.get("outcome_reason", "")),
         "bat_model_used": "CricShot10k Bat Detector" if bat_model else "Unavailable",
     }
 
@@ -1038,6 +1053,7 @@ def show_analysis_output(result):
         render_delivery_report,
         render_impact_frame_preview,
         render_impact_report,
+        render_outcome_prediction,
         render_save_status,
         render_shot_report,
         video_preview_card,
@@ -1069,6 +1085,7 @@ def show_analysis_output(result):
     render_impact_report(result)
     render_impact_frame_preview(result)
     render_shot_report(result)
+    render_outcome_prediction(result)
     render_save_status(result, "Live Session")
 
 

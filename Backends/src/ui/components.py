@@ -13,6 +13,7 @@ from Backends.src.ui.theme import (
 
 DEBUG_IMPACT = False
 DEBUG_SHOT_CLASSIFICATION = False
+DEBUG_OUTCOME_PREDICTION = False
 
 
 def hero_section(title, subtitle, description):
@@ -158,6 +159,29 @@ def render_shot_report(shot):
     if DEBUG_SHOT_CLASSIFICATION:
         with st.expander("Shot Classification Debug", expanded=False):
             st.json(shot.get("debug", {}))
+
+
+def render_outcome_prediction(outcome):
+    """Render a safe predicted shot outcome report."""
+    outcome = _normalize_outcome(outcome)
+
+    st.subheader("Outcome Prediction")
+    outcome_cols = st.columns(5)
+    outcome_cols[0].metric("Predicted Outcome", _display_value(outcome.get("predicted_outcome")))
+    outcome_cols[1].metric("Outcome Confidence", _display_value(outcome.get("outcome_confidence")))
+    outcome_cols[2].metric("Run Estimate", _format_run_estimate(outcome.get("run_estimate")))
+    outcome_cols[3].metric("Dismissal Risk", _display_value(outcome.get("dismissal_risk")))
+    outcome_cols[4].metric("Boundary Chance", _display_value(outcome.get("boundary_chance")))
+
+    reason = outcome.get("reason") or outcome.get("outcome_reason")
+    if reason:
+        st.info(str(reason))
+    else:
+        st.info("Outcome prediction requires impact frame and post-impact ball tracking.")
+
+    if DEBUG_OUTCOME_PREDICTION:
+        with st.expander("Outcome Prediction Debug", expanded=False):
+            st.json(outcome.get("debug", {}))
 
 
 def render_save_status(result, context_label="Analysis"):
@@ -346,6 +370,26 @@ def _normalize_shot(result_or_shot):
     }
 
 
+def _normalize_outcome(result_or_outcome):
+    data = result_or_outcome or {}
+    if isinstance(data, dict) and "outcome_info" in data:
+        data = data.get("outcome_info") or data
+    if not isinstance(data, dict):
+        data = {}
+
+    reason = data.get("reason", data.get("outcome_reason", ""))
+    return {
+        **data,
+        "predicted_outcome": data.get("predicted_outcome", "Unknown"),
+        "outcome_confidence": data.get("outcome_confidence", "Unknown"),
+        "run_estimate": data.get("run_estimate"),
+        "dismissal_risk": data.get("dismissal_risk", "Unknown"),
+        "boundary_chance": data.get("boundary_chance", "Unknown"),
+        "reason": reason,
+        "outcome_reason": reason,
+    }
+
+
 def _format_seconds(value):
     try:
         return f"{float(value):.2f} sec"
@@ -358,6 +402,15 @@ def _format_pixel_distance(value):
         return f"{float(value):.0f} px"
     except (TypeError, ValueError):
         return "N/A"
+
+
+def _format_run_estimate(value):
+    if value is None or value == "":
+        return "N/A"
+    try:
+        return str(int(value))
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def _format_count_label(label, count):

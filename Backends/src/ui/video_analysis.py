@@ -1033,6 +1033,15 @@ def save_batting_report(result, analysis_mode):
         "shot_direction": result.get("shot_info", {}).get("shot_direction", "Unknown"),
         "shot_height": result.get("shot_info", {}).get("shot_height", "Unknown"),
         "shot_reason": result.get("shot_info", {}).get("reason", result.get("shot_info", {}).get("shot_reason", "")),
+        "predicted_outcome": result.get("outcome_info", {}).get("predicted_outcome", "Unknown"),
+        "outcome_confidence": result.get("outcome_info", {}).get("outcome_confidence", "Unknown"),
+        "run_estimate": result.get("outcome_info", {}).get("run_estimate"),
+        "dismissal_risk": result.get("outcome_info", {}).get("dismissal_risk", "Unknown"),
+        "boundary_chance": result.get("outcome_info", {}).get("boundary_chance", "Unknown"),
+        "outcome_reason": result.get("outcome_info", {}).get(
+            "reason",
+            result.get("outcome_info", {}).get("outcome_reason", ""),
+        ),
         "minimum_ball_bat_distance": impact.get(
             "min_distance",
             impact.get("min_ball_bat_distance_px"),
@@ -1065,6 +1074,7 @@ def process_batting_video(
         detect_bat_ball_impact,
         save_impact_frame_preview,
     )
+    from Backends.src.analysis.outcome_prediction import predict_shot_outcome
     from Backends.src.analysis.shot_classification import classify_shot_type
 
     ball_model = get_cached_yolo_model(ball_model_key)
@@ -1170,6 +1180,13 @@ def process_batting_video(
         batter_handedness=None,
         fps=fps,
     )
+    outcome_info = predict_shot_outcome(
+        impact_frame_detections,
+        impact_info,
+        shot_info,
+        fps=fps,
+        batter_handedness=None,
+    )
     ball_info = get_model_info(ball_model_key) or {}
     bat_info = get_model_info(bat_model_key) or {}
     return {
@@ -1188,6 +1205,13 @@ def process_batting_video(
         "shot_direction": shot_info.get("shot_direction", "Unknown"),
         "shot_height": shot_info.get("shot_height", "Unknown"),
         "shot_reason": shot_info.get("reason", shot_info.get("shot_reason", "")),
+        "outcome_info": outcome_info,
+        "predicted_outcome": outcome_info.get("predicted_outcome", "Unknown"),
+        "outcome_confidence": outcome_info.get("outcome_confidence", "Unknown"),
+        "run_estimate": outcome_info.get("run_estimate"),
+        "dismissal_risk": outcome_info.get("dismissal_risk", "Unknown"),
+        "boundary_chance": outcome_info.get("boundary_chance", "Unknown"),
+        "outcome_reason": outcome_info.get("reason", outcome_info.get("outcome_reason", "")),
         "ball_model_used": ball_info.get("name", ball_model_key),
         "bat_model_used": bat_info.get("name", bat_model_key) if bat_model else "Unavailable",
     }
@@ -1338,6 +1362,7 @@ def process_video(
         detect_bat_ball_impact,
         save_impact_frame_preview,
     )
+    from Backends.src.analysis.outcome_prediction import predict_shot_outcome
     from Backends.src.analysis.shot_classification import classify_shot_type
 
     model = None
@@ -1922,6 +1947,13 @@ def process_video(
         batter_handedness=batter_handedness,
         fps=fps,
     )
+    outcome_info = predict_shot_outcome(
+        impact_frame_detections,
+        impact_info,
+        shot_info,
+        fps=fps,
+        batter_handedness=batter_handedness,
+    )
 
     ball_detection_rate = 0
     stump_detection_rate = 0
@@ -2049,6 +2081,13 @@ def process_video(
         "shot_direction": shot_info.get("shot_direction", "Unknown"),
         "shot_height": shot_info.get("shot_height", "Unknown"),
         "shot_reason": shot_info.get("reason", shot_info.get("shot_reason", "")),
+        "outcome_info": outcome_info,
+        "predicted_outcome": outcome_info.get("predicted_outcome", "Unknown"),
+        "outcome_confidence": outcome_info.get("outcome_confidence", "Unknown"),
+        "run_estimate": outcome_info.get("run_estimate"),
+        "dismissal_risk": outcome_info.get("dismissal_risk", "Unknown"),
+        "boundary_chance": outcome_info.get("boundary_chance", "Unknown"),
+        "outcome_reason": outcome_info.get("reason", outcome_info.get("outcome_reason", "")),
         "ball_model_used": "Current Best Ball + Stump Model",
         "bat_model_used": (
             (get_model_info(bat_model_key) or {}).get("name", bat_model_key)
@@ -2063,6 +2102,7 @@ def show_batting_analysis_results(result):
         render_delivery_report,
         render_impact_frame_preview,
         render_impact_report,
+        render_outcome_prediction,
         render_save_status,
         render_shot_report,
         video_preview_card,
@@ -2090,6 +2130,7 @@ def show_batting_analysis_results(result):
     render_impact_report(result)
     render_impact_frame_preview(result)
     render_shot_report(result)
+    render_outcome_prediction(result)
     render_save_status(result, "Video Analysis")
 
 
@@ -2098,6 +2139,7 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
         render_delivery_report,
         render_impact_frame_preview,
         render_impact_report,
+        render_outcome_prediction,
         render_save_status,
         render_shot_report,
         video_preview_card,
@@ -2132,6 +2174,7 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
     render_impact_report(result)
     render_impact_frame_preview(result)
     render_shot_report(result)
+    render_outcome_prediction(result)
     render_save_status(result, "Video Analysis")
 
 
