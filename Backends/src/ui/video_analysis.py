@@ -19,7 +19,7 @@ from Backends.src.analysis.cricket_agent import (
     generate_coaching_feedback,
     generate_delivery_report,
 )
-from Backends.src.analysis.field_zones import FIELD_ZONES, generate_wagon_wheel_data
+from Backends.src.analysis.field_zones import generate_wagon_wheel_data
 from Backends.src.analysis.field_zones import (
     find_nearest_fielder,
     normalize_handedness,
@@ -498,58 +498,6 @@ def estimate_length_from_pitch_y(pitch_y):
     if pitch_y >= 0.45:
         return "Good Length"
     return "Short"
-
-
-def draw_pitch_map(pitch_point, line_label="Unknown", length_label="Unknown"):
-    import matplotlib.pyplot as plt
-
-    fig, ax = plt.subplots(figsize=(3.2, 6))
-    ax.set_xlim(0, 1)
-    ax.set_ylim(1, 0)
-    ax.set_facecolor("#d6b47a")
-    fig.patch.set_facecolor("white")
-
-    length_zones = [
-        (0.00, 0.45, "Short", "#f6c2c2"),
-        (0.45, 0.68, "Good Length", "#fff1a8"),
-        (0.68, 0.84, "Full", "#bfe7c2"),
-        (0.84, 1.00, "Yorker", "#acd7ff"),
-    ]
-
-    for y1, y2, label, color in length_zones:
-        ax.axhspan(y1, y2, color=color, alpha=0.75)
-        ax.text(0.03, (y1 + y2) / 2, label, va="center", ha="left", fontsize=9)
-
-    ax.axvline(0.38, color="#444444", linestyle="--", linewidth=1)
-    ax.axvline(0.62, color="#444444", linestyle="--", linewidth=1)
-    ax.text(0.19, 1.04, "Off", ha="center", fontsize=9)
-    ax.text(0.50, 1.04, "Middle", ha="center", fontsize=9)
-    ax.text(0.81, 1.04, "Leg", ha="center", fontsize=9)
-
-    if pitch_point is not None:
-        ax.scatter(
-            [pitch_point[0]],
-            [pitch_point[1]],
-            s=90,
-            color="#d71920",
-            edgecolor="white",
-            linewidth=1.5,
-            zorder=5,
-        )
-        ax.text(
-            pitch_point[0],
-            max(0, pitch_point[1] - 0.04),
-            f"{line_label} / {length_label}",
-            ha="center",
-            fontsize=8,
-            color="#111111",
-        )
-
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_title("Pitch Map", fontsize=12)
-    fig.tight_layout()
-    return fig
 
 
 def load_ensemble_models():
@@ -2022,43 +1970,41 @@ def process_video(
 
 
 def show_batting_analysis_results(result):
-    from Backends.src.ui.components import analysis_report_card, developer_details_expander, video_preview_card
+    from Backends.src.ui.components import (
+        render_delivery_report,
+        render_save_status,
+        video_preview_card,
+    )
 
-    left_col, right_col = st.columns([1.15, 0.85], gap="large")
-    with left_col:
-        video_preview_card("Processed Video")
-        with open(result["output_path"], "rb") as video_file:
-            st.video(video_file.read())
-        with open(result["output_path"], "rb") as video_file:
+    video_preview_card("Processed Video Preview")
+    output_path = result.get("output_path")
+    if output_path:
+        with open(output_path, "rb") as video_file:
+            video_bytes = video_file.read()
+        st.video(video_bytes)
+        with open(output_path, "rb") as video_file:
             st.download_button(
                 "Download Processed Video",
                 data=video_file,
-                file_name=Path(result["output_path"]).name,
+                file_name=Path(output_path).name,
                 mime="video/mp4",
                 use_container_width=True,
                 key="download_batting_processed_video",
             )
-    with right_col:
-        analysis_report_card(result)
+    else:
+        st.warning("Processed video preview is not available for this result.")
 
-    developer_details_expander(result)
-    if not result.get("ball_detected_frames"):
-        st.warning("No ball was detected. Try a clearer clip or adjust advanced settings.")
-    if not result.get("bat_detected_frames"):
-        st.warning("No bat was detected in this clip.")
-    if result.get("impact_info", {}).get("impact_frame") is None:
-        st.warning("A possible ball-bat impact frame could not be estimated.")
+    render_delivery_report(result)
+    render_save_status(result, "Video Analysis")
 
 
 def show_video_analysis_results(result, selected_model_name, preset_name, show_pitch_roi):
     from Backends.src.ui.components import (
-        analysis_report_card,
-        coaching_details_expander,
-        developer_details_expander,
+        render_delivery_report,
+        render_save_status,
         video_preview_card,
     )
-    from Backends.src.ui.interactive_field_map import draw_field_map
-    from Backends.src.ui.theme import render_section_title, render_status_pill
+    from Backends.src.ui.theme import render_status_pill
 
     st.markdown(
         f'<div style="margin:0.75rem 0 1rem 0;">{render_status_pill("Analysis Complete", "success")} '
@@ -2066,15 +2012,14 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
         unsafe_allow_html=True,
     )
 
-    left_col, right_col = st.columns([1.15, 0.85], gap="large")
-
-    with left_col:
-        video_preview_card("Processed Delivery")
-        with open(result["output_path"], "rb") as video_file:
+    video_preview_card("Processed Video Preview")
+    output_path = result.get("output_path")
+    if output_path:
+        with open(output_path, "rb") as video_file:
             video_bytes = video_file.read()
         st.video(video_bytes)
 
-        with open(result["output_path"], "rb") as file:
+        with open(output_path, "rb") as file:
             st.download_button(
                 label="Download Processed Video",
                 data=file,
@@ -2082,125 +2027,11 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
                 mime="video/mp4",
                 use_container_width=True,
             )
+    else:
+        st.warning("Processed video preview is not available for this result.")
 
-        if st.button("Export Review Frames for Training", key="export_review_frames_video", use_container_width=True):
-            zip_path, file_count = create_review_frames_zip()
-            if file_count == 0:
-                st.warning("No review frames are available yet.")
-            else:
-                with open(zip_path, "rb") as zip_file:
-                    st.download_button(
-                        label="Download Review Frames ZIP",
-                        data=zip_file,
-                        file_name=zip_path.name,
-                        mime="application/zip",
-                        key="download_review_frames_zip_video",
-                        use_container_width=True,
-                    )
-
-    with right_col:
-        analysis_report_card(result)
-        coaching_details_expander(result)
-
-    with st.expander("Pitch Map & Bounce Details", expanded=False):
-        if result.get("calibration_warning"):
-            st.warning(result["calibration_warning"])
-        if result["estimated_bounce_point"] is not None:
-            bx, by = result["estimated_bounce_point"]
-            bounce_cols = st.columns(3)
-            bounce_cols[0].metric("Bounce Frame", result["estimated_bounce_frame"])
-            bounce_cols[1].metric("Line", result["estimated_line"])
-            bounce_cols[2].metric("Length", result["estimated_length"])
-        else:
-            st.warning("Bounce/pitch point was not found. Try a clearer or longer clip.")
-        pitch_map_fig = draw_pitch_map(
-            result.get("pitch_normalized_bounce_point"),
-            result.get("estimated_line", "Unknown"),
-            result.get("estimated_length", "Unknown"),
-        )
-        st.pyplot(pitch_map_fig)
-
-    with st.expander("Batting Direction & Field Context", expanded=False):
-        wagon_wheel = result.get("wagon_wheel", {})
-        shot_angle = wagon_wheel.get("shot_angle")
-        detailed_zone = wagon_wheel.get("detailed_zone", "Unknown")
-        nearest_fielder = wagon_wheel.get("nearest_fielder")
-        nearest_fielder_name = "Unknown" if nearest_fielder is None else nearest_fielder.get("name", "Unknown")
-        context_cols = st.columns(4)
-        context_cols[0].metric("Shot Zone", wagon_wheel.get("simple_zone", "Unknown"))
-        context_cols[1].metric("Detailed Zone", detailed_zone)
-        context_cols[2].metric("Nearest Fielder", nearest_fielder_name)
-        context_cols[3].metric("Confidence", wagon_wheel.get("confidence", "Low"))
-        st.info(wagon_wheel.get("suggested_adjustment", "No field adjustment suggestion available."))
-        st.pyplot(
-            draw_field_map(
-                shot_angle=shot_angle,
-                selected_zone=detailed_zone,
-                fielders=result.get("field_setup", {}).get("fielders", []),
-                batter_handedness=result.get("batter_handedness", "right"),
-                umpires=result.get("field_setup", {}).get("umpires"),
-            )
-        )
-
-        correction_col1, correction_col2 = st.columns([2, 1])
-        with correction_col1:
-            corrected_zone = st.selectbox(
-                "Manual correction: actual field zone",
-                ["No correction"] + FIELD_ZONES,
-                key="video_analysis_field_zone_correction",
-            )
-        with correction_col2:
-            save_correction = st.button("Save Zone Correction", key="save_field_zone_correction")
-
-        if save_correction:
-            if corrected_zone == "No correction":
-                st.warning("Choose an actual zone before saving a correction.")
-            else:
-                save_field_zone_correction(
-                    {
-                        "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
-                        "estimated_zone": wagon_wheel.get("estimated_zone", "Unknown"),
-                        "corrected_zone": corrected_zone,
-                        "shot_angle": "" if shot_angle is None else f"{shot_angle:.2f}",
-                        "confidence": wagon_wheel.get("confidence", "Low"),
-                        "mode": wagon_wheel.get("mode", ""),
-                        "source": "video_analysis",
-                    }
-                )
-                save_field_analysis_history(
-                    {
-                        "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
-                        "source": "video_analysis_correction",
-                        "batter_handedness": result.get("batter_handedness", ""),
-                        "bowler_arm": result.get("bowler_arm", ""),
-                        "camera_view": result.get("camera_view", ""),
-                        "preset": result.get("field_setup", {}).get("preset", "Custom"),
-                        "simple_zone": wagon_wheel.get("simple_zone", "Unknown"),
-                        "detailed_zone": detailed_zone,
-                        "shot_angle": "" if shot_angle is None else f"{shot_angle:.2f}",
-                        "nearest_fielder": nearest_fielder_name,
-                        "confidence": wagon_wheel.get("confidence", "Low"),
-                        "corrected_zone": corrected_zone,
-                    }
-                )
-                result["wagon_wheel"]["corrected_zone"] = corrected_zone
-                st.session_state.video_analysis_result = result
-                st.success("Field-zone correction saved for future review.")
-
-    with st.expander("Advanced Metrics", expanded=False):
-        render_section_title("Detection Metrics")
-        metric_cols = st.columns(4)
-        metric_cols[0].metric("Ball Detection Rate", f"{result['ball_detection_rate']:.1f}%")
-        metric_cols[1].metric("Ball Tracking Rate", f"{result.get('ball_tracking_rate', 0):.1f}%")
-        metric_cols[2].metric("Avg Confidence", f"{result['average_ball_confidence']:.2f}")
-        metric_cols[3].metric("Review Frames", result.get("review_frame_count", 0))
-        debug_cols = st.columns(3)
-        debug_cols[0].metric("Model", result.get("active_model", selected_model_name))
-        debug_cols[1].metric("Preset", result.get("active_preset", preset_name))
-        debug_cols[2].metric("ROI", "Enabled" if show_pitch_roi else "Hidden")
-
-    developer_details_expander(result)
-    st.caption(f"Saved output: {result['output_path']}")
+    render_delivery_report(result)
+    render_save_status(result, "Video Analysis")
 
 
 def show_video_analysis_page():

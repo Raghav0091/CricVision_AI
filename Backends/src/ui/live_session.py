@@ -978,76 +978,36 @@ def show_cricket_delivery_report(result):
 
 def show_analysis_output(result):
     from Backends.src.ui.components import (
-        analysis_report_card,
-        coaching_details_expander,
         delivery_summary_card,
-        developer_details_expander,
+        render_delivery_report,
+        render_save_status,
         video_preview_card,
     )
-    from Backends.src.ui.interactive_field_map import draw_field_map
 
     if result is None:
         delivery_summary_card(None)
         return
 
-    if not result["success"]:
-        st.error(result["error"])
+    if not result.get("success"):
+        st.error(result.get("error", "Live delivery analysis failed."))
         return
 
-    left_col, right_col = st.columns([1.15, 0.85], gap="large")
-    with left_col:
-        video_preview_card("Processed Delivery")
-        st.video(result["processed_video_bytes"])
+    video_preview_card("Processed Video Preview")
+    processed_video_bytes = result.get("processed_video_bytes")
+    if processed_video_bytes:
+        st.video(processed_video_bytes)
         st.download_button(
             label="Download Processed Delivery Clip",
-            data=result["processed_video_bytes"],
-            file_name=result["processed_file_name"],
+            data=processed_video_bytes,
+            file_name=result.get("processed_file_name", "processed_delivery.mp4"),
             mime="video/mp4",
             use_container_width=True,
         )
-    with right_col:
-        analysis_report_card(result)
-        coaching_details_expander(result)
+    else:
+        st.info("Processed video preview is not available for this live result.")
 
-    with st.expander("Field Context", expanded=False):
-        wagon_wheel = result.get("wagon_wheel", {})
-        shot_angle = wagon_wheel.get("shot_angle")
-        detailed_zone = wagon_wheel.get("detailed_zone", "Unknown")
-        st.pyplot(
-            draw_field_map(
-                shot_angle=shot_angle,
-                selected_zone=detailed_zone,
-                fielders=result.get("field_setup", {}).get("fielders", []),
-                batter_handedness=result.get("batter_handedness", "right"),
-                umpires=result.get("field_setup", {}).get("umpires"),
-            )
-        )
-
-    with st.expander("Advanced Metrics", expanded=False):
-        stats_cols = st.columns(4)
-        stats_cols[0].metric("Ball Detection Rate", f"{result['ball_detection_rate']:.1f}%")
-        stats_cols[1].metric("Tracking Rate", f"{result.get('ball_tracking_rate', 0):.1f}%")
-        stats_cols[2].metric("Review Frames", result.get("review_frame_count", 0))
-        stats_cols[3].metric("Recoveries", result.get("tracker_recoveries", 0))
-
-    developer_details_expander(result)
-
-    if st.button("Export Review Frames for Training", key="export_review_frames_live", use_container_width=True):
-        from Backends.src.ui.video_analysis import create_review_frames_zip
-
-        zip_path, file_count = create_review_frames_zip()
-        if file_count == 0:
-            st.warning("No review frames are available yet.")
-        else:
-            with open(zip_path, "rb") as zip_file:
-                st.download_button(
-                    label="Download Review Frames ZIP",
-                    data=zip_file,
-                    file_name=zip_path.name,
-                    mime="application/zip",
-                    key="download_review_frames_zip_live",
-                    use_container_width=True,
-                )
+    render_delivery_report(result)
+    render_save_status(result, "Live Session")
 
 
 def reset_live_delivery_state():

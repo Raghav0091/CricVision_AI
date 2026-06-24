@@ -1,6 +1,11 @@
 import streamlit as st
 
-from Backends.src.ui.components import metric_grid, report_history_card
+from Backends.src.ui.components import (
+    metric_grid,
+    render_delivery_report,
+    render_save_status,
+    report_history_card,
+)
 from Backends.src.ui.theme import render_empty_state, render_page_header, render_section_title
 
 
@@ -10,8 +15,12 @@ def show_results_page():
         "Delivery history and match-style analysis summaries.",
     )
 
-    reports = st.session_state.get("video_analysis_result")
-    has_history = bool(reports and reports.get("success"))
+    reports = [
+        ("Video Analysis", st.session_state.get("video_analysis_result")),
+        ("Live Session", st.session_state.get("live_last_result")),
+    ]
+    reports = [(label, report) for label, report in reports if report and report.get("success")]
+    has_history = bool(reports)
 
     if not has_history:
         render_empty_state(
@@ -20,20 +29,22 @@ def show_results_page():
             action_label="Go to Analyze to create your first report",
         )
     else:
-        impact = reports.get("impact_info", {}) or {}
-        report_history_card(
-            {
-                "title": "Latest Delivery Report",
-                "timestamp": "Current session",
-                "analysis_type": reports.get("analysis_mode", "Full Delivery Analysis"),
-                "line": reports.get("estimated_line", "Unknown"),
-                "length": reports.get("estimated_length", "Unknown"),
-                "tracking_quality": reports.get("overall_tracking_quality", "Unknown"),
-                "impact_confidence": impact.get("impact_confidence", "Unknown"),
-            }
-        )
-        if st.button("View Latest Report Details", use_container_width=True):
-            st.info("Open Analyze to review the full processed video and detailed report.")
+        for index, (source_label, report) in enumerate(reports):
+            impact = report.get("impact_info", {}) or {}
+            report_history_card(
+                {
+                    "title": f"{source_label} Delivery Report",
+                    "timestamp": "Current session",
+                    "analysis_type": report.get("analysis_mode", source_label),
+                    "line": report.get("estimated_line", "Unknown"),
+                    "length": report.get("estimated_length", "Unknown"),
+                    "tracking_quality": report.get("overall_tracking_quality", "Unknown"),
+                    "impact_confidence": impact.get("impact_confidence", "Unknown"),
+                }
+            )
+            with st.expander(f"View {source_label} Report Details", expanded=index == 0):
+                render_delivery_report(report)
+                render_save_status(report, source_label)
 
     render_section_title("Insights", "Future history cards will populate here automatically.")
     metric_grid(
