@@ -3,6 +3,8 @@ import streamlit as st
 from Backends.src.ui.components import (
     metric_grid,
     render_delivery_report,
+    render_impact_frame_preview,
+    render_impact_report,
     render_save_status,
     report_history_card,
 )
@@ -44,6 +46,8 @@ def show_results_page():
             )
             with st.expander(f"View {source_label} Report Details", expanded=index == 0):
                 render_delivery_report(report)
+                render_impact_report(report)
+                render_impact_frame_preview(report)
                 render_save_status(report, source_label)
 
     render_section_title("Insights", "Future history cards will populate here automatically.")

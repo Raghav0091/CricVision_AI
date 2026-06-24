@@ -353,6 +353,11 @@ def process_recorded_delivery(
     field_setup=None,
     fps=DEFAULT_RECORDING_FPS,
 ):
+    from Backends.src.analysis.bat_detection import detect_bat_in_frame, draw_bat_detections
+    from Backends.src.analysis.impact_detection import (
+        detect_bat_ball_impact,
+        save_impact_frame_preview,
+    )
     from Backends.src.ui.video_analysis import (
         convert_to_browser_mp4,
         draw_label,
@@ -379,6 +384,10 @@ def process_recorded_delivery(
     model = None
     ensemble_models = []
     stump_model = get_cached_yolo_model("current_best")
+    bat_model = get_cached_yolo_model("cricshot_bat")
+    bat_unavailable_reason = ""
+    if bat_model is None:
+        bat_unavailable_reason = "Impact not detected: bat detection unavailable."
 
     if stump_model is None:
         return {
@@ -434,6 +443,7 @@ def process_recorded_delivery(
 
         total_frames = len(frames)
         ball_detected_frames = 0
+        bat_detected_frames = 0
         stump_detected_frames = 0
         total_ball_detections = 0
         low_confidence_ball_frames = 0
@@ -449,6 +459,8 @@ def process_recorded_delivery(
 
         trajectory_points = []
         ball_positions = []
+        impact_frame_detections = []
+        impact_frame_candidates = {}
         stump_detections_by_frame = []
         previous_roi_box = None
         previous_ball_center = None
@@ -474,6 +486,11 @@ def process_recorded_delivery(
             annotated_frame = frame.copy()
             low_confidence_ball_detections = []
             recovered_this_frame = False
+            bat_detections = detect_bat_in_frame(frame, bat_model, confidence) if bat_model else []
+
+            if bat_detections:
+                bat_detected_frames += 1
+            draw_bat_detections(annotated_frame, bat_detections)
 
             detection_result = run_pitch_roi_detection(
                 frame,
@@ -566,6 +583,15 @@ def process_recorded_delivery(
                 last_stump_detections = stump_detections
 
             stump_detections_by_frame.append(stump_detections)
+            impact_frame_detections.append(
+                {
+                    "frame_index": frame_index,
+                    "ball_detections": ball_detections,
+                    "bat_detections": bat_detections,
+                }
+            )
+            if ball_detections and bat_detections:
+                impact_frame_candidates[frame_index] = frame.copy()
 
             for detection in ball_detections:
                 x1, y1, x2, y2 = detection["box"]
@@ -786,6 +812,20 @@ def process_recorded_delivery(
         )
         review_frame_count += 1
 
+    impact_info = detect_bat_ball_impact(impact_frame_detections, fps=fps)
+    if bat_unavailable_reason:
+        impact_info["reason"] = bat_unavailable_reason
+        impact_info["impact_reason"] = bat_unavailable_reason
+    impact_frame = impact_info.get("impact_frame")
+    if impact_frame is not None:
+        preview_path = save_impact_frame_preview(
+            impact_frame_candidates.get(impact_frame),
+            impact_info,
+            prefix=f"live_impact_{timestamp}",
+        )
+        if preview_path is not None:
+            impact_info["impact_frame_image_path"] = str(preview_path)
+
     wagon_wheel = generate_wagon_wheel_data(
         ball_positions,
         batter_handedness=batter_handedness,
@@ -824,6 +864,7 @@ def process_recorded_delivery(
         "processed_file_name": f"processed_delivery_{timestamp}.mp4",
         "total_frames": total_frames,
         "ball_detected_frames": ball_detected_frames,
+        "bat_detected_frames": bat_detected_frames,
         "stump_detected_frames": stump_detected_frames,
         "total_ball_detections": total_ball_detections,
         "low_confidence_ball_frames": low_confidence_ball_frames,
@@ -851,6 +892,8 @@ def process_recorded_delivery(
         "camera_view": camera_view,
         "ball_detection_difficult": ball_detection_rate < 35 or low_confidence_ball_frames > 0,
         "review_frame_count": review_frame_count,
+        "impact_info": impact_info,
+        "bat_model_used": "CricShot10k Bat Detector" if bat_model else "Unavailable",
     }
 
 
@@ -980,6 +1023,8 @@ def show_analysis_output(result):
     from Backends.src.ui.components import (
         delivery_summary_card,
         render_delivery_report,
+        render_impact_frame_preview,
+        render_impact_report,
         render_save_status,
         video_preview_card,
     )
@@ -1007,6 +1052,8 @@ def show_analysis_output(result):
         st.info("Processed video preview is not available for this live result.")
 
     render_delivery_report(result)
+    render_impact_report(result)
+    render_impact_frame_preview(result)
     render_save_status(result, "Live Session")
 
 

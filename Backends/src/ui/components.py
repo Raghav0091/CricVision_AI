@@ -1,5 +1,7 @@
 """Page-level reusable UI blocks for CricVision AI."""
 
+from pathlib import Path
+
 import streamlit as st
 
 from Backends.src.ui.theme import (
@@ -8,6 +10,8 @@ from Backends.src.ui.theme import (
     render_section_title,
     render_status_pill,
 )
+
+DEBUG_IMPACT = False
 
 
 def hero_section(title, subtitle, description):
@@ -89,6 +93,50 @@ def render_delivery_report(report):
         st.markdown(f"- {feedback_item}")
 
 
+def render_impact_report(impact):
+    """Render a safe bat-ball impact report."""
+    impact = _normalize_impact(impact)
+
+    st.subheader("Impact Report")
+    impact_cols = st.columns(5)
+    impact_cols[0].metric("Bat-Ball Impact", "Detected" if impact["impact_detected"] else "Not Detected")
+    impact_cols[1].metric("Impact Frame", _display_value(impact.get("impact_frame")))
+    impact_cols[2].metric("Impact Time", _format_seconds(impact.get("impact_time_sec")))
+    impact_cols[3].metric("Ball-to-Bat Distance", _format_pixel_distance(impact.get("min_ball_bat_distance_px")))
+    impact_cols[4].metric("Impact Confidence", _display_value(impact.get("impact_confidence")))
+
+    reason = impact.get("reason") or impact.get("impact_reason")
+    if reason:
+        st.info(str(reason))
+    else:
+        st.info("Impact detection data is not available for this result.")
+
+    if DEBUG_IMPACT:
+        with st.expander("Impact Debug", expanded=False):
+            st.json(impact.get("debug", {}))
+
+
+def render_impact_frame_preview(result_or_impact):
+    """Render the likely impact frame preview if one was saved."""
+    impact = _normalize_impact(result_or_impact)
+    image_path = impact.get("impact_frame_image_path")
+
+    st.subheader("Impact Frame Preview")
+    if not image_path:
+        if impact.get("impact_detected"):
+            st.info("Impact frame preview is not available for this result.")
+        else:
+            st.info("No impact frame preview because impact was not detected.")
+        return
+
+    path = Path(str(image_path))
+    if not path.exists():
+        st.warning("Impact frame preview file is missing.")
+        return
+
+    st.image(str(path), caption="Likely impact frame", use_container_width=True)
+
+
 def render_save_status(result, context_label="Analysis"):
     """Render save/session status without exposing raw debug output."""
     result = result or {}
@@ -103,15 +151,15 @@ def render_save_status(result, context_label="Analysis"):
         status_lines.append(f"Processed clip ready: `{result['processed_file_name']}`")
 
     if status_lines:
-        st.success(f"{context_label} result is ready.")
+        st.success(f"{context_label} result saved to Session Results.")
         for line in status_lines:
             st.markdown(f"- {line}")
         return
 
     if result.get("processed_video_bytes"):
-        st.info("Session result is ready. Download the processed clip to save a local copy.")
+        st.info("Session result saved to Session Results. Download the processed clip to save a local copy.")
     elif result.get("success"):
-        st.info(f"{context_label} result is ready for this session.")
+        st.info(f"{context_label} result saved to Session Results for this session.")
     else:
         st.warning(f"{context_label} result is not available yet.")
 
@@ -228,6 +276,46 @@ def _display_value(value, default="N/A"):
     if isinstance(value, str) and not value.strip():
         return default
     return str(value)
+
+
+def _normalize_impact(result_or_impact):
+    data = result_or_impact or {}
+    if isinstance(data, dict) and "impact_info" in data:
+        data = data.get("impact_info") or {}
+    if not isinstance(data, dict):
+        data = {}
+
+    distance = data.get("min_ball_bat_distance_px", data.get("min_distance"))
+    confidence = data.get("impact_confidence", "Not Detected")
+    impact_frame = data.get("impact_frame")
+    impact_detected = data.get("impact_detected")
+    if impact_detected is None:
+        impact_detected = impact_frame is not None and confidence != "Not Detected"
+
+    return {
+        **data,
+        "impact_detected": bool(impact_detected),
+        "impact_frame": impact_frame,
+        "impact_time_sec": data.get("impact_time_sec"),
+        "min_ball_bat_distance_px": distance,
+        "impact_confidence": confidence or "Not Detected",
+        "reason": data.get("reason", data.get("impact_reason", "")),
+        "impact_frame_image_path": data.get("impact_frame_image_path"),
+    }
+
+
+def _format_seconds(value):
+    try:
+        return f"{float(value):.2f} sec"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
+def _format_pixel_distance(value):
+    try:
+        return f"{float(value):.0f} px"
+    except (TypeError, ValueError):
+        return "N/A"
 
 
 def _format_count_label(label, count):

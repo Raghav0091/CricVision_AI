@@ -87,58 +87,32 @@ def _ball_center_for_frame(ball_tracks, frame_index):
 
 
 def find_possible_impact_frame(ball_tracks, bat_detections_by_frame, max_distance: float = 80) -> dict:
-    best = None
+    from Backends.src.analysis.impact_detection import detect_bat_ball_impact
+
+    frame_detections = []
+    max_frame_count = len(ball_tracks or [])
     detections_by_frame = bat_detections_by_frame or {}
-    frame_items = (
-        detections_by_frame.items()
-        if isinstance(detections_by_frame, dict)
-        else enumerate(detections_by_frame)
-    )
-    for frame_key, bat_detections in frame_items:
-        try:
-            frame_index = int(frame_key)
-        except (TypeError, ValueError):
-            continue
+    if isinstance(detections_by_frame, dict) and detections_by_frame:
+        max_frame_count = max(max_frame_count, max(int(key) for key in detections_by_frame) + 1)
+
+    for frame_index in range(max_frame_count):
         ball_center = _ball_center_for_frame(ball_tracks or [], frame_index)
-        if ball_center is None:
-            continue
-        for bat in bat_detections or []:
-            bat_center = bat.get("center")
-            bbox = bat.get("bbox") or bat.get("box")
-            if bat_center is None and bbox:
-                bat_center = [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2]
-            if bat_center is None:
-                continue
-            distance = _distance_to_bbox(ball_center, bbox) if bbox else calculate_distance(ball_center, bat_center)
-            if best is None or distance < best["min_distance"]:
-                best = {
-                    "impact_frame": frame_index,
-                    "min_distance": float(distance),
-                    "ball_center": [int(ball_center[0]), int(ball_center[1])],
-                    "bat_center": [int(bat_center[0]), int(bat_center[1])],
-                }
+        ball_detections = []
+        if ball_center is not None:
+            ball_detections.append({"center": ball_center})
+        if isinstance(detections_by_frame, dict):
+            bat_detections = detections_by_frame.get(frame_index, detections_by_frame.get(str(frame_index), []))
+        else:
+            bat_detections = detections_by_frame[frame_index] if frame_index < len(detections_by_frame) else []
+        frame_detections.append(
+            {
+                "frame_index": frame_index,
+                "ball_detections": ball_detections,
+                "bat_detections": bat_detections,
+            }
+        )
 
-    if best is None:
-        return {
-            "impact_frame": None,
-            "impact_confidence": "Unknown",
-            "min_distance": None,
-            "ball_center": None,
-            "bat_center": None,
-        }
-
-    distance = best["min_distance"]
-    if distance <= 30:
-        confidence = "High"
-    elif distance <= 60:
-        confidence = "Medium"
-    elif distance <= max_distance:
-        confidence = "Low"
-    else:
-        confidence = "Unknown"
-        best["impact_frame"] = None
-    best["impact_confidence"] = confidence
-    return best
+    return detect_bat_ball_impact(frame_detections)
 
 
 def draw_bat_detections(frame, bat_detections):
@@ -159,18 +133,6 @@ def draw_bat_detections(frame, bat_detections):
 
 
 def draw_impact_marker(frame, impact_info, current_frame_index):
-    if not impact_info or impact_info.get("impact_frame") != current_frame_index:
-        return frame
-    point = impact_info.get("ball_center") or impact_info.get("bat_center")
-    if point:
-        cv2.circle(frame, tuple(map(int, point)), 24, (0, 0, 255), 4)
-    cv2.putText(
-        frame,
-        "Possible Impact Frame",
-        (25, 45),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.85,
-        (0, 0, 255),
-        3,
-    )
-    return frame
+    from Backends.src.analysis.impact_detection import draw_impact_marker as draw_marker
+
+    return draw_marker(frame, impact_info, current_frame_index)

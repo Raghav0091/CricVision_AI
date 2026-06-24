@@ -977,7 +977,7 @@ def _draw_ball_detections(frame, ball_detections):
 
 def _add_impact_marker_to_video(video_path, impact_info):
     """Rewrite an analyzed video once so its retrospectively chosen impact frame is marked."""
-    from Backends.src.analysis.bat_detection import draw_impact_marker
+    from Backends.src.analysis.impact_detection import draw_impact_marker
 
     if not impact_info or impact_info.get("impact_frame") is None:
         return Path(video_path)
@@ -1021,9 +1021,17 @@ def save_batting_report(result, analysis_mode):
         "analysis_mode": analysis_mode,
         "ball_detected": bool(result.get("ball_detected_frames", 0)),
         "bat_detected": bool(result.get("bat_detected_frames", 0)),
+        "impact_detected": impact.get("impact_detected", False),
         "possible_impact_frame": impact.get("impact_frame"),
+        "impact_time_sec": impact.get("impact_time_sec"),
+        "min_ball_bat_distance_px": impact.get("min_ball_bat_distance_px"),
         "impact_confidence": impact.get("impact_confidence", "Unknown"),
-        "minimum_ball_bat_distance": impact.get("min_distance"),
+        "impact_reason": impact.get("reason", impact.get("impact_reason", "")),
+        "impact_frame_image_path": str(impact.get("impact_frame_image_path") or ""),
+        "minimum_ball_bat_distance": impact.get(
+            "min_distance",
+            impact.get("min_ball_bat_distance_px"),
+        ),
         "ball_model_used": result.get("ball_model_used", "Unknown"),
         "bat_model_used": result.get("bat_model_used", "Unknown"),
         "processed_video_path": str(result.get("output_path", "")),
@@ -1047,15 +1055,19 @@ def process_batting_video(
         detect_ball_in_frame,
         detect_bat_in_frame,
         draw_bat_detections,
-        find_possible_impact_frame,
+    )
+    from Backends.src.analysis.impact_detection import (
+        detect_bat_ball_impact,
+        save_impact_frame_preview,
     )
 
     ball_model = get_cached_yolo_model(ball_model_key)
     bat_model = get_cached_yolo_model(bat_model_key)
+    bat_unavailable_reason = ""
     if ball_model is None:
         return {"success": False, "error": "The selected ball model is unavailable."}
     if bat_model is None:
-        return {"success": False, "error": "The selected bat model is unavailable."}
+        bat_unavailable_reason = "Impact not detected: bat detection unavailable."
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -1081,6 +1093,8 @@ def process_batting_video(
     bat_detected_frames = 0
     ball_tracks = []
     bat_detections_by_frame = {}
+    impact_frame_detections = []
+    impact_frame_candidates = {}
     trajectory = []
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -1091,7 +1105,7 @@ def process_batting_video(
             break
         annotated_frame = frame.copy()
         ball_detections = detect_ball_in_frame(frame, ball_model, confidence)
-        bat_detections = detect_bat_in_frame(frame, bat_model, confidence)
+        bat_detections = detect_bat_in_frame(frame, bat_model, confidence) if bat_model else []
         if ball_detections:
             ball_detected_frames += 1
             main_ball = max(ball_detections, key=lambda item: item["confidence"])
@@ -1102,6 +1116,15 @@ def process_batting_video(
         if bat_detections:
             bat_detected_frames += 1
             bat_detections_by_frame[frame_index] = bat_detections
+        impact_frame_detections.append(
+            {
+                "frame_index": frame_index,
+                "ball_detections": ball_detections,
+                "bat_detections": bat_detections,
+            }
+        )
+        if ball_detections and bat_detections:
+            impact_frame_candidates[frame_index] = frame.copy()
 
         _draw_ball_detections(annotated_frame, ball_detections)
         draw_bat_detections(annotated_frame, bat_detections)
@@ -1121,7 +1144,19 @@ def process_batting_video(
     if frame_index == 0:
         return {"success": False, "error": "No video frames were processed."}
 
-    impact_info = find_possible_impact_frame(ball_tracks, bat_detections_by_frame)
+    impact_info = detect_bat_ball_impact(impact_frame_detections, fps=fps)
+    if bat_unavailable_reason:
+        impact_info["reason"] = bat_unavailable_reason
+        impact_info["impact_reason"] = bat_unavailable_reason
+    impact_frame = impact_info.get("impact_frame")
+    if impact_frame is not None:
+        preview_path = save_impact_frame_preview(
+            impact_frame_candidates.get(impact_frame),
+            impact_info,
+            prefix=f"batting_impact_{Path(output_path).stem}",
+        )
+        if preview_path is not None:
+            impact_info["impact_frame_image_path"] = str(preview_path)
     _add_impact_marker_to_video(output_path, impact_info)
     ball_info = get_model_info(ball_model_key) or {}
     bat_info = get_model_info(bat_model_key) or {}
@@ -1136,7 +1171,7 @@ def process_batting_video(
         "bat_detection_rate": (bat_detected_frames / frame_index) * 100,
         "impact_info": impact_info,
         "ball_model_used": ball_info.get("name", ball_model_key),
-        "bat_model_used": bat_info.get("name", bat_model_key),
+        "bat_model_used": bat_info.get("name", bat_model_key) if bat_model else "Unavailable",
     }
 
 
@@ -1280,18 +1315,19 @@ def process_video(
     from Backends.src.analysis.bat_detection import (
         detect_bat_in_frame,
         draw_bat_detections,
-        find_possible_impact_frame,
+    )
+    from Backends.src.analysis.impact_detection import (
+        detect_bat_ball_impact,
+        save_impact_frame_preview,
     )
 
     model = None
     ensemble_models = []
     bat_model = get_cached_yolo_model(bat_model_key) if bat_model_key else None
+    bat_unavailable_reason = ""
 
     if bat_model_key and bat_model is None:
-        return {
-            "success": False,
-            "error": "The selected bat model is unavailable. Bowling Analysis remains available.",
-        }
+        bat_unavailable_reason = "Impact not detected: bat detection unavailable."
     stump_model = get_cached_yolo_model("current_best")
 
     if stump_model is None:
@@ -1380,6 +1416,8 @@ def process_video(
     ball_positions = []
     bat_detections_by_frame = {}
     bat_detected_frames = 0
+    impact_frame_detections = []
+    impact_frame_candidates = {}
     stump_detections_by_frame = []
     last_raw_frame = None
     previous_roi_box = None
@@ -1539,6 +1577,15 @@ def process_video(
                     calibration_warning = ""
 
         stump_detections_by_frame.append(stump_detections)
+        impact_frame_detections.append(
+            {
+                "frame_index": frame_index,
+                "ball_detections": ball_detections,
+                "bat_detections": bat_detections,
+            }
+        )
+        if ball_detections and bat_detections:
+            impact_frame_candidates[frame_index] = frame.copy()
 
         for detection in ball_detections:
             x1, y1, x2, y2 = detection["box"]
@@ -1836,8 +1883,19 @@ def process_video(
             "error": "No frames were processed. The uploaded video may be corrupted or unsupported.",
         }
 
-    impact_info = find_possible_impact_frame(ball_positions, bat_detections_by_frame)
-    if bat_model is not None:
+    impact_info = detect_bat_ball_impact(impact_frame_detections, fps=fps)
+    if bat_unavailable_reason:
+        impact_info["reason"] = bat_unavailable_reason
+        impact_info["impact_reason"] = bat_unavailable_reason
+    impact_frame = impact_info.get("impact_frame")
+    if impact_frame is not None:
+        preview_path = save_impact_frame_preview(
+            impact_frame_candidates.get(impact_frame),
+            impact_info,
+            prefix=f"video_impact_{Path(output_path).stem}",
+        )
+        if preview_path is not None:
+            impact_info["impact_frame_image_path"] = str(preview_path)
         _add_impact_marker_to_video(output_path, impact_info)
 
     ball_detection_rate = 0
@@ -1963,8 +2021,8 @@ def process_video(
         "ball_model_used": "Current Best Ball + Stump Model",
         "bat_model_used": (
             (get_model_info(bat_model_key) or {}).get("name", bat_model_key)
-            if bat_model_key
-            else "Not used"
+            if bat_model_key and bat_model is not None
+            else ("Unavailable" if bat_model_key else "Not used")
         ),
     }
 
@@ -1972,6 +2030,8 @@ def process_video(
 def show_batting_analysis_results(result):
     from Backends.src.ui.components import (
         render_delivery_report,
+        render_impact_frame_preview,
+        render_impact_report,
         render_save_status,
         video_preview_card,
     )
@@ -1995,12 +2055,16 @@ def show_batting_analysis_results(result):
         st.warning("Processed video preview is not available for this result.")
 
     render_delivery_report(result)
+    render_impact_report(result)
+    render_impact_frame_preview(result)
     render_save_status(result, "Video Analysis")
 
 
 def show_video_analysis_results(result, selected_model_name, preset_name, show_pitch_roi):
     from Backends.src.ui.components import (
         render_delivery_report,
+        render_impact_frame_preview,
+        render_impact_report,
         render_save_status,
         video_preview_card,
     )
@@ -2031,6 +2095,8 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
         st.warning("Processed video preview is not available for this result.")
 
     render_delivery_report(result)
+    render_impact_report(result)
+    render_impact_frame_preview(result)
     render_save_status(result, "Video Analysis")
 
 
