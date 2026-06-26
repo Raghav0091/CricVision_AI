@@ -362,7 +362,7 @@ def draw_field_map(
     show_labels=True,
     compact=False,
 ):
-    """Matplotlib field preview used by analysis result views."""
+    """LEGACY: matplotlib field preview kept for dev/debug; not used in production reports."""
     return draw_cricket_field_figure(
         fielders=fielders,
         umpires=umpires,

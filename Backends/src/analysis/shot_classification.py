@@ -2,6 +2,11 @@
 
 from math import hypot
 
+from Backends.src.analysis.frame_detection_utils import (
+    best_detection_center,
+    find_ball_center_at_or_before,
+    normalize_frame_detections,
+)
 
 POST_IMPACT_LOOKAHEAD_FRAMES = 8
 MIN_POST_IMPACT_MOVEMENT_PX = 20
@@ -30,7 +35,7 @@ def classify_shot_type(frame_detections, impact_result, batter_handedness=None, 
     if not impact_result.get("impact_detected") and impact_result.get("impact_frame") is None:
         return _unknown("Shot type unavailable because bat-ball impact was not detected.")
 
-    frames = _normalize_frame_detections(frame_detections)
+    frames = normalize_frame_detections(frame_detections)
     if not frames:
         return _unknown("Shot type detection requires impact frame and post-impact ball tracking.")
 
@@ -45,7 +50,7 @@ def classify_shot_type(frame_detections, impact_result, batter_handedness=None, 
     if batter_handedness is None:
         handedness_note = " Batter handedness was missing, so right-handed rules were used."
 
-    impact_point = _find_ball_center_at_or_before(frames, impact_frame)
+    impact_point = find_ball_center_at_or_before(frames, impact_frame)
     if impact_point is None:
         impact_point = impact_result.get("ball_center")
     if impact_point is None:
@@ -157,39 +162,6 @@ def _shot_result(
     }
 
 
-def _normalize_frame_detections(frame_detections):
-    if not frame_detections:
-        return []
-
-    items = frame_detections.items() if isinstance(frame_detections, dict) else enumerate(frame_detections)
-    normalized = []
-    for fallback_index, raw_frame in items:
-        raw_frame = raw_frame or {}
-        if not isinstance(raw_frame, dict):
-            continue
-        frame_index = raw_frame.get("frame_index", fallback_index)
-        try:
-            frame_index = int(frame_index)
-        except (TypeError, ValueError):
-            frame_index = len(normalized)
-        normalized.append(
-            {
-                "frame_index": frame_index,
-                "ball_detections": list(raw_frame.get("ball_detections") or raw_frame.get("balls") or []),
-            }
-        )
-    return sorted(normalized, key=lambda item: item["frame_index"])
-
-
-def _find_ball_center_at_or_before(frames, impact_frame):
-    candidates = [
-        item for item in frames if item["frame_index"] <= impact_frame and item["ball_detections"]
-    ]
-    if not candidates:
-        return None
-    return _best_ball_center(candidates[-1]["ball_detections"])
-
-
 def _collect_post_impact_points(frames, impact_frame):
     points = []
     max_frame = impact_frame + POST_IMPACT_LOOKAHEAD_FRAMES
@@ -197,36 +169,17 @@ def _collect_post_impact_points(frames, impact_frame):
         frame_index = frame_item["frame_index"]
         if frame_index <= impact_frame or frame_index > max_frame:
             continue
-        center = _best_ball_center(frame_item["ball_detections"])
+        center = best_detection_center(frame_item["ball_detections"])
         if center is not None:
             points.append(center)
     return points
 
 
 def _best_ball_center(ball_detections):
-    if not ball_detections:
+    center = best_detection_center(ball_detections)
+    if center is None:
         return None
-
-    def confidence(detection):
-        try:
-            return float(detection.get("confidence", 0))
-        except (TypeError, ValueError, AttributeError):
-            return 0
-
-    best = max(ball_detections, key=confidence)
-    center = best.get("center") if isinstance(best, dict) else None
-    if center is not None and len(center) >= 2:
-        return [float(center[0]), float(center[1])]
-
-    bbox = None
-    if isinstance(best, dict):
-        bbox = best.get("bbox") or best.get("box")
-    try:
-        if bbox is None or len(bbox) < 4:
-            return None
-        return [(float(bbox[0]) + float(bbox[2])) / 2, (float(bbox[1]) + float(bbox[3])) / 2]
-    except (TypeError, ValueError):
-        return None
+    return [center[0], center[1]]
 
 
 def _normalize_handedness(handedness):

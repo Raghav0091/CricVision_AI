@@ -1,5 +1,7 @@
 """Software vision agent that reviews detection quality and analysis consistency."""
 
+from Backends.src.analysis.frame_detection_utils import normalize_frame_detections
+
 DEBUG_VISION_AGENT = False
 
 MAX_REASONABLE_BALL_JUMP_PX = 180
@@ -15,7 +17,7 @@ def run_vision_agent(
     fps=None,
 ):
     """Review the complete video analysis and return a quality/control report."""
-    frames = _normalize_frame_detections(frame_detections)
+    frames = normalize_frame_detections(frame_detections)
     total_frames = len(frames)
     impact_result = impact_result or {}
     shot_result = shot_result or {}
@@ -86,36 +88,6 @@ def run_vision_agent(
             "delivery_report_keys": list(delivery_report.keys()) if isinstance(delivery_report, dict) else [],
         }
     return result
-
-
-def _normalize_frame_detections(frame_detections):
-    if not frame_detections:
-        return []
-
-    items = frame_detections.items() if isinstance(frame_detections, dict) else enumerate(frame_detections)
-    normalized = []
-    for fallback_index, raw_frame in items:
-        raw_frame = raw_frame or {}
-        if not isinstance(raw_frame, dict):
-            continue
-        frame_index = raw_frame.get("frame_index", fallback_index)
-        try:
-            frame_index = int(frame_index)
-        except (TypeError, ValueError):
-            frame_index = len(normalized)
-        normalized.append(
-            {
-                "frame_index": frame_index,
-                "ball_detections": list(raw_frame.get("ball_detections") or raw_frame.get("balls") or []),
-                "bat_detections": list(raw_frame.get("bat_detections") or raw_frame.get("bats") or []),
-                "stump_detections": list(
-                    raw_frame.get("stump_detections")
-                    or raw_frame.get("stumps")
-                    or []
-                ),
-            }
-        )
-    return sorted(normalized, key=lambda item: item["frame_index"])
 
 
 def _coverage(detected_frames, total_frames):

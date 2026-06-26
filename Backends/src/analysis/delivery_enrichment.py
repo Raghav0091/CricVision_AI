@@ -51,7 +51,7 @@ def run_direction_and_agent_review(
     fps=None,
     delivery_report=None,
 ):
-    """Estimate field zone and run the vision agent after shot/outcome analysis."""
+    """LEGACY: superseded by run_post_shot_pipeline(). Kept for backward compatibility."""
     direction_info = estimate_shot_direction_zone(
         frame_detections,
         impact_info,

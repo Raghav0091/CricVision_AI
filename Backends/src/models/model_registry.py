@@ -58,6 +58,8 @@ MODEL_REGISTRY = {
         "task": "player_detection",
         "classes": ["batter", "bowler", "keeper", "fielder", "umpire"],
         "default": False,
+        "experimental": True,
+        "status": "registered_not_wired",
     },
     "striker_segmentation": {
         "name": "Striker Bat Segmentation",
@@ -70,6 +72,8 @@ MODEL_REGISTRY = {
         "task": "segmentation",
         "classes": ["batter", "bat"],
         "default": False,
+        "experimental": True,
+        "status": "registered_not_wired",
     },
     "shot_classifier": {
         "name": "EfficientNetV2 + GRU Shot Classifier",
@@ -85,6 +89,8 @@ MODEL_REGISTRY = {
         "classes": [],
         "default": False,
         "lazy_only": True,
+        "experimental": True,
+        "status": "lazy_only_not_wired",
     },
 }
 

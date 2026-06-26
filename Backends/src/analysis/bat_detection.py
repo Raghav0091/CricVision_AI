@@ -1,8 +1,6 @@
 """Frame-level bat/ball detection and possible-impact estimation helpers."""
 
-from math import hypot
-
-import cv2
+from Backends.src.analysis.frame_detection_utils import calculate_point_distance
 
 
 def _class_names(model) -> dict:
@@ -60,7 +58,9 @@ def detect_ball_in_frame(frame, ball_model, conf: float = 0.25) -> list[dict]:
 
 
 def calculate_distance(point1, point2) -> float:
-    return hypot(float(point1[0]) - float(point2[0]), float(point1[1]) - float(point2[1]))
+    """Euclidean distance between two points."""
+    value = calculate_point_distance(point1, point2)
+    return value if value is not None else 0.0
 
 
 def _distance_to_bbox(point, bbox) -> float:
@@ -87,6 +87,7 @@ def _ball_center_for_frame(ball_tracks, frame_index):
 
 
 def find_possible_impact_frame(ball_tracks, bat_detections_by_frame, max_distance: float = 80) -> dict:
+    """LEGACY: superseded by impact_detection.detect_bat_ball_impact on frame timelines."""
     from Backends.src.analysis.impact_detection import detect_bat_ball_impact
 
     frame_detections = []
@@ -116,6 +117,8 @@ def find_possible_impact_frame(ball_tracks, bat_detections_by_frame, max_distanc
 
 
 def draw_bat_detections(frame, bat_detections):
+    from Backends.src.utils.cv2_loader import cv2
+
     for detection in bat_detections or []:
         x1, y1, x2, y2 = detection.get("bbox", detection.get("box"))
         confidence = detection.get("confidence", 0.0)

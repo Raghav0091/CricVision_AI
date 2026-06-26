@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from Backends.src.analysis.frame_detection_utils import normalize_frame_detections
+
 DEBUG_OBSERVER_TIMELINE = False
 
 MAX_REASONABLE_BALL_JUMP_PX = 180
@@ -10,7 +12,7 @@ LOW_CONFIDENCE_THRESHOLD = 0.35
 
 def build_observer_timeline(frame_detections, total_frames=None, fps=None):
     """Build a detection timeline summary for uploaded video analysis."""
-    frames = _normalize_frame_detections(frame_detections)
+    frames = normalize_frame_detections(frame_detections)
     timeline_total = int(total_frames) if total_frames else len(frames)
     processed_frames = len(frames)
 
@@ -59,36 +61,6 @@ def build_observer_timeline(frame_detections, total_frames=None, fps=None):
     if DEBUG_OBSERVER_TIMELINE:
         result["debug"] = {"normalized_frames": len(frames)}
     return result
-
-
-def _normalize_frame_detections(frame_detections):
-    if not frame_detections:
-        return []
-
-    items = frame_detections.items() if isinstance(frame_detections, dict) else enumerate(frame_detections)
-    normalized = []
-    for fallback_index, raw_frame in items:
-        raw_frame = raw_frame or {}
-        if not isinstance(raw_frame, dict):
-            continue
-        frame_index = raw_frame.get("frame_index", fallback_index)
-        try:
-            frame_index = int(frame_index)
-        except (TypeError, ValueError):
-            frame_index = len(normalized)
-        normalized.append(
-            {
-                "frame_index": frame_index,
-                "ball_detections": list(raw_frame.get("ball_detections") or raw_frame.get("balls") or []),
-                "bat_detections": list(raw_frame.get("bat_detections") or raw_frame.get("bats") or []),
-                "stump_detections": list(
-                    raw_frame.get("stump_detections")
-                    or raw_frame.get("stumps")
-                    or []
-                ),
-            }
-        )
-    return sorted(normalized, key=lambda item: item["frame_index"])
 
 
 def _coverage(detected_frames, total_frames):

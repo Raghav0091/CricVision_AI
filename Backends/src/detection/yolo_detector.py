@@ -1,3 +1,5 @@
+"""LEGACY: early YOLO wrapper kept for reference. Not imported by the active app."""
+
 from ultralytics import YOLO
 
 

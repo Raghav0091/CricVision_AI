@@ -360,6 +360,7 @@ def generate_wagon_wheel_data(
     mode="Use last part of trajectory",
     manual_contact_frame=None,
 ):
+    """Internal trajectory context for field history; not rendered as a map in the UI."""
     points = _valid_points(ball_trajectory)
     if len(points) < 2:
         return {

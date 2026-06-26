@@ -43,6 +43,7 @@ from Backends.src.models.model_registry import (
 )
 
 
+# LEGACY: kept for ensemble mode only; not shown in the default model picker.
 BALL_MODEL_PATH = Path("Models/ball_detector/best.pt")
 CRICKET_OBJECTS_MODEL_PATH = Path("Models/cricket_objects/best.pt")
 EXTERNAL_BALL_MODEL_PATH = Path("Models/cricket_objects/best_external.pt")
@@ -84,25 +85,20 @@ def load_yolo_model(model_path_str):
 
 
 def get_model_options():
-    return {
+    """Return user-facing detection model choices for Video Analysis."""
+    options = {
         "Ball + Stump Detector": {
             "path": CRICKET_OBJECTS_MODEL_PATH,
             "model_key": "current_best",
         },
-        "Old Ball Detector": {
-            "path": BALL_MODEL_PATH,
-            "model_key": None,
-        },
-        "External Ball Model": {
-            "path": EXTERNAL_BALL_MODEL_PATH,
-            "model_key": None,
-        },
-        ENSEMBLE_MODEL_NAME: {
+    }
+    if len(get_available_ensemble_model_names()) >= 2:
+        options[ENSEMBLE_MODEL_NAME] = {
             "path": None,
             "model_key": None,
             "ensemble": True,
-        },
-    }
+        }
+    return options
 
 
 def get_ensemble_model_configs():
@@ -963,18 +959,6 @@ def choose_main_ball(ball_detections, previous_center=None):
     return min(ball_detections, key=distance_from_previous)
 
 
-def estimate_bounce_point(trajectory_points, min_points=6):
-    if len([point for point in trajectory_points if point is not None]) < min_points:
-        return None
-
-    bounce_result = detect_bounce_by_direction_change(trajectory_points)
-
-    if bounce_result is None:
-        return None
-
-    return bounce_result["point"]
-
-
 def convert_to_browser_mp4(input_path, output_path):
     ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
 
@@ -1067,18 +1051,9 @@ def _add_impact_marker_to_video(video_path, impact_info):
 
 
 def _persist_result_to_session(result, source_type, video_name=None):
-    """Save analysis result to local session storage without crashing the UI."""
-    try:
-        from Backends.src.storage.session_store import persist_analysis_to_session
+    from Backends.src.ui.analysis_helpers import persist_result_to_session
 
-        saved = persist_analysis_to_session(result, source_type, video_name=video_name)
-        result["session_saved"] = True
-        result["session_result_id"] = saved.get("id")
-        result["session_save_error"] = None
-    except Exception as error:
-        result["session_saved"] = False
-        result["session_save_error"] = str(error)
-    return result
+    return persist_result_to_session(result, source_type, video_name=video_name)
 
 
 def save_batting_report(result, analysis_mode):
@@ -1530,20 +1505,9 @@ def get_nearest_stump_detections(stump_detections_by_frame, frame_index):
 
 
 def ensure_delivery_report_fields(result):
-    result.setdefault("ball_tracking_rate", result.get("ball_detection_rate", 0))
-    result.setdefault("interpolated_ball_frames", 0)
-    result.setdefault("estimated_line", "Unknown")
-    result.setdefault("estimated_length", "Unknown")
-    result.setdefault("estimated_bounce_point", None)
-    result.setdefault("average_ball_confidence", 0)
-    result.setdefault("kalman_predicted_frames", 0)
-    result.setdefault("tracker_recoveries", 0)
-    result.setdefault("overall_tracking_quality", "Poor")
-    result.setdefault("pitch_normalized_bounce_point", None)
-    result.setdefault("calibration_status", "Not calibrated")
-    result.setdefault("calibration_source", "None")
-    result.setdefault("calibration_warning", "Confidence warning: pitch calibration is missing.")
-    result.setdefault("wagon_wheel", {})
+    from Backends.src.ui.analysis_helpers import ensure_delivery_report_fields as apply_defaults
+
+    apply_defaults(result)
 
 
 def show_cricket_delivery_report(result):

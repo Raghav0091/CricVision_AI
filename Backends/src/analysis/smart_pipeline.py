@@ -199,7 +199,7 @@ def update_rough_impact_frame(frame_index, ball_detections, bat_detections, curr
 
 
 def crop_frame_with_roi(frame, roi):
-    """Return cropped frame and offset."""
+    """LEGACY placeholder: ROI crop helper reserved for future safe ROI inference."""
     if roi is None:
         return frame, 0, 0
     x1, y1, x2, y2 = roi
@@ -209,7 +209,7 @@ def crop_frame_with_roi(frame, roi):
 
 
 def restore_roi_boxes_to_full_frame(detections, offset_x, offset_y):
-    """Convert detections from ROI coordinates to full frame coordinates."""
+    """LEGACY placeholder: ROI box restore helper reserved for future safe ROI inference."""
     if not detections or (offset_x == 0 and offset_y == 0):
         return detections
     restored = []

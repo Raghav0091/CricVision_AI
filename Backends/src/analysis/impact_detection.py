@@ -1,8 +1,11 @@
 """Lightweight bat-ball impact detection helpers."""
 
-from math import hypot
 from pathlib import Path
 
+from Backends.src.analysis.frame_detection_utils import (
+    calculate_point_distance,
+    normalize_frame_detections,
+)
 from Backends.src.utils.cv2_loader import cv2
 
 
@@ -23,9 +26,7 @@ def calculate_box_center(box):
 
 def calculate_distance(point_a, point_b):
     """Euclidean distance between two points."""
-    if point_a is None or point_b is None:
-        return None
-    return hypot(float(point_a[0]) - float(point_b[0]), float(point_a[1]) - float(point_b[1]))
+    return calculate_point_distance(point_a, point_b)
 
 
 def estimate_impact_confidence(
@@ -52,7 +53,7 @@ def estimate_impact_confidence(
 
 def detect_bat_ball_impact(frame_detections, fps=None):
     """Find likely bat-ball impact from per-frame ball and bat detections."""
-    frame_items = _normalize_frame_detections(frame_detections)
+    frame_items = normalize_frame_detections(frame_detections)
     frames_processed = len(frame_items)
     ball_detected_count = 0
     bat_detected_count = 0
@@ -258,39 +259,6 @@ def _empty_result(reason, frames_processed, ball_detected_count, bat_detected_co
             "closest_candidates": [],
         },
     }
-
-
-def _normalize_frame_detections(frame_detections):
-    if not frame_detections:
-        return []
-
-    items = frame_detections.items() if isinstance(frame_detections, dict) else enumerate(frame_detections)
-    normalized = []
-    for fallback_index, raw_frame in items:
-        if raw_frame is None:
-            raw_frame = {}
-        if isinstance(raw_frame, dict):
-            frame_index = raw_frame.get("frame_index", fallback_index)
-            ball_detections = raw_frame.get("ball_detections") or raw_frame.get("balls") or []
-            bat_detections = raw_frame.get("bat_detections") or raw_frame.get("bats") or []
-        else:
-            frame_index = fallback_index
-            ball_detections = []
-            bat_detections = []
-
-        try:
-            frame_index = int(frame_index)
-        except (TypeError, ValueError):
-            frame_index = int(fallback_index) if str(fallback_index).isdigit() else len(normalized)
-
-        normalized.append(
-            {
-                "frame_index": frame_index,
-                "ball_detections": list(ball_detections or []),
-                "bat_detections": list(bat_detections or []),
-            }
-        )
-    return normalized
 
 
 def _extract_bbox(value):
