@@ -1,14 +1,9 @@
 import tempfile
-import subprocess
-import csv
 import json
-import zipfile
 import time
 from datetime import datetime
 from pathlib import Path
 
-import imageio_ffmpeg
-import numpy as np
 import streamlit as st
 
 from Backends.src.utils.cv2_loader import cv2
@@ -41,20 +36,22 @@ from Backends.src.models.model_registry import (
     get_model_path,
     validate_model_paths,
 )
+from Backends.src.video_pipeline import detection_pipeline as shared_detection
+from Backends.src.video_pipeline import annotation_writer as shared_annotations
+from Backends.src.video_pipeline.performance_timer import (
+    create_performance_profile,
+    finish_performance_profile,
+)
+from Backends.src.video_pipeline.report_pipeline import timed_video_reports
+from Backends.src.video_pipeline.video_reader import (
+    extract_first_video_frame as read_first_video_frame,
+)
 
 
-# LEGACY: kept for ensemble mode only; not shown in the default model picker.
-BALL_MODEL_PATH = Path("Models/ball_detector/best.pt")
-CRICKET_OBJECTS_MODEL_PATH = Path("Models/cricket_objects/best.pt")
-EXTERNAL_BALL_MODEL_PATH = Path("Models/cricket_objects/best_external.pt")
 OUTPUT_DIR = Path("outputs/video_analysis")
 PROCESSED_VIDEO_DIR = Path("outputs/processed_videos")
 REPORTS_DIR = Path("outputs/reports")
 REVIEW_FRAMES_DIR = Path("outputs/review_frames")
-REVIEW_FRAMES_CSV = REVIEW_FRAMES_DIR / "review_frames.csv"
-FIELD_ZONE_CORRECTIONS_CSV = Path("outputs/field_zone_corrections.csv")
-ENSEMBLE_MODEL_NAME = "Ensemble: All Ball Models + Stumps"
-LOW_CONFIDENCE_REVIEW_THRESHOLD = 0.35
 MAX_REVIEW_FRAMES_PER_ANALYSIS = 80
 DETECTION_PRESETS = {
     "Fast Bowling Mode": {
@@ -71,983 +68,32 @@ DETECTION_PRESETS = {
     },
 }
 
-
-@st.cache_resource
-def load_yolo_model(model_path_str):
-    model_path = Path(model_path_str)
-
-    if not model_path.exists():
-        return None
-
-    from ultralytics import YOLO
-
-    return YOLO(str(model_path))
-
-
-def get_model_options():
-    """Return user-facing detection model choices for Video Analysis."""
-    options = {
-        "Ball + Stump Detector": {
-            "path": CRICKET_OBJECTS_MODEL_PATH,
-            "model_key": "current_best",
-        },
-    }
-    if len(get_available_ensemble_model_names()) >= 2:
-        options[ENSEMBLE_MODEL_NAME] = {
-            "path": None,
-            "model_key": None,
-            "ensemble": True,
-        }
-    return options
-
-
-def get_ensemble_model_configs():
-    return [
-        {
-            "name": "Ball + Stump Detector",
-            "path": CRICKET_OBJECTS_MODEL_PATH,
-            "model_key": "current_best",
-            "use_ball": True,
-            "use_stump": True,
-        },
-        {
-            "name": "Old Ball Detector",
-            "path": BALL_MODEL_PATH,
-            "model_key": None,
-            "use_ball": True,
-            "use_stump": False,
-        },
-        {
-            "name": "External Ball Model",
-            "path": EXTERNAL_BALL_MODEL_PATH,
-            "model_key": None,
-            "use_ball": True,
-            "use_stump": False,
-        },
-    ]
-
-
-def get_available_ensemble_model_names():
-    available = []
-    for config in get_ensemble_model_configs():
-        model_key = config.get("model_key")
-        if model_key:
-            path = get_model_path(model_key)
-            if path is not None and path.is_file():
-                available.append(config["name"])
-        elif config["path"].exists():
-            available.append(config["name"])
-    return available
-
-
-def get_model_names(model):
-    names = getattr(model, "names", {})
-
-    if isinstance(names, dict):
-        return names
-
-    if isinstance(names, (list, tuple)):
-        return {index: name for index, name in enumerate(names)}
-
-    return {}
-
-
-def map_model_classes(model):
-    class_names = {}
-
-    for class_id, raw_name in get_model_names(model).items():
-        normalized_name = str(raw_name).lower()
-
-        if "ball" in normalized_name:
-            class_names[int(class_id)] = "ball"
-        elif (
-            "stump" in normalized_name
-            or "stumps" in normalized_name
-            or "wicket" in normalized_name
-        ):
-            class_names[int(class_id)] = "stump"
-
-    return class_names
-
-
-def load_detection_model(model_key=None, model_path=None):
-    """Load a YOLO detection model from a registry key or legacy path."""
-    if model_key:
-        return get_cached_yolo_model(model_key)
-    if model_path is None:
-        return None
-    return load_yolo_model(str(model_path))
-
-
-def calculate_iou(box1, box2):
-    x1 = max(box1[0], box2[0])
-    y1 = max(box1[1], box2[1])
-    x2 = min(box1[2], box2[2])
-    y2 = min(box1[3], box2[3])
-
-    intersection_width = max(0, x2 - x1)
-    intersection_height = max(0, y2 - y1)
-    intersection_area = intersection_width * intersection_height
-
-    if intersection_area <= 0:
-        return 0
-
-    box1_area = max(0, box1[2] - box1[0]) * max(0, box1[3] - box1[1])
-    box2_area = max(0, box2[2] - box2[0]) * max(0, box2[3] - box2[1])
-    union_area = box1_area + box2_area - intersection_area
-
-    if union_area <= 0:
-        return 0
-
-    return intersection_area / union_area
-
-
-def non_max_suppression_custom(detections, iou_threshold=0.4):
-    kept_detections = []
-    sorted_detections = sorted(
-        detections,
-        key=lambda item: item["confidence"],
-        reverse=True,
-    )
-
-    while sorted_detections:
-        best_detection = sorted_detections.pop(0)
-        kept_detections.append(best_detection)
-        sorted_detections = [
-            detection
-            for detection in sorted_detections
-            if calculate_iou(best_detection["box"], detection["box"]) < iou_threshold
-        ]
-
-    return kept_detections
-
-
-def run_single_model_detection(frame, model, confidence, imgsz):
-    return model.predict(
-        source=frame,
-        conf=confidence,
-        imgsz=imgsz,
-        verbose=False,
-    )[0]
-
-
-def collect_model_detections(
-    result,
-    class_names,
-    confidence,
-    model_name,
-    get_box_center,
-    ball_confidence=None,
-):
-    ball_detections = []
-    stump_detections = []
-
-    if result.boxes is None or len(result.boxes) == 0:
-        return ball_detections, stump_detections
-
-    for box in result.boxes:
-        class_id = int(box.cls[0].cpu().numpy())
-        class_name = class_names.get(class_id)
-
-        if class_name is None:
-            continue
-
-        detection_confidence = float(box.conf[0].cpu().numpy())
-
-        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-        detection = {
-            "class_id": class_id,
-            "class_name": class_name,
-            "confidence": detection_confidence,
-            "box": (x1, y1, x2, y2),
-            "center": get_box_center(x1, y1, x2, y2),
-            "model_name": model_name,
-        }
-
-        if class_name == "ball":
-            if detection_confidence >= (ball_confidence or confidence):
-                ball_detections.append(detection)
-        elif class_name == "stump":
-            if detection_confidence >= confidence:
-                stump_detections.append(detection)
-
-    return ball_detections, stump_detections
-
-
-def collect_low_confidence_ball_detections(result, class_names, model_name, get_box_center):
-    low_confidence_detections = []
-
-    if result.boxes is None or len(result.boxes) == 0:
-        return low_confidence_detections
-
-    for box in result.boxes:
-        class_id = int(box.cls[0].cpu().numpy())
-
-        if class_names.get(class_id) != "ball":
-            continue
-
-        confidence = float(box.conf[0].cpu().numpy())
-
-        if not 0.10 <= confidence < LOW_CONFIDENCE_REVIEW_THRESHOLD:
-            continue
-
-        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-        low_confidence_detections.append(
-            {
-                "class_id": class_id,
-                "class_name": "ball",
-                "confidence": confidence,
-                "box": (x1, y1, x2, y2),
-                "center": get_box_center(x1, y1, x2, y2),
-                "model_name": model_name,
-            }
-        )
-
-    return low_confidence_detections
-
-
-def offset_detection_coordinates(detections, offset_x, offset_y):
-    adjusted_detections = []
-
-    for detection in detections:
-        x1, y1, x2, y2 = detection["box"]
-        center_x, center_y = detection["center"]
-        adjusted_detection = {
-            **detection,
-            "box": (
-                x1 + offset_x,
-                y1 + offset_y,
-                x2 + offset_x,
-                y2 + offset_y,
-            ),
-            "center": (center_x + offset_x, center_y + offset_y),
-        }
-        adjusted_detections.append(adjusted_detection)
-
-    return adjusted_detections
-
-
-def estimate_pitch_roi(frame_shape, stump_detections, previous_roi=None):
-    height, width = frame_shape[:2]
-
-    if not stump_detections:
-        return previous_roi
-
-    main_stump = max(
-        stump_detections,
-        key=lambda item: (item["box"][2] - item["box"][0]) * (item["box"][3] - item["box"][1]),
-    )
-    x1, y1, x2, y2 = main_stump["box"]
-    stump_center_x = int((x1 + x2) / 2)
-    stump_width = max(x2 - x1, 1)
-    stump_height = max(y2 - y1, 1)
-
-    corridor_width = int(
-        min(
-            width * 0.90,
-            max(stump_width * 10, stump_height * 4, width * 0.38),
-        )
-    )
-    roi_x1 = max(0, stump_center_x - corridor_width // 2)
-    roi_x2 = min(width, stump_center_x + corridor_width // 2)
-
-    if roi_x2 - roi_x1 < width * 0.25:
-        extra = int((width * 0.25 - (roi_x2 - roi_x1)) / 2)
-        roi_x1 = max(0, roi_x1 - extra)
-        roi_x2 = min(width, roi_x2 + extra)
-
-    roi_y1 = max(0, int(min(y1 - height * 0.18, height * 0.20)))
-    roi_y2 = height
-
-    if roi_y2 - roi_y1 < height * 0.45:
-        roi_y1 = max(0, int(height * 0.35))
-
-    return int(roi_x1), int(roi_y1), int(roi_x2), int(roi_y2)
-
-
-def crop_frame_to_roi(frame, roi_box):
-    if roi_box is None:
-        return frame, (0, 0), None
-
-    x1, y1, x2, y2 = roi_box
-
-    if x2 <= x1 or y2 <= y1:
-        return frame, (0, 0), None
-
-    return frame[y1:y2, x1:x2], (x1, y1), roi_box
-
-
-def create_local_search_roi(frame_shape, center, missing_frames=1):
-    if center is None:
-        return None
-
-    height, width = frame_shape[:2]
-    center_x, center_y = center
-    window_size = int(max(96, min(width, height) * 0.18) * (1 + min(missing_frames, 6) * 0.12))
-    half_window = window_size // 2
-
-    x1 = max(0, int(center_x - half_window))
-    y1 = max(0, int(center_y - half_window))
-    x2 = min(width, int(center_x + half_window))
-    y2 = min(height, int(center_y + half_window))
-
-    if x2 <= x1 or y2 <= y1:
-        return None
-
-    return x1, y1, x2, y2
-
-
-def draw_pitch_roi(frame, roi_box):
-    if roi_box is None:
-        return
-
-    x1, y1, x2, y2 = roi_box
-    cv2.rectangle(frame, (x1, y1), (x2, y2), (80, 255, 80), 2)
-    draw_label(frame, "Pitch ROI", x1, y1, (40, 160, 40))
-
-
-def draw_search_roi(frame, roi_box):
-    if roi_box is None:
-        return
-
-    x1, y1, x2, y2 = roi_box
-    cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 80, 220), 2)
-    draw_label(frame, "Recovery ROI", x1, y1, (150, 40, 130))
-
-
-def estimate_auto_pitch_corners(frame_shape, stump_detections):
-    if not stump_detections:
-        return None
-
-    height, width = frame_shape[:2]
-    main_stump = max(
-        stump_detections,
-        key=lambda item: (item["box"][2] - item["box"][0]) * (item["box"][3] - item["box"][1]),
-    )
-    x1, y1, x2, y2 = main_stump["box"]
-    stump_center_x = int((x1 + x2) / 2)
-    stump_width = max(x2 - x1, 1)
-
-    top_half_width = max(stump_width * 2.2, width * 0.10)
-    bottom_half_width = max(stump_width * 6.0, width * 0.30)
-    top_y = max(0, int(y2 + height * 0.02))
-    bottom_y = height - 1
-
-    return [
-        (max(0, int(stump_center_x - top_half_width)), top_y),
-        (min(width - 1, int(stump_center_x + top_half_width)), top_y),
-        (max(0, int(stump_center_x - bottom_half_width)), bottom_y),
-        (min(width - 1, int(stump_center_x + bottom_half_width)), bottom_y),
-    ]
-
-
-def compute_pitch_homography(pitch_points):
-    if pitch_points is None or len(pitch_points) != 4:
-        return None
-
-    source_points = np.array(pitch_points, dtype="float32")
-    target_points = np.array(
-        [
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [0.0, 1.0],
-            [1.0, 1.0],
-        ],
-        dtype="float32",
-    )
-
-    return cv2.getPerspectiveTransform(source_points, target_points)
-
-
-def transform_point_to_pitch(point, homography):
-    if point is None or homography is None:
-        return None
-
-    points = np.array([[[float(point[0]), float(point[1])]]], dtype="float32")
-    transformed = cv2.perspectiveTransform(points, homography)[0][0]
-    x = min(max(float(transformed[0]), 0.0), 1.0)
-    y = min(max(float(transformed[1]), 0.0), 1.0)
-    return x, y
-
-
-def estimate_line_from_pitch_x(pitch_x, batter_handedness="right"):
-    if pitch_x is None:
-        return "Unknown"
-    left_label = "Leg side" if normalize_handedness(batter_handedness) == "left" else "Off side"
-    right_label = "Off side" if normalize_handedness(batter_handedness) == "left" else "Leg side"
-    if pitch_x < 0.38:
-        return left_label
-    if pitch_x > 0.62:
-        return right_label
-    return "Middle"
-
-
-def estimate_length_from_pitch_y(pitch_y):
-    if pitch_y is None:
-        return "Unknown"
-    if pitch_y >= 0.84:
-        return "Yorker"
-    if pitch_y >= 0.68:
-        return "Full"
-    if pitch_y >= 0.45:
-        return "Good Length"
-    return "Short"
-
-
-def load_ensemble_models():
-    models = []
-
-    for config in get_ensemble_model_configs():
-        model = load_detection_model(
-            model_key=config.get("model_key"),
-            model_path=config.get("path"),
-        )
-
-        if model is None:
-            continue
-
-        models.append(
-            {
-                **config,
-                "model": model,
-                "class_names": map_model_classes(model),
-            }
-        )
-
-    return models
-
-
-def resolve_ensemble_models(model_paths=None):
-    if model_paths is None:
-        return load_ensemble_models()
-
-    models = []
-
-    for config in get_ensemble_model_configs():
-        if config["path"] not in model_paths and str(config["path"]) not in model_paths:
-            continue
-
-        model = load_detection_model(
-            model_key=config.get("model_key"),
-            model_path=config.get("path"),
-        )
-        if model is None:
-            continue
-
-        models.append(
-            {
-                **config,
-                "model": model,
-                "class_names": map_model_classes(model),
-            }
-        )
-
-    return models
-
-
-def run_ensemble_detection(frame, model_paths, confidence, imgsz):
-    models = model_paths
-
-    if models is None or not models or not isinstance(models[0], dict):
-        models = resolve_ensemble_models(models)
-
-    combined_ball_detections = []
-    combined_stump_detections = []
-    low_confidence_ball_detections = []
-
-    for model_config in models:
-        result = run_single_model_detection(
-            frame,
-            model_config["model"],
-            min(confidence, 0.10),
-            imgsz,
-        )
-        ball_detections, stump_detections = collect_model_detections(
-            result,
-            model_config["class_names"],
-            confidence,
-            model_config["name"],
-            get_box_center,
-        )
-        low_confidence_ball_detections.extend(
-            collect_low_confidence_ball_detections(
-                result,
-                model_config["class_names"],
-                model_config["name"],
-                get_box_center,
-            )
-        )
-
-        if model_config["use_ball"]:
-            combined_ball_detections.extend(ball_detections)
-
-        if model_config["use_stump"]:
-            combined_stump_detections.extend(stump_detections)
-
-    return {
-        "ball_detections": non_max_suppression_custom(combined_ball_detections),
-        "stump_detections": combined_stump_detections,
-        "low_confidence_ball_detections": non_max_suppression_custom(
-            low_confidence_ball_detections
-        ),
-    }
-
-
-def run_pitch_roi_detection(
-    frame,
-    stump_model,
-    stump_class_names,
-    confidence,
-    imgsz,
-    previous_roi=None,
-    ball_model=None,
-    ball_class_names=None,
-    ensemble_models=None,
-    use_ensemble=False,
-    ball_confidence=None,
-    speed_settings=None,
-    detect_stump=True,
-    locked_stump_detections=None,
-    use_roi=True,
-):
-    speed_settings = speed_settings or {}
-    stump_detections = list(locked_stump_detections or [])
-    same_model = (
-        not use_ensemble
-        and ball_model is not None
-        and stump_model is not None
-        and ball_model is stump_model
-    )
-    if detect_stump and same_model and speed_settings.get("single_pass_same_model", False):
-        full_frame_start = time.perf_counter()
-        combined_result = run_single_model_detection(
-            frame,
-            stump_model,
-            min(confidence, 0.10),
-            imgsz,
-        )
-        ball_detections, stump_detections = collect_model_detections(
-            combined_result,
-            stump_class_names,
-            confidence,
-            "Ball + Stump Detector",
-            get_box_center,
-            ball_confidence=ball_confidence,
-        )
-        low_confidence_ball_detections = collect_low_confidence_ball_detections(
-            combined_result,
-            stump_class_names,
-            "Ball + Stump Detector",
-            get_box_center,
-        )
-        full_frame_time_ms = (time.perf_counter() - full_frame_start) * 1000
-        roi_box = estimate_pitch_roi(frame.shape, stump_detections, previous_roi)
-        return {
-            "ball_detections": non_max_suppression_custom(ball_detections),
-            "stump_detections": stump_detections,
-            "low_confidence_ball_detections": non_max_suppression_custom(
-                low_confidence_ball_detections
-            ),
-            "roi_box": roi_box,
-            "full_frame_time_ms": full_frame_time_ms,
-            "roi_time_ms": 0,
-            "used_roi": False,
-            "single_pass": True,
-        }
-
-    full_frame_time_ms = 0.0
-    if detect_stump:
-        full_frame_start = time.perf_counter()
-        stump_result = run_single_model_detection(
-            frame,
-            stump_model,
-            confidence,
-            imgsz,
-        )
-        _, stump_detections = collect_model_detections(
-            stump_result,
-            stump_class_names,
-            confidence,
-            "Ball + Stump Detector",
-            get_box_center,
-        )
-        full_frame_time_ms = (time.perf_counter() - full_frame_start) * 1000
-
-    roi_box = estimate_pitch_roi(frame.shape, stump_detections, previous_roi) if use_roi else None
-    if use_roi and roi_box is not None:
-        roi_frame, (offset_x, offset_y), active_roi_box = crop_frame_to_roi(frame, roi_box)
-    else:
-        roi_frame, offset_x, offset_y, active_roi_box = frame, 0, 0, None
-    used_roi = active_roi_box is not None and use_roi
-
-    roi_start = time.perf_counter()
-
-    if use_ensemble:
-        detection_result = run_ensemble_detection(
-            roi_frame,
-            ensemble_models,
-            confidence,
-            imgsz,
-        )
-        ball_detections = detection_result["ball_detections"]
-        low_confidence_ball_detections = detection_result.get(
-            "low_confidence_ball_detections",
-            [],
-        )
-    else:
-        ball_result = run_single_model_detection(
-            roi_frame,
-            ball_model,
-            min(confidence, 0.10),
-            imgsz,
-        )
-        ball_detections, _ = collect_model_detections(
-            ball_result,
-            ball_class_names,
-            confidence,
-            "Selected Model",
-            get_box_center,
-            ball_confidence=ball_confidence,
-        )
-        low_confidence_ball_detections = collect_low_confidence_ball_detections(
-            ball_result,
-            ball_class_names,
-            "Selected Model",
-            get_box_center,
-        )
-
-    detection_time_ms = (time.perf_counter() - roi_start) * 1000
-
-    if used_roi:
-        ball_detections = offset_detection_coordinates(
-            ball_detections,
-            offset_x,
-            offset_y,
-        )
-        low_confidence_ball_detections = offset_detection_coordinates(
-            low_confidence_ball_detections,
-            offset_x,
-            offset_y,
-        )
-        roi_time_ms = detection_time_ms
-    else:
-        full_frame_time_ms += detection_time_ms
-        roi_time_ms = 0
-
-    return {
-        "ball_detections": non_max_suppression_custom(ball_detections),
-        "stump_detections": stump_detections,
-        "low_confidence_ball_detections": non_max_suppression_custom(
-            low_confidence_ball_detections
-        ),
-        "roi_box": active_roi_box,
-        "full_frame_time_ms": full_frame_time_ms,
-        "roi_time_ms": roi_time_ms,
-        "used_roi": used_roi,
-    }
-
-
-def run_local_redetection(
-    frame,
-    search_center,
-    confidence,
-    imgsz,
-    missing_frames,
-    ball_model=None,
-    ball_class_names=None,
-    ensemble_models=None,
-    use_ensemble=False,
-):
-    search_roi = create_local_search_roi(frame.shape, search_center, missing_frames)
-
-    if search_roi is None:
-        return {
-            "ball_detections": [],
-            "search_roi": None,
-            "recovered": False,
-        }
-
-    search_frame, (offset_x, offset_y), active_search_roi = crop_frame_to_roi(frame, search_roi)
-    recovery_confidence = max(0.08, min(confidence, 0.18))
-
-    if use_ensemble:
-        detection_result = run_ensemble_detection(
-            search_frame,
-            ensemble_models,
-            recovery_confidence,
-            max(imgsz, 960),
-        )
-        ball_detections = detection_result["ball_detections"]
-    else:
-        result = run_single_model_detection(
-            search_frame,
-            ball_model,
-            recovery_confidence,
-            max(imgsz, 960),
-        )
-        ball_detections, _ = collect_model_detections(
-            result,
-            ball_class_names,
-            recovery_confidence,
-            "Local Re-detection",
-            get_box_center,
-            ball_confidence=recovery_confidence,
-        )
-
-    ball_detections = offset_detection_coordinates(ball_detections, offset_x, offset_y)
-
-    return {
-        "ball_detections": non_max_suppression_custom(ball_detections),
-        "search_roi": active_search_roi,
-        "recovered": bool(ball_detections),
-    }
-
-
-def write_review_metadata(row):
-    REVIEW_FRAMES_DIR.mkdir(parents=True, exist_ok=True)
-    fieldnames = [
-        "timestamp",
-        "source",
-        "frame_index",
-        "reason",
-        "file_name",
-        "model_name",
-        "confidence",
-        "bbox",
-        "note",
-    ]
-    write_header = not REVIEW_FRAMES_CSV.exists()
-
-    with open(REVIEW_FRAMES_CSV, "a", newline="", encoding="utf-8") as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
-
-        if write_header:
-            writer.writeheader()
-
-        writer.writerow(row)
-
-
-def save_field_zone_correction(row):
-    FIELD_ZONE_CORRECTIONS_CSV.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = [
-        "timestamp",
-        "estimated_zone",
-        "corrected_zone",
-        "shot_angle",
-        "confidence",
-        "mode",
-        "source",
-    ]
-    write_header = not FIELD_ZONE_CORRECTIONS_CSV.exists()
-
-    with open(FIELD_ZONE_CORRECTIONS_CSV, "a", newline="", encoding="utf-8") as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
-
-        if write_header:
-            writer.writeheader()
-
-        writer.writerow(row)
-
-
-def save_review_frame(
-    frame,
-    timestamp,
-    frame_index,
-    reason,
-    detections=None,
-    source="video_analysis",
-    note="",
-):
-    REVIEW_FRAMES_DIR.mkdir(parents=True, exist_ok=True)
-    safe_reason = reason.replace(" ", "_").lower()
-    file_name = f"{safe_reason}_{timestamp}_{frame_index:04d}.jpg"
-    output_path = REVIEW_FRAMES_DIR / file_name
-    review_frame = frame.copy()
-
-    for detection in detections or []:
-        x1, y1, x2, y2 = detection["box"]
-        center_x, center_y = detection["center"]
-        confidence = detection.get("confidence", 0)
-        cv2.rectangle(review_frame, (x1, y1), (x2, y2), (0, 165, 255), 2)
-        cv2.circle(review_frame, (center_x, center_y), 4, (0, 165, 255), -1)
-        draw_label(review_frame, f"{reason} {confidence:.2f}", x1, y1, (0, 120, 220))
-
-    cv2.imwrite(str(output_path), review_frame)
-
-    metadata_detections = detections or [None]
-    for detection in metadata_detections:
-        write_review_metadata(
-            {
-                "timestamp": timestamp,
-                "source": source,
-                "frame_index": frame_index,
-                "reason": reason,
-                "file_name": file_name,
-                "model_name": "" if detection is None else detection.get("model_name", ""),
-                "confidence": "" if detection is None else f"{detection.get('confidence', 0):.4f}",
-                "bbox": "" if detection is None else ",".join(map(str, detection.get("box", ""))),
-                "note": note,
-            }
-        )
-
-    return output_path
-
-
-def create_review_frames_zip():
-    REVIEW_FRAMES_DIR.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    zip_path = REVIEW_FRAMES_DIR / f"cricvision_review_frames_{timestamp}.zip"
-    files_to_zip = [
-        path
-        for path in REVIEW_FRAMES_DIR.iterdir()
-        if path.is_file()
-        and path.name != zip_path.name
-        and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".csv"}
-    ]
-
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
-        for path in files_to_zip:
-            zip_file.write(path, arcname=path.name)
-
-    return zip_path, len(files_to_zip)
-
-
-def draw_label(frame, text, x, y, color):
-    y = max(y, 25)
-    label_width = len(text) * 10 + 10
-
-    cv2.rectangle(
-        frame,
-        (x, y - 24),
-        (x + label_width, y),
-        color,
-        -1,
-    )
-
-    cv2.putText(
-        frame,
-        text,
-        (x + 5, y - 6),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.55,
-        (255, 255, 255),
-        2,
-    )
-
-
-def get_box_center(x1, y1, x2, y2):
-    center_x = int((x1 + x2) / 2)
-    center_y = int((y1 + y2) / 2)
-    return center_x, center_y
-
-
-def choose_main_ball(ball_detections, previous_center=None):
-    if not ball_detections:
-        return None
-
-    if previous_center is None:
-        return max(ball_detections, key=lambda item: item["confidence"])
-
-    previous_x, previous_y = previous_center
-
-    def distance_from_previous(item):
-        center_x, center_y = item["center"]
-        return ((center_x - previous_x) ** 2 + (center_y - previous_y) ** 2) ** 0.5
-
-    return min(ball_detections, key=distance_from_previous)
-
-
-def convert_to_browser_mp4(input_path, output_path):
-    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
-
-    command = [
-        ffmpeg_path,
-        "-y",
-        "-i",
-        str(input_path),
-        "-vcodec",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        "-movflags",
-        "+faststart",
-        str(output_path),
-    ]
-
-    subprocess.run(
-        command,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=True,
-    )
-
-    return output_path
-
-
-def extract_first_video_frame(uploaded_video):
-    uploaded_video.seek(0)
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_input:
-        temp_input.write(uploaded_video.read())
-        temp_path = Path(temp_input.name)
-
-    cap = cv2.VideoCapture(str(temp_path))
-    success, frame = cap.read()
-    cap.release()
-    uploaded_video.seek(0)
-
-    if not success:
-        return None
-
-    return frame
-
-
-def _draw_ball_detections(frame, ball_detections):
-    for detection in ball_detections or []:
-        x1, y1, x2, y2 = detection["bbox"]
-        center_x, center_y = detection["center"]
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
-        cv2.circle(frame, (center_x, center_y), 4, (0, 255, 255), -1)
-        draw_label(frame, f"ball {detection['confidence']:.2f}", x1, y1, (0, 180, 180))
-
-
-def _add_impact_marker_to_video(video_path, impact_info):
-    """Rewrite an analyzed video once so its retrospectively chosen impact frame is marked."""
-    from Backends.src.analysis.impact_detection import draw_impact_marker
-
-    if not impact_info or impact_info.get("impact_frame") is None:
-        return Path(video_path)
-
-    video_path = Path(video_path)
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        return video_path
-
-    fps = cap.get(cv2.CAP_PROP_FPS) or 25
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    temp_path = video_path.with_name(f"{video_path.stem}_impact{video_path.suffix}")
-    writer = cv2.VideoWriter(
-        str(temp_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height)
-    )
-    if not writer.isOpened():
-        cap.release()
-        return video_path
-
-    frame_index = 0
-    while True:
-        success, frame = cap.read()
-        if not success:
-            break
-        draw_impact_marker(frame, impact_info, frame_index)
-        writer.write(frame)
-        frame_index += 1
-    cap.release()
-    writer.release()
-    temp_path.replace(video_path)
-    return video_path
+# Shared backend implementations used by the established frame loops and UI.
+get_model_options = shared_detection.get_model_options
+get_available_ensemble_model_names = shared_detection.get_available_ensemble_model_names
+map_model_classes = shared_detection.map_model_classes
+load_detection_model = shared_detection.load_detection_model
+load_ensemble_models = shared_detection.load_ensemble_models
+run_pitch_roi_detection = shared_detection.run_pitch_roi_detection
+run_local_redetection = shared_detection.run_local_redetection
+choose_main_ball = shared_detection.choose_main_ball
+estimate_auto_pitch_corners = shared_detection.estimate_auto_pitch_corners
+compute_pitch_homography = shared_detection.compute_pitch_homography
+transform_point_to_pitch = shared_detection.transform_point_to_pitch
+estimate_line_from_pitch_x = shared_detection.estimate_line_from_pitch_x
+estimate_length_from_pitch_y = shared_detection.estimate_length_from_pitch_y
+estimate_line_from_stumps = shared_detection.estimate_line_from_stumps
+estimate_length_from_bounce = shared_detection.estimate_length_from_bounce
+get_nearest_stump_detections = shared_detection.get_nearest_stump_detections
+has_enough_ball_movement = shared_detection.has_enough_ball_movement
+draw_label = shared_annotations.draw_label
+draw_pitch_roi = shared_annotations.draw_pitch_roi
+draw_search_roi = shared_annotations.draw_search_roi
+save_review_frame = shared_annotations.save_review_frame
+convert_to_browser_mp4 = shared_annotations.convert_to_browser_mp4
+_add_impact_marker_to_video = shared_annotations.add_impact_marker_to_video
+_draw_ball_detections = shared_annotations.draw_ball_detections
+extract_first_video_frame = read_first_video_frame
 
 
 def _persist_result_to_session(result, source_type, video_name=None):
@@ -1118,26 +164,6 @@ def save_batting_report(result, analysis_mode):
     return report_path
 
 
-def _run_post_shot_pipeline(
-    impact_frame_detections,
-    impact_info,
-    shot_info,
-    batter_handedness,
-    fps,
-    delivery_report=None,
-):
-    from Backends.src.analysis.delivery_enrichment import run_post_shot_pipeline
-
-    return run_post_shot_pipeline(
-        impact_frame_detections,
-        impact_info,
-        shot_info,
-        batter_handedness,
-        fps,
-        delivery_report=delivery_report,
-    )
-
-
 def process_batting_video(
     video_path,
     output_path,
@@ -1149,7 +175,6 @@ def process_batting_video(
     generate_processed_video=True,
 ):
     """Process a clip with only the models needed for batting intelligence."""
-    from Backends.src.agents.observer_timeline import build_observer_timeline
     from Backends.src.analysis.analysis_speed import (
         get_analysis_mode_settings,
         resize_frame_for_inference,
@@ -1164,7 +189,6 @@ def process_batting_video(
         detect_bat_ball_impact,
         save_impact_frame_preview,
     )
-    from Backends.src.analysis.shot_classification import classify_shot_type
     from Backends.src.analysis.smart_pipeline import (
         refine_bat_detections_near_impact,
         should_detect_ball,
@@ -1353,36 +377,28 @@ def process_batting_video(
             impact_info["impact_frame_image_path"] = str(preview_path)
     if generate_processed_video:
         _add_impact_marker_to_video(output_path, impact_info)
-    shot_info = classify_shot_type(
+    reports = timed_video_reports(
         frame_detections,
-        impact_info,
-        batter_handedness=None,
         fps=fps,
-    )
-    report_started = time.perf_counter()
-    direction_info, outcome_info, agent_info, enrichment = _run_post_shot_pipeline(
-        frame_detections,
-        impact_info,
-        shot_info,
+        total_frames=frame_index,
         batter_handedness=None,
-        fps=fps,
+        impact_result=impact_info,
     )
-    observer_started = time.perf_counter()
-    observer_timeline = build_observer_timeline(frame_detections, total_frames=frame_index, fps=fps)
-    performance["observer_timeline_time_sec"] = time.perf_counter() - observer_started
-    performance["report_generation_time_sec"] = time.perf_counter() - report_started
-    performance["frames_processed"] = frame_index
-    performance["total_analysis_time_sec"] = time.perf_counter() - analysis_started
-    if frame_index > 0:
-        performance["avg_time_per_frame_sec"] = round(
-            performance["total_analysis_time_sec"] / frame_index,
-            4,
-        )
-    if processed_detection_frames > 0:
-        performance["average_ms_per_processed_frame"] = round(
-            (performance["model_inference_time_sec"] / processed_detection_frames) * 1000,
-            2,
-        )
+    impact_info = reports["impact_result"]
+    shot_info = reports["shot_result"]
+    direction_info = reports["direction_result"]
+    outcome_info = reports["outcome_result"]
+    agent_info = reports["agent_result"]
+    enrichment = reports["enrichment"]
+    observer_timeline = reports["observer_timeline"]
+    performance["report_generation_time_sec"] = reports["report_generation_time_sec"]
+    performance["observer_timeline_time_sec"] = reports["observer_timeline_time_sec"]
+    finish_performance_profile(
+        performance,
+        analysis_started,
+        frame_index,
+        processed_detection_frames,
+    )
     performance["invalid_detection_count"] = detection_stats.get("invalid_detection_count", 0)
     ball_info = get_model_info(ball_model_key) or {}
     bat_info = get_model_info(bat_model_key) or {}
@@ -1487,23 +503,6 @@ def show_manual_pitch_point_inputs(frame):
     return points
 
 
-def get_nearest_stump_detections(stump_detections_by_frame, frame_index):
-    if frame_index is None or not stump_detections_by_frame:
-        return []
-
-    frame_index = min(frame_index, len(stump_detections_by_frame) - 1)
-
-    for detections in reversed(stump_detections_by_frame[: frame_index + 1]):
-        if detections:
-            return detections
-
-    for detections in stump_detections_by_frame[frame_index + 1 :]:
-        if detections:
-            return detections
-
-    return []
-
-
 def ensure_delivery_report_fields(result):
     from Backends.src.ui.analysis_helpers import ensure_delivery_report_fields as apply_defaults
 
@@ -1538,24 +537,7 @@ DEBUG_PERFORMANCE = False
 
 
 def _empty_performance_profile():
-    return {
-        "video_read_time_sec": 0.0,
-        "model_inference_time_sec": 0.0,
-        "ball_detection_time_sec": 0.0,
-        "bat_detection_time_sec": 0.0,
-        "stump_detection_time_sec": 0.0,
-        "annotation_write_time_sec": 0.0,
-        "observer_timeline_time_sec": 0.0,
-        "report_generation_time_sec": 0.0,
-        "total_analysis_time_sec": 0.0,
-        "frames_processed": 0,
-        "frames_read": 0,
-        "average_ms_per_processed_frame": None,
-        "avg_time_per_frame_sec": None,
-        "speed_mode": "Smart Balanced",
-        "smart_pipeline_used": True,
-        "processed_video_generated": True,
-    }
+    return create_performance_profile()
 
 
 def process_video(
@@ -1578,7 +560,6 @@ def process_video(
     max_frames=None,
     generate_processed_video=True,
 ):
-    from Backends.src.agents.observer_timeline import build_observer_timeline
     from Backends.src.analysis.analysis_speed import (
         get_analysis_mode_settings,
         normalize_detections,
@@ -1602,7 +583,6 @@ def process_video(
         detect_bat_ball_impact,
         save_impact_frame_preview,
     )
-    from Backends.src.analysis.shot_classification import classify_shot_type
 
     model = None
     ensemble_models = []
@@ -2317,46 +1297,35 @@ def process_video(
         tracking_quality["interpolated_frames"],
         kalman_predicted_frames,
     )
-    shot_info = classify_shot_type(
-        frame_detections,
-        impact_info,
-        batter_handedness=batter_handedness,
-        fps=fps,
-    )
     delivery_report = {
         "estimated_line": estimated_line,
         "estimated_length": estimated_length,
         "ball_detection_rate": ball_detection_rate,
         "overall_tracking_quality": overall_tracking_quality,
     }
-    direction_info, outcome_info, agent_info, enrichment = _run_post_shot_pipeline(
+    reports = timed_video_reports(
         frame_detections,
-        impact_info,
-        shot_info,
-        batter_handedness=batter_handedness,
         fps=fps,
-        delivery_report=delivery_report,
-    )
-    observer_started = time.perf_counter()
-    observer_timeline = build_observer_timeline(
-        frame_detections,
         total_frames=frame_index,
-        fps=fps,
+        batter_handedness=batter_handedness,
+        delivery_report=delivery_report,
+        impact_result=impact_info,
     )
-    performance["observer_timeline_time_sec"] = time.perf_counter() - observer_started
-    performance["report_generation_time_sec"] += time.perf_counter() - report_started
-    performance["frames_processed"] = frame_index
-    performance["total_analysis_time_sec"] = time.perf_counter() - analysis_started
-    if frame_index > 0:
-        performance["avg_time_per_frame_sec"] = round(
-            performance["total_analysis_time_sec"] / frame_index,
-            4,
-        )
-    if processed_detection_frames > 0:
-        performance["average_ms_per_processed_frame"] = round(
-            (performance["model_inference_time_sec"] / processed_detection_frames) * 1000,
-            2,
-        )
+    impact_info = reports["impact_result"]
+    shot_info = reports["shot_result"]
+    direction_info = reports["direction_result"]
+    outcome_info = reports["outcome_result"]
+    agent_info = reports["agent_result"]
+    enrichment = reports["enrichment"]
+    observer_timeline = reports["observer_timeline"]
+    performance["report_generation_time_sec"] += reports["report_generation_time_sec"]
+    performance["observer_timeline_time_sec"] = reports["observer_timeline_time_sec"]
+    finish_performance_profile(
+        performance,
+        analysis_started,
+        frame_index,
+        processed_detection_frames,
+    )
     performance["invalid_detection_count"] = detection_stats.get("invalid_detection_count", 0)
     wagon_wheel = generate_wagon_wheel_data(
         ball_positions,
@@ -2916,67 +1885,3 @@ def show_video_analysis_page():
             preset_name=settings.get("preset_name", result.get("active_preset", "Balanced Mode")),
             show_pitch_roi=settings.get("show_pitch_roi", False),
         )
-                
-def estimate_line_from_stumps(bounce_point, stump_detections, batter_handedness="right"):
-    """
-    Estimate cricket line using bounce point and stump position.
-
-    Simple version:
-    - left of stumps = off side for right-handed batters, leg side for left
-    - inside stump width = middle
-    - right of stumps = leg side for right-handed batters, off side for left
-    """
-
-    if bounce_point is None or not stump_detections:
-        return "Unknown"
-
-    bx, by = bounce_point
-
-    # Use widest stump box if multiple stump boxes are detected
-    main_stump = max(
-        stump_detections,
-        key=lambda item: item["box"][2] - item["box"][0]
-    )
-
-    x1, y1, x2, y2 = main_stump["box"]
-
-    stump_width = x2 - x1
-    margin = int(stump_width * 0.4)
-    left_label = "Leg side" if normalize_handedness(batter_handedness) == "left" else "Off side"
-    right_label = "Off side" if normalize_handedness(batter_handedness) == "left" else "Leg side"
-
-    if bx < x1 - margin:
-        return left_label
-    elif bx > x2 + margin:
-        return right_label
-    else:
-        return "Middle"
-    
-
-def estimate_length_from_bounce(bounce_point, frame_height):
-    if bounce_point is None or frame_height <= 0:
-        return "Unknown"
-
-    bx, by = bounce_point
-
-    bounce_ratio = by / frame_height
-
-    if bounce_ratio >= 0.82:
-        return "Yorker"
-    elif bounce_ratio >= 0.68:
-        return "Full"
-    elif bounce_ratio >= 0.48:
-        return "Good Length"
-    else:
-        return "Short"
-    
-def has_enough_ball_movement(trajectory_points, min_distance=40):
-    if len(trajectory_points) < 2:
-        return False
-
-    start_x, start_y = trajectory_points[0]
-    end_x, end_y = trajectory_points[-1]
-
-    distance = ((end_x - start_x) ** 2 + (end_y - start_y) ** 2) ** 0.5
-
-    return distance >= min_distance

@@ -31,8 +31,9 @@ Dev-only (gated by `SHOW_DEV_PAGES=False` in `main.py`): Field Setup Lab, Datase
 | Layer | Modules |
 |-------|---------|
 | UI / orchestration | `video_analysis.py`, `analysis_helpers.py`, `components.py`, `interactive_field_map.py` (setup only) |
+| Shared video pipeline | `video_pipeline/video_reader.py`, `detection_pipeline.py`, `report_pipeline.py`, `annotation_writer.py`, `performance_timer.py` |
 | Smart pipeline | `smart_pipeline.py`, `analysis_speed.py` |
-| Detection timeline | `frame_detection_utils.py`, `bat_detection.py`, ball/stump ROI helpers in `video_analysis.py` |
+| Detection timeline | `frame_detection_utils.py`, `bat_detection.py`, ball/stump ROI helpers in `video_pipeline/detection_pipeline.py` |
 | Tracking | `ball_tracking_utils.py` |
 | Reports | `impact_detection.py`, `shot_classification.py`, `shot_direction.py`, `outcome_prediction.py`, `delivery_enrichment.py` |
 | Agents | `observer_timeline.py`, `vision_agent.py` |
@@ -44,7 +45,9 @@ Flow: **video → single read loop → shared `frame_detections` → observer ti
 
 ### Live Session module stack
 
-Shares: `cricket_agent`, `field_zones` (internal context only), `ball_tracking_utils`, `model_loader`, `interactive_field_map`, and **imports detection helpers from `video_analysis.py`** for recorded delivery processing.
+Shares: `cricket_agent`, `field_zones` (internal context only),
+`ball_tracking_utils`, `model_loader`, `interactive_field_map`, and the reusable
+`video_pipeline` modules. It no longer imports `ui/video_analysis.py`.
 
 ### Session Results module stack
 
@@ -68,7 +71,9 @@ Shares: `cricket_agent`, `field_zones` (internal context only), `ball_tracking_u
 
 **Repeated work still present (documented, not changed in this pass):**
 
-- `video_analysis.py` monolith (~3k lines) — Live Session cross-imports increase coupling
+- The mature frame loops still live in `video_analysis.py`; shared detection,
+  report, video I/O, annotation, and timing behavior has moved to
+  `video_pipeline/`. Loop extraction remains a focused follow-up.
 - Ensemble mode may load multiple YOLO weights
 - Path-based and registry-based caches can duplicate the same weights
 
@@ -196,7 +201,8 @@ streamlit run main.py
 
 ## 8. Risky areas left untouched
 
-- `video_analysis.py` / `live_session.py` monoliths and cross-imports
+- The page modules still contain mature frame loops, but the Live Session to
+  Video Analysis cross-import has been removed
 - Internal `generate_wagon_wheel_data()` (not rendered as map; used for field history context)
 - Bat refinement second video pass near impact
 - Ensemble multi-model mode

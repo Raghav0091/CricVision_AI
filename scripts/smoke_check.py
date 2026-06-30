@@ -33,6 +33,11 @@ def main() -> int:
     importlib.import_module("Backends.src.models.model_registry")
     importlib.import_module("Backends.src.models.model_loader")
     importlib.import_module("Backends.src.storage.session_store")
+    importlib.import_module("Backends.src.video_pipeline.video_reader")
+    importlib.import_module("Backends.src.video_pipeline.detection_pipeline")
+    importlib.import_module("Backends.src.video_pipeline.report_pipeline")
+    importlib.import_module("Backends.src.video_pipeline.annotation_writer")
+    importlib.import_module("Backends.src.video_pipeline.performance_timer")
 
     from Backends.src.agents.observer_timeline import build_observer_timeline
     from Backends.src.agents.vision_agent import run_vision_agent
@@ -42,6 +47,7 @@ def main() -> int:
     from Backends.src.analysis.shot_direction import estimate_shot_direction_zone
     from Backends.src.models.model_registry import MODEL_REGISTRY
     from Backends.src.storage.session_store import load_session_results, normalize_session_result
+    from Backends.src.video_pipeline.report_pipeline import build_video_reports
 
     expected_keys = {
         "current_best",
@@ -84,6 +90,16 @@ def main() -> int:
         fps=25,
     )
     assert agent["agent_quality"]
+
+    pipeline_reports = build_video_reports(
+        timeline,
+        fps=25,
+        total_frames=2,
+        batter_handedness="right",
+        delivery_report={"estimated_line": "Middle"},
+    )
+    assert pipeline_reports["observer_timeline"]["processed_frames"] == 2
+    assert pipeline_reports["agent_result"]["agent_quality"]
 
     print("Smoke checks passed")
     return 0

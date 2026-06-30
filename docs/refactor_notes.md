@@ -14,6 +14,8 @@ Production navigation (`main.py`, `SHOW_DEV_PAGES=False`):
 
 Analysis stack:
 
+- Video pipeline: `video_pipeline/video_reader.py`, `detection_pipeline.py`,
+  `report_pipeline.py`, `annotation_writer.py`, `performance_timer.py`
 - Smart pipeline: `analysis/smart_pipeline.py`, `analysis/analysis_speed.py`
 - Detection timeline helpers: `analysis/frame_detection_utils.py` (new)
 - Reports: `impact_detection.py`, `shot_classification.py`, `shot_direction.py`, `outcome_prediction.py`, `delivery_enrichment.py`
@@ -66,10 +68,32 @@ Dev-only pages remain gated behind `SHOW_DEV_PAGES`: `field_map.py`, `datasets_p
 
 ## Not removed (risky / future work)
 
-- `video_analysis.py` monolith (~3k lines): Live Session imports detection helpers from it. Splitting into `detection_pipeline.py` is deferred to avoid regressions.
+- The two established frame loops remain in `video_analysis.py` for this safe
+  pass. Shared model, ROI, annotation, report, video I/O, and timing helpers now
+  resolve through `video_pipeline/`; moving the loops themselves is the next
+  isolated refactor.
 - Duplicate `DETECTION_PRESETS` in Video Analysis and Live Session: low risk duplication; consolidate later.
-- Path-based `load_yolo_model()` in `video_analysis.py` alongside registry loader: ensemble mode still uses both caches.
+- The duplicate shared helper definitions were removed from `video_analysis.py`;
+  its established frame loops now call `video_pipeline` implementations.
 - `player_frame_stride` in smart settings: reserved for future player model wiring.
+
+## Video pipeline extraction
+
+- `detection_pipeline.py` owns lazy model selection, class mapping, ensemble
+  loading, ROI detection, local recovery, calibration, and line/length helpers.
+- `report_pipeline.py` normalizes one shared `frame_detections` timeline and
+  builds observer, impact, shot, direction, outcome, and agent results without
+  YOLO inference.
+- `annotation_writer.py` owns labels, ROI overlays, review frames, browser MP4
+  conversion, and optional impact-marker rewriting.
+- `video_reader.py` owns safe opening, metadata, iteration, first-frame
+  extraction, and recorded-frame writing.
+- `performance_timer.py` owns the stable performance profile schema.
+- Live Session no longer imports any helper from `ui/video_analysis.py`.
+- Model files, local-first/Hugging Face fallback, Streamlit resource caching,
+  and lazy-only `shot_classifier.keras` behavior are unchanged.
+- Internal field context/history remains available; production map rendering was
+  not reintroduced.
 
 ## Security checks
 

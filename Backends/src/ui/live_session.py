@@ -30,6 +30,27 @@ from Backends.src.tracking.ball_tracking_utils import (
 )
 from Backends.src.models.model_loader import get_cached_yolo_model
 from Backends.src.models.model_registry import get_model_info, get_model_path
+from Backends.src.video_pipeline.annotation_writer import (
+    convert_to_browser_mp4,
+    draw_label,
+    draw_pitch_roi,
+    draw_search_roi,
+    save_review_frame,
+)
+from Backends.src.video_pipeline.detection_pipeline import (
+    estimate_length_from_bounce,
+    estimate_line_from_stumps,
+    get_available_ensemble_model_names,
+    get_nearest_stump_detections,
+    has_enough_ball_movement,
+    load_detection_model,
+    load_ensemble_models,
+    map_model_classes,
+    run_local_redetection,
+    run_pitch_roi_detection,
+)
+from Backends.src.video_pipeline.report_pipeline import build_video_reports
+from Backends.src.video_pipeline.video_reader import write_video_frames
 
 
 CRICKET_OBJECTS_MODEL_PATH = Path("Models/cricket_objects/best.pt")
@@ -71,8 +92,6 @@ def get_live_model_options():
             "ensemble": False,
         },
     }
-    from Backends.src.ui.video_analysis import get_available_ensemble_model_names
-
     if len(get_available_ensemble_model_names()) >= 2:
         options[ENSEMBLE_MODEL_NAME] = {
             "path": None,
@@ -132,23 +151,7 @@ def create_delivery_recorder_class(recording_state):
 
 
 def write_video(frames, output_path, fps=DEFAULT_RECORDING_FPS):
-    if not frames:
-        return False
-
-    height, width = frames[0].shape[:2]
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
-
-    if not writer.isOpened():
-        return False
-
-    for frame in frames:
-        writer.write(frame)
-
-    writer.release()
-    return True
+    return write_video_frames(frames, output_path, fps=fps)
 
 
 def collect_detections(result, class_names, get_box_center, ball_confidence):
@@ -352,23 +355,6 @@ def process_recorded_delivery(
     from Backends.src.analysis.impact_detection import (
         detect_bat_ball_impact,
         save_impact_frame_preview,
-    )
-    from Backends.src.analysis.shot_classification import classify_shot_type
-    from Backends.src.ui.video_analysis import (
-        convert_to_browser_mp4,
-        draw_label,
-        draw_pitch_roi,
-        draw_search_roi,
-        estimate_length_from_bounce,
-        estimate_line_from_stumps,
-        get_nearest_stump_detections,
-        has_enough_ball_movement,
-        load_ensemble_models,
-        load_detection_model,
-        map_model_classes,
-        run_local_redetection,
-        run_pitch_roi_detection,
-        save_review_frame,
     )
 
     if not frames:
@@ -821,28 +807,26 @@ def process_recorded_delivery(
         )
         if preview_path is not None:
             impact_info["impact_frame_image_path"] = str(preview_path)
-    shot_info = classify_shot_type(
-        impact_frame_detections,
-        impact_info,
-        batter_handedness=batter_handedness,
-        fps=fps,
-    )
-    from Backends.src.analysis.delivery_enrichment import run_post_shot_pipeline
-
     delivery_report = {
         "estimated_line": estimated_line,
         "estimated_length": estimated_length,
         "ball_detection_rate": ball_detection_rate,
         "overall_tracking_quality": overall_tracking_quality,
     }
-    direction_info, outcome_info, agent_info, enrichment = run_post_shot_pipeline(
+    reports = build_video_reports(
         impact_frame_detections,
-        impact_info,
-        shot_info,
-        batter_handedness,
-        fps,
+        fps=fps,
+        total_frames=total_frames,
+        batter_handedness=batter_handedness,
         delivery_report=delivery_report,
+        impact_result=impact_info,
     )
+    impact_info = reports["impact_result"]
+    shot_info = reports["shot_result"]
+    direction_info = reports["direction_result"]
+    outcome_info = reports["outcome_result"]
+    agent_info = reports["agent_result"]
+    enrichment = reports["enrichment"]
 
     wagon_wheel = generate_wagon_wheel_data(
         ball_positions,
@@ -910,6 +894,9 @@ def process_recorded_delivery(
         "camera_view": camera_view,
         "ball_detection_difficult": ball_detection_rate < 35 or low_confidence_ball_frames > 0,
         "review_frame_count": review_frame_count,
+        "frame_detections": reports["frame_detections"],
+        "impact_frame_detections": reports["frame_detections"],
+        "observer_timeline": reports["observer_timeline"],
         "impact_info": impact_info,
         "shot_info": shot_info,
         "direction_info": direction_info,
