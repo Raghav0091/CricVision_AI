@@ -94,7 +94,7 @@ def best_detection_center(detections):
         except (TypeError, ValueError, IndexError):
             pass
 
-    bbox = best.get("bbox") or best.get("box")
+    bbox = best.get("bbox") or best.get("box") or best.get("xyxy")
     try:
         if bbox is None or len(bbox) < 4:
             return None
