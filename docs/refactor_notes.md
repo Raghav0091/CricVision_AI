@@ -95,6 +95,23 @@ Dev-only pages remain gated behind `SHOW_DEV_PAGES`: `field_map.py`, `datasets_p
 - Internal field context/history remains available; production map rendering was
   not reintroduced.
 
+## Synthetic pipeline integration tests
+
+- `tests/helpers/synthetic_video.py` creates a 24-frame, 320x240 cricket-like
+  clip under pytest `tmp_path`, with codec-safe skipping.
+- `video_reader.py` is covered for opening, metadata, iteration, and invalid
+  paths.
+- `report_pipeline.py` is covered with ball, bat, stump, impact, and post-impact
+  dummy detections, including sparse-data safety.
+- `annotation_writer.py` is covered for enabled output, disabled output, and
+  missing detections.
+- Pipeline import tests guard against YOLO/Keras imports, model-loader calls,
+  Hugging Face downloads, and an active Streamlit runtime requirement.
+- Smoke and performance scripts now exercise the complete report contract.
+- Tests need no model files, GPU, camera, `HF_TOKEN`, or network access.
+- Real YOLO accuracy and representative real-video codec checks remain
+  manual/local only.
+
 ## Security checks
 
 - No secrets printed in UI or logs from this refactor.

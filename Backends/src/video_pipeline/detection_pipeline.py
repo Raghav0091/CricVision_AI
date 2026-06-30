@@ -7,10 +7,15 @@ This module is import-safe: YOLO weights are loaded only by
 from __future__ import annotations
 
 import time
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
-import streamlit as st
+
+try:
+    import streamlit as st
+except ImportError:
+    st = None
 
 from Backends.src.analysis.field_zones import normalize_handedness
 from Backends.src.models.model_loader import get_cached_yolo_model
@@ -25,14 +30,20 @@ ENSEMBLE_MODEL_NAME = "Ensemble: All Ball Models + Stumps"
 LOW_CONFIDENCE_REVIEW_THRESHOLD = 0.35
 
 
-@st.cache_resource
-def load_yolo_model(model_path_str):
+def _load_yolo_model(model_path_str):
     model_path = Path(model_path_str)
     if not model_path.exists():
         return None
     from ultralytics import YOLO
 
     return YOLO(str(model_path))
+
+
+load_yolo_model = (
+    st.cache_resource(_load_yolo_model)
+    if st is not None
+    else lru_cache(maxsize=None)(_load_yolo_model)
+)
 
 
 def get_ensemble_model_configs():

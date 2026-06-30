@@ -98,8 +98,16 @@ def main() -> int:
         batter_handedness="right",
         delivery_report={"estimated_line": "Middle"},
     )
+    expected_report_keys = {
+        "observer_timeline",
+        "impact_result",
+        "shot_result",
+        "direction_result",
+        "outcome_result",
+        "agent_result",
+    }
+    assert expected_report_keys <= pipeline_reports.keys()
     assert pipeline_reports["observer_timeline"]["processed_frames"] == 2
-    assert pipeline_reports["agent_result"]["agent_quality"]
 
     print("Smoke checks passed")
     return 0

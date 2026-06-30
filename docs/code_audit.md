@@ -168,8 +168,12 @@ Shares: `cricket_agent`, `field_zones` (internal context only),
 | Outcome prediction | None | `tests/test_outcome_prediction.py` |
 | Session store | None | `tests/test_session_store.py` |
 | Module imports | None | `tests/test_imports.py` |
+| Video reader | None | Tiny generated clip in `tests/test_video_pipeline_reader.py` |
+| Report pipeline | Unit-only timeline | Synthetic delivery integration in `tests/test_video_pipeline_report_integration.py` |
+| Annotation writer | None | Dummy frames/detections in `tests/test_video_pipeline_annotation_writer.py` |
+| Pipeline import side effects | Basic loader spy | YOLO/Keras/Hugging Face import and download guards |
 | End-to-end smoke | None | `scripts/smoke_check.py` |
-| Performance helpers | None | `scripts/performance_check.py` |
+| Performance helpers | None | Includes outcome and complete report-pipeline timing |
 | CI | None | `.github/workflows/tests.yml` |
 | Video Analysis UI | Manual only | Still manual (Streamlit) |
 | Live Session / camera | Manual only | Still manual |
@@ -179,10 +183,15 @@ Shares: `cricket_agent`, `field_zones` (internal context only),
 
 ```
 python -m compileall -q Backends   → pass
-python -m pytest -q                → 39 passed, 1 skipped (video_analysis import if imageio_ffmpeg missing locally; installed in requirements.txt / CI)
+python -m pytest -q                -> 47 passed, 3 skipped locally (optional OpenCV/imageio packages absent)
 python scripts/smoke_check.py      → Smoke checks passed
-python scripts/performance_check.py --frames 200 → pass (~0.2–0.7 ms per helper on dummy data)
+python scripts/performance_check.py -> pass, including the synthetic report pipeline
 ```
+
+Synthetic videos are created only under pytest `tmp_path`; none are committed.
+These tests require no YOLO/Keras weights, GPU, camera, `HF_TOKEN`, or Hugging
+Face download. Real-model detection accuracy and real-video codec coverage
+remain manual/local checks with the full Python 3.11 dependencies installed.
 
 ---
 

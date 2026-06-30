@@ -58,6 +58,81 @@ def draw_ball_detections(frame, ball_detections):
         )
 
 
+def _draw_box_detections(frame, detections, color, label):
+    for detection in detections or []:
+        box = detection.get("bbox") or detection.get("box")
+        if box is None or len(box) < 4:
+            continue
+        x1, y1, x2, y2 = (int(value) for value in box[:4])
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        draw_label(frame, label, x1, y1, color)
+
+
+def write_annotated_video(
+    frames,
+    output_path,
+    *,
+    fps=25,
+    frame_detections=None,
+    enabled=True,
+):
+    """Write tiny or production frames with optional shared-timeline overlays."""
+    if not enabled:
+        return None
+
+    if frames is None:
+        return None
+    frames = list(frames)
+    if not frames:
+        return None
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    height, width = frames[0].shape[:2]
+    writer = cv2.VideoWriter(
+        str(output_path),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps,
+        (width, height),
+    )
+    if not writer.isOpened():
+        writer.release()
+        return None
+
+    detections_by_frame = {}
+    if isinstance(frame_detections, dict):
+        detections_by_frame = frame_detections
+    else:
+        for fallback_index, item in enumerate(frame_detections or []):
+            if isinstance(item, dict):
+                detections_by_frame[int(item.get("frame_index", fallback_index))] = item
+
+    try:
+        for frame_index, raw_frame in enumerate(frames):
+            frame = raw_frame.copy()
+            detections = detections_by_frame.get(frame_index, {})
+            draw_ball_detections(frame, detections.get("ball_detections"))
+            _draw_box_detections(
+                frame,
+                detections.get("bat_detections"),
+                (0, 200, 0),
+                "bat",
+            )
+            _draw_box_detections(
+                frame,
+                detections.get("stump_detections"),
+                (255, 100, 0),
+                "stump",
+            )
+            writer.write(frame)
+    finally:
+        writer.release()
+
+    if not output_path.is_file() or output_path.stat().st_size == 0:
+        return None
+    return output_path
+
+
 def convert_to_browser_mp4(input_path, output_path):
     import imageio_ffmpeg
 

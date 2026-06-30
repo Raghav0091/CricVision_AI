@@ -39,7 +39,9 @@ def benchmark_helpers(frame_count: int = 500, repeats: int = 5) -> dict[str, flo
     from Backends.src.agents.observer_timeline import build_observer_timeline
     from Backends.src.analysis.frame_detection_utils import normalize_frame_detections
     from Backends.src.analysis.impact_detection import detect_bat_ball_impact
+    from Backends.src.analysis.outcome_prediction import predict_shot_outcome
     from Backends.src.analysis.shot_direction import estimate_shot_direction_zone
+    from Backends.src.video_pipeline.report_pipeline import build_video_reports
 
     raw = _build_dummy_timeline(frame_count)
     timings: dict[str, float] = {}
@@ -61,15 +63,44 @@ def benchmark_helpers(frame_count: int = 500, repeats: int = 5) -> dict[str, flo
     timings["impact_detection_ms"] = ((time.perf_counter() - start) / repeats) * 1000
 
     impact = detect_bat_ball_impact(frames, fps=25)
+    shot_result = {"shot_type": "Defence", "shot_confidence": "Medium"}
     start = time.perf_counter()
     for _ in range(repeats):
         estimate_shot_direction_zone(
             frames,
             impact,
-            shot_result={"shot_type": "Defence", "shot_confidence": "Medium"},
+            shot_result=shot_result,
             batter_handedness="right",
         )
     timings["shot_direction_ms"] = ((time.perf_counter() - start) / repeats) * 1000
+
+    direction = estimate_shot_direction_zone(
+        frames,
+        impact,
+        shot_result=shot_result,
+        batter_handedness="right",
+    )
+    start = time.perf_counter()
+    for _ in range(repeats):
+        predict_shot_outcome(
+            frames,
+            impact,
+            shot_result,
+            fps=25,
+            batter_handedness="right",
+            direction_result=direction,
+        )
+    timings["outcome_prediction_ms"] = ((time.perf_counter() - start) / repeats) * 1000
+
+    start = time.perf_counter()
+    for _ in range(repeats):
+        build_video_reports(
+            frames,
+            fps=25,
+            total_frames=frame_count,
+            batter_handedness="right",
+        )
+    timings["report_pipeline_ms"] = ((time.perf_counter() - start) / repeats) * 1000
 
     return timings
 
