@@ -17,6 +17,10 @@ def temp_session_store(tmp_path, monkeypatch):
         "Backends.src.storage.session_store.SESSION_DATA_DIR",
         tmp_path,
     )
+    monkeypatch.setattr(
+        "Backends.src.storage.session_store.SESSION_CLIPS_DIR",
+        tmp_path / "clips",
+    )
     return session_file
 
 

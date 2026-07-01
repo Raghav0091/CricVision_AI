@@ -5,16 +5,12 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from Backends.src.analysis.smart_pipeline import get_smart_analysis_settings, resolve_smart_mode
+from Backends.src.analysis.smart_pipeline import get_smart_analysis_settings
 
 
 def get_analysis_mode_settings(mode: str) -> dict[str, Any]:
     """Return smart pipeline settings (legacy wrapper)."""
     return get_smart_analysis_settings(mode)
-
-
-def resolve_analysis_mode(mode: str) -> str:
-    return resolve_smart_mode(mode)
 
 
 def resolve_frame_limit(enabled: bool, choice) -> int | None:

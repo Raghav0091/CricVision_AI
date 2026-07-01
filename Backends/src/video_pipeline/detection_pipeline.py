@@ -18,16 +18,18 @@ except ImportError:
     st = None
 
 from Backends.src.analysis.field_zones import normalize_handedness
+from Backends.src.config.constants import (
+    ENSEMBLE_MODEL_NAME,
+    LOW_CONFIDENCE_REVIEW_THRESHOLD,
+)
+from Backends.src.config.paths import (
+    BALL_MODEL_PATH,
+    CRICKET_OBJECTS_MODEL_PATH,
+    EXTERNAL_BALL_MODEL_PATH,
+)
 from Backends.src.models.model_loader import get_cached_yolo_model
 from Backends.src.models.model_registry import get_model_path
 from Backends.src.utils.cv2_loader import cv2
-from Backends.src.video_pipeline.annotation_writer import draw_label
-
-BALL_MODEL_PATH = Path("Models/ball_detector/best.pt")
-CRICKET_OBJECTS_MODEL_PATH = Path("Models/cricket_objects/best.pt")
-EXTERNAL_BALL_MODEL_PATH = Path("Models/cricket_objects/best_external.pt")
-ENSEMBLE_MODEL_NAME = "Ensemble: All Ball Models + Stumps"
-LOW_CONFIDENCE_REVIEW_THRESHOLD = 0.35
 
 
 def _load_yolo_model(model_path_str):

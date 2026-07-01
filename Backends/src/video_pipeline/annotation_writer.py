@@ -6,9 +6,9 @@ import csv
 import subprocess
 from pathlib import Path
 
+from Backends.src.config.paths import REVIEW_FRAMES_DIR
 from Backends.src.utils.cv2_loader import cv2
 
-REVIEW_FRAMES_DIR = Path("outputs/review_frames")
 REVIEW_FRAMES_CSV = REVIEW_FRAMES_DIR / "review_frames.csv"
 
 

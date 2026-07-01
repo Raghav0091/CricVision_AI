@@ -37,6 +37,7 @@ def _build_dummy_timeline(frame_count: int):
 
 def benchmark_helpers(frame_count: int = 500, repeats: int = 5) -> dict[str, float]:
     from Backends.src.agents.observer_timeline import build_observer_timeline
+    from Backends.src.agents.tracking_repair_agent import repair_ball_tracking
     from Backends.src.analysis.frame_detection_utils import normalize_frame_detections
     from Backends.src.analysis.impact_detection import detect_bat_ball_impact
     from Backends.src.analysis.outcome_prediction import predict_shot_outcome
@@ -52,6 +53,14 @@ def benchmark_helpers(frame_count: int = 500, repeats: int = 5) -> dict[str, flo
     timings["normalize_frame_detections_ms"] = ((time.perf_counter() - start) / repeats) * 1000
 
     frames = normalize_frame_detections(raw)
+    repair_frames = _build_dummy_timeline(200)
+    start = time.perf_counter()
+    for _ in range(repeats):
+        repair_ball_tracking(repair_frames, frame_width=1280, frame_height=720)
+    timings["tracking_repair_200_frames_ms"] = (
+        (time.perf_counter() - start) / repeats
+    ) * 1000
+
     start = time.perf_counter()
     for _ in range(repeats):
         build_observer_timeline(frames, total_frames=frame_count, fps=25)

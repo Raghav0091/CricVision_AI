@@ -21,6 +21,7 @@ def test_normalize_session_result_handles_old_records():
     assert normalized["impact_frame"] == 12
     assert normalized["shot_type"] == "Unknown"
     assert normalized["smart_pipeline_used"] is False
+    assert normalized["visual_observer_repair"] == {}
 
 
 def test_save_session_result_writes_lightweight_json(temp_session_store):
@@ -37,6 +38,27 @@ def test_save_session_result_writes_lightweight_json(temp_session_store):
     payload = json.loads(temp_session_store.read_text(encoding="utf-8"))
     assert isinstance(payload["results"], list)
     assert payload["results"][-1]["video_name"] == "clip.mp4"
+
+
+def test_save_session_result_preserves_visual_observer_summary(temp_session_store):
+    saved = save_session_result(
+        {
+            "id": "repair-id",
+            "visual_observer_repair": {
+                "original_coverage": 60.0,
+                "repaired_coverage": 80.0,
+                "missing_frames": 2,
+                "repaired_frames": 2,
+                "suspicious_detections": 1,
+                "repair_confidence": "Medium",
+                "agent_decision": "Short gaps were repaired.",
+                "notes": ["2D repair only."],
+            },
+        }
+    )
+
+    assert saved["visual_observer_repair"]["repaired_frames"] == 2
+    assert saved["visual_observer_repair"]["suspicious_detections"] == 1
 
 
 def test_corrupt_json_does_not_crash(temp_session_store):

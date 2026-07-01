@@ -1,12 +1,10 @@
-import tempfile
 import json
 import time
 from datetime import datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import streamlit as st
-
-from Backends.src.utils.cv2_loader import cv2
 
 from Backends.src.analysis.cricket_agent import (
     calculate_detection_quality,
@@ -22,6 +20,14 @@ from Backends.src.analysis.field_zones import (
     save_field_setup,
     suggest_field_adjustment,
 )
+from Backends.src.config.constants import DETECTION_PRESETS
+from Backends.src.config.paths import (
+    PROCESSED_VIDEO_DIR,
+    REPORTS_DIR,
+    REVIEW_FRAMES_DIR,
+    VIDEO_ANALYSIS_OUTPUT_DIR,
+)
+from Backends.src.utils.cv2_loader import cv2
 from Backends.src.tracking.ball_tracking_utils import (
     BallKalmanTracker,
     calculate_tracking_quality,
@@ -36,6 +42,10 @@ from Backends.src.models.model_registry import (
     get_model_path,
     validate_model_paths,
 )
+from Backends.src.ui.analysis_helpers import (
+    ensure_delivery_report_fields,
+    persist_result_to_session as _persist_result_to_session,
+)
 from Backends.src.video_pipeline import detection_pipeline as shared_detection
 from Backends.src.video_pipeline import annotation_writer as shared_annotations
 from Backends.src.video_pipeline.performance_timer import (
@@ -48,25 +58,8 @@ from Backends.src.video_pipeline.video_reader import (
 )
 
 
-OUTPUT_DIR = Path("outputs/video_analysis")
-PROCESSED_VIDEO_DIR = Path("outputs/processed_videos")
-REPORTS_DIR = Path("outputs/reports")
-REVIEW_FRAMES_DIR = Path("outputs/review_frames")
+OUTPUT_DIR = VIDEO_ANALYSIS_OUTPUT_DIR
 MAX_REVIEW_FRAMES_PER_ANALYSIS = 80
-DETECTION_PRESETS = {
-    "Fast Bowling Mode": {
-        "imgsz": 960,
-        "confidence": 0.15,
-    },
-    "Balanced Mode": {
-        "imgsz": 768,
-        "confidence": 0.25,
-    },
-    "High Precision Mode": {
-        "imgsz": 960,
-        "confidence": 0.35,
-    },
-}
 
 # Shared backend implementations used by the established frame loops and UI.
 get_model_options = shared_detection.get_model_options
@@ -94,12 +87,6 @@ convert_to_browser_mp4 = shared_annotations.convert_to_browser_mp4
 _add_impact_marker_to_video = shared_annotations.add_impact_marker_to_video
 _draw_ball_detections = shared_annotations.draw_ball_detections
 extract_first_video_frame = read_first_video_frame
-
-
-def _persist_result_to_session(result, source_type, video_name=None):
-    from Backends.src.ui.analysis_helpers import persist_result_to_session
-
-    return persist_result_to_session(result, source_type, video_name=video_name)
 
 
 def save_batting_report(result, analysis_mode):
@@ -383,6 +370,8 @@ def process_batting_video(
         total_frames=frame_index,
         batter_handedness=None,
         impact_result=impact_info,
+        frame_width=width,
+        frame_height=height,
     )
     impact_info = reports["impact_result"]
     shot_info = reports["shot_result"]
@@ -391,6 +380,7 @@ def process_batting_video(
     agent_info = reports["agent_result"]
     enrichment = reports["enrichment"]
     observer_timeline = reports["observer_timeline"]
+    visual_observer_repair = reports["visual_observer_repair"]
     performance["report_generation_time_sec"] = reports["report_generation_time_sec"]
     performance["observer_timeline_time_sec"] = reports["observer_timeline_time_sec"]
     finish_performance_profile(
@@ -414,8 +404,10 @@ def process_batting_video(
         "ball_detection_rate": (ball_detected_frames / frame_index) * 100,
         "bat_detection_rate": (bat_detected_frames / frame_index) * 100,
         "impact_info": impact_info,
-        "frame_detections": frame_detections,
-        "impact_frame_detections": frame_detections,
+        "frame_detections": reports["frame_detections"],
+        "raw_frame_detections": reports["raw_frame_detections"],
+        "impact_frame_detections": reports["frame_detections"],
+        "visual_observer_repair": visual_observer_repair,
         "observer_timeline": observer_timeline,
         "performance_profile": performance,
         "speed_mode": speed_mode,
@@ -501,12 +493,6 @@ def show_manual_pitch_point_inputs(frame):
         points.append((int(point_x), int(point_y)))
 
     return points
-
-
-def ensure_delivery_report_fields(result):
-    from Backends.src.ui.analysis_helpers import ensure_delivery_report_fields as apply_defaults
-
-    apply_defaults(result)
 
 
 def show_cricket_delivery_report(result):
@@ -1310,6 +1296,8 @@ def process_video(
         batter_handedness=batter_handedness,
         delivery_report=delivery_report,
         impact_result=impact_info,
+        frame_width=width,
+        frame_height=height,
     )
     impact_info = reports["impact_result"]
     shot_info = reports["shot_result"]
@@ -1318,6 +1306,7 @@ def process_video(
     agent_info = reports["agent_result"]
     enrichment = reports["enrichment"]
     observer_timeline = reports["observer_timeline"]
+    visual_observer_repair = reports["visual_observer_repair"]
     performance["report_generation_time_sec"] += reports["report_generation_time_sec"]
     performance["observer_timeline_time_sec"] = reports["observer_timeline_time_sec"]
     finish_performance_profile(
@@ -1431,8 +1420,10 @@ def process_video(
         "camera_view": camera_view,
         "review_frame_count": review_frame_count,
         "review_frames_dir": REVIEW_FRAMES_DIR,
-        "frame_detections": frame_detections,
-        "impact_frame_detections": frame_detections,
+        "frame_detections": reports["frame_detections"],
+        "raw_frame_detections": reports["raw_frame_detections"],
+        "impact_frame_detections": reports["frame_detections"],
+        "visual_observer_repair": visual_observer_repair,
         "observer_timeline": observer_timeline,
         "performance_profile": performance,
         "speed_mode": speed_mode,
@@ -1473,6 +1464,7 @@ def show_batting_analysis_results(result):
         render_save_status,
         render_shot_direction_report,
         render_shot_report,
+        render_visual_observer_repair_card,
         render_vision_agent_report,
         video_preview_card,
     )
@@ -1497,6 +1489,7 @@ def show_batting_analysis_results(result):
     else:
         st.warning("Processed video preview is not available for this result.")
 
+    render_visual_observer_repair_card(result)
     render_observer_timeline_report(result)
     render_delivery_report(result)
     render_impact_report(result)
@@ -1520,6 +1513,7 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
         render_save_status,
         render_shot_direction_report,
         render_shot_report,
+        render_visual_observer_repair_card,
         render_vision_agent_report,
         video_preview_card,
     )
@@ -1551,6 +1545,7 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
     else:
         st.warning("Processed video preview is not available for this result.")
 
+    render_visual_observer_repair_card(result)
     render_observer_timeline_report(result)
     render_delivery_report(result)
     render_impact_report(result)
@@ -1787,55 +1782,77 @@ def show_video_analysis_page():
                     manual_pitch_points = show_manual_pitch_point_inputs(first_frame)
 
         uploaded_video.seek(0)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_input:
-            temp_input.write(uploaded_video.read())
-            input_video_path = Path(temp_input.name)
+        uploaded_bytes = uploaded_video.read()
+        if not uploaded_bytes:
+            st.error("The uploaded video is empty. Choose a non-empty cricket clip.")
+            st.session_state.video_analysis_result = None
+            return
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         PROCESSED_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
         raw_output_path = PROCESSED_VIDEO_DIR / f"raw_cricvision_analysis_{timestamp}.mp4"
         browser_output_path = PROCESSED_VIDEO_DIR / f"cricvision_analysis_{timestamp}.mp4"
 
-        with st.spinner("Analyzing delivery..."):
-            if analysis_mode == "Batting Analysis":
-                result = process_batting_video(
-                    video_path=input_video_path,
-                    output_path=raw_output_path,
-                    ball_model_key=selected_ball_model_key,
-                    bat_model_key=selected_bat_model_key,
-                    confidence=confidence,
-                    speed_mode=speed_mode,
-                    max_frames=max_frames,
-                    generate_processed_video=generate_processed_video,
-                )
-            else:
-                result = process_video(
-                    video_path=input_video_path,
-                    output_path=raw_output_path,
-                    model_path=selected_model_path,
-                    model_key=selected_model_key,
-                    confidence=confidence,
-                    imgsz=image_size,
-                    use_ensemble=use_ensemble,
-                    show_pitch_roi=show_pitch_roi,
-                    calibration_mode=calibration_mode,
-                    manual_pitch_points=manual_pitch_points,
-                    shot_trajectory_mode=shot_trajectory_mode,
-                    manual_contact_frame=manual_contact_frame,
-                    field_setup=field_setup,
-                    bat_model_key=selected_bat_model_key,
-                    speed_mode=speed_mode,
-                    max_frames=max_frames,
-                    generate_processed_video=generate_processed_video,
-                )
-            result["analysis_mode"] = analysis_mode
-            result["active_preset"] = preset_name
-            result["active_model"] = selected_model_name
-            result["ball_model_used"] = selected_model_name
-            result["show_performance_details"] = show_performance
+        upload_suffix = Path(uploaded_video.name or "").suffix.lower()
+        if upload_suffix not in {".mp4", ".mov", ".avi", ".mkv"}:
+            upload_suffix = ".mp4"
+        try:
+            with TemporaryDirectory(prefix="cricvision_upload_") as temp_dir:
+                input_video_path = Path(temp_dir) / f"uploaded_video{upload_suffix}"
+                input_video_path.write_bytes(uploaded_bytes)
 
-        if not result["success"]:
-            st.error(result["error"])
+                with st.spinner("Analyzing delivery..."):
+                    if analysis_mode == "Batting Analysis":
+                        result = process_batting_video(
+                            video_path=input_video_path,
+                            output_path=raw_output_path,
+                            ball_model_key=selected_ball_model_key,
+                            bat_model_key=selected_bat_model_key,
+                            confidence=confidence,
+                            speed_mode=speed_mode,
+                            max_frames=max_frames,
+                            generate_processed_video=generate_processed_video,
+                        )
+                    else:
+                        result = process_video(
+                            video_path=input_video_path,
+                            output_path=raw_output_path,
+                            model_path=selected_model_path,
+                            model_key=selected_model_key,
+                            confidence=confidence,
+                            imgsz=image_size,
+                            use_ensemble=use_ensemble,
+                            show_pitch_roi=show_pitch_roi,
+                            calibration_mode=calibration_mode,
+                            manual_pitch_points=manual_pitch_points,
+                            shot_trajectory_mode=shot_trajectory_mode,
+                            manual_contact_frame=manual_contact_frame,
+                            field_setup=field_setup,
+                            bat_model_key=selected_bat_model_key,
+                            speed_mode=speed_mode,
+                            max_frames=max_frames,
+                            generate_processed_video=generate_processed_video,
+                        )
+                    result["analysis_mode"] = analysis_mode
+                    result["active_preset"] = preset_name
+                    result["active_model"] = selected_model_name
+                    result["ball_model_used"] = selected_model_name
+                    result["show_performance_details"] = show_performance
+        except Exception as error:
+            print(f"Video analysis failed: {type(error).__name__}: {error}")
+            raw_output_path.unlink(missing_ok=True)
+            browser_output_path.unlink(missing_ok=True)
+            st.error(
+                "Video analysis could not complete. Check that the clip is readable "
+                "and uses a supported codec, then try again."
+            )
+            st.session_state.video_analysis_result = None
+            return
+
+        if not result.get("success"):
+            raw_output_path.unlink(missing_ok=True)
+            browser_output_path.unlink(missing_ok=True)
+            st.error(result.get("error", "Video analysis did not complete."))
             st.session_state.video_analysis_result = None
         else:
             try:
@@ -1864,6 +1881,8 @@ def show_video_analysis_page():
                 }
                 st.success("Analysis complete.")
             except Exception as error:
+                raw_output_path.unlink(missing_ok=True)
+                browser_output_path.unlink(missing_ok=True)
                 st.error(f"Video conversion failed: {error}")
                 st.session_state.video_analysis_result = None
 

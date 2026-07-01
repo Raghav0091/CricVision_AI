@@ -1,12 +1,8 @@
 import streamlit as st
-from pathlib import Path
 
+from Backends.src.config.paths import DATASETS_DIR, REVIEW_FRAMES_DIR
 from Backends.src.ui.components import metric_grid, model_status_card
 from Backends.src.ui.theme import render_page_header, render_section_title, render_feature_card
-
-
-REVIEW_FRAMES_DIR = Path("outputs/review_frames")
-
 
 def show_datasets_page():
     render_page_header(
@@ -61,7 +57,7 @@ def show_datasets_page():
 
     with st.expander("Advanced Paths", expanded=False):
         st.write(f"Review frames folder: `{REVIEW_FRAMES_DIR}`")
-        dataset_path = Path(r"C:\Dataset")
+        dataset_path = DATASETS_DIR
         st.write(f"Local dataset root: `{dataset_path}`")
         if dataset_path.exists():
             folders = [item.name for item in dataset_path.iterdir() if item.is_dir()]

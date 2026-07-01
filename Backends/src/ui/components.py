@@ -20,6 +20,7 @@ DEBUG_VISION_AGENT = False
 DEBUG_PERFORMANCE = False
 
 
+# LEGACY / NOT ACTIVE: Compatibility renderer for dev-only or future pages.
 def hero_section(title, subtitle, description):
     st.markdown(
         f"""
@@ -33,6 +34,7 @@ def hero_section(title, subtitle, description):
     )
 
 
+# LEGACY / NOT ACTIVE: Compatibility renderer for dev-only or future pages.
 def primary_action_card(title, description, button_label=None):
     st.markdown(
         f"""
@@ -306,6 +308,79 @@ def render_observer_timeline_report(timeline):
         st.info("Observer timeline data is not available for this result.")
 
 
+def render_visual_observer_repair_card(repair_report, compact=False):
+    """Render Visual Observer tracking-repair quality without map output."""
+    data = repair_report or {}
+    if isinstance(data, dict) and "visual_observer_repair" in data:
+        data = data.get("visual_observer_repair") or {}
+    if not isinstance(data, dict) or not data:
+        return
+
+    st.subheader("Visual Observer Repair")
+    confidence = data.get("repair_confidence", "Unknown")
+    if confidence == "High":
+        st.success(f"Repair confidence: {confidence}")
+    elif confidence == "Medium":
+        st.info(f"Repair confidence: {confidence}")
+    elif confidence == "Low":
+        st.warning(f"Repair confidence: {confidence}")
+    else:
+        st.info(f"Repair confidence: {_display_value(confidence)}")
+
+    if compact:
+        cols = st.columns(3)
+        cols[0].metric(
+            "Original Coverage",
+            _format_percentage(data.get("original_coverage")),
+        )
+        cols[1].metric(
+            "Repaired Coverage",
+            _format_percentage(data.get("repaired_coverage")),
+        )
+        cols[2].metric(
+            "Repaired Frames",
+            _display_value(data.get("repaired_frames")),
+        )
+    else:
+        cols = st.columns(3)
+        cols[0].metric(
+            "Original Ball Tracking Coverage",
+            _format_percentage(data.get("original_coverage")),
+        )
+        cols[1].metric(
+            "Repaired Ball Tracking Coverage",
+            _format_percentage(data.get("repaired_coverage")),
+        )
+        cols[2].metric(
+            "Missing Ball Frames",
+            _display_value(data.get("missing_frames")),
+        )
+
+        cols2 = st.columns(2)
+        cols2[0].metric(
+            "Repaired Frames",
+            _display_value(data.get("repaired_frames")),
+        )
+        cols2[1].metric(
+            "Suspicious / False Detections Downgraded",
+            _display_value(
+                data.get(
+                    "suspicious_detections",
+                    data.get("removed_or_downgraded_frames"),
+                )
+            ),
+        )
+
+    decision = data.get("agent_decision")
+    if decision:
+        st.info(f"Agent decision: {decision}")
+    notes = data.get("notes") or []
+    if isinstance(notes, str):
+        notes = [notes]
+    for note in notes:
+        st.caption(f"• {note}")
+
+
 def render_performance_details(result):
     """Render optional analysis performance metrics."""
     result = result or {}
@@ -565,6 +640,7 @@ def render_session_result_card(result: dict, expanded: bool = False):
                 st.info("Impact frame preview file not found")
 
         render_observer_timeline_report(report_view)
+        render_visual_observer_repair_card(report_view, compact=True)
         render_delivery_report(report_view)
         render_impact_report(report_view)
         render_impact_frame_preview(report_view)
@@ -589,6 +665,7 @@ def delivery_summary_card(result):
     analysis_report_card(result)
 
 
+# LEGACY / NOT ACTIVE: Compatibility renderer for dev-only or future pages.
 def report_history_card(report):
     st.markdown(
         f"""
@@ -641,6 +718,7 @@ def model_status_card():
             )
 
 
+# LEGACY / NOT ACTIVE: The active field setup card lives in interactive_field_map.py.
 def field_setup_card(title, body_html):
     st.markdown(
         f"""
@@ -653,11 +731,13 @@ def field_setup_card(title, body_html):
     )
 
 
+# LEGACY / NOT ACTIVE: Kept for optional developer-facing report details.
 def developer_details_expander(result):
     with st.expander("Developer Details", expanded=False):
         st.json(result)
 
 
+# LEGACY / NOT ACTIVE: Kept for optional coaching detail layouts.
 def coaching_details_expander(result):
     from Backends.src.analysis.cricket_agent import (
         detect_analysis_warnings,

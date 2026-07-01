@@ -1,14 +1,9 @@
-from pathlib import Path
-
 import streamlit as st
 
+from Backends.src.config.paths import REPORTS_DIR
 from Backends.src.models.model_registry import validate_model_paths
 from Backends.src.ui.components import metric_grid
 from Backends.src.ui.theme import render_page_header
-
-
-REPORTS_DIR = Path("outputs/reports")
-
 
 def _count_reports():
     if not REPORTS_DIR.exists():

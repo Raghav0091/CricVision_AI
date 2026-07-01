@@ -35,6 +35,12 @@ Dev-only pages remain gated behind `SHOW_DEV_PAGES`: `field_map.py`, `datasets_p
 | Duplicate session/report defaults | Consolidated into `ui/analysis_helpers.py` |
 | Eager `import cv2` in `bat_detection.py` | Moved to lazy import inside draw helpers |
 | `detection/yolo_detector.py` | Marked LEGACY; not imported |
+| `find_possible_impact_frame()` | Removed after caller/test audit; superseded by `detect_bat_ball_impact()` |
+| `run_direction_and_agent_review()` | Removed after caller/test audit; superseded by `run_post_shot_pipeline()` |
+| Duplicate page forwarding wrappers | Replaced with direct imports from `ui/analysis_helpers.py` |
+| Duplicate paths and detection presets | Consolidated into import-safe `config/paths.py` and `config/constants.py` |
+| Persistent uploaded-video temp file | Replaced with auto-cleaned `TemporaryDirectory` |
+| Machine-specific pytest temp/cache failure | Routed pytest temp/cache under ignored `outputs/` |
 
 ## Marked legacy / inactive (kept on disk)
 
@@ -42,8 +48,6 @@ Dev-only pages remain gated behind `SHOW_DEV_PAGES`: `field_map.py`, `datasets_p
 |------|-------------|
 | `Models/ball_detector/best.pt` | Legacy ensemble weight; file untouched |
 | `Models/cricket_objects/best_external.pt` | Legacy ensemble weight; file untouched |
-| `find_possible_impact_frame()` | Superseded by `detect_bat_ball_impact()` |
-| `run_direction_and_agent_review()` | Superseded by `run_post_shot_pipeline()` |
 | `smart_pipeline.crop_frame_with_roi()` | Placeholder for future safe ROI work |
 | `interactive_field_map.draw_field_map()` | Matplotlib preview; dev/debug only |
 | Registry keys `player_type`, `striker_segmentation`, `shot_classifier` | Registered + HF metadata; marked `experimental` / not wired |
@@ -72,7 +76,7 @@ Dev-only pages remain gated behind `SHOW_DEV_PAGES`: `field_map.py`, `datasets_p
   pass. Shared model, ROI, annotation, report, video I/O, and timing helpers now
   resolve through `video_pipeline/`; moving the loops themselves is the next
   isolated refactor.
-- Duplicate `DETECTION_PRESETS` in Video Analysis and Live Session: low risk duplication; consolidate later.
+- Detection presets and stable project paths now come from import-safe config modules.
 - The duplicate shared helper definitions were removed from `video_analysis.py`;
   its established frame loops now call `video_pipeline` implementations.
 - `player_frame_stride` in smart settings: reserved for future player model wiring.
@@ -127,3 +131,23 @@ Dev-only pages remain gated behind `SHOW_DEV_PAGES`: `field_map.py`, `datasets_p
 4. Video Analysis: upload clip, run Smart Balanced, confirm all reports render, no map outputs
 5. Session Results: save + reopen old records
 6. Live Session page loads without crash
+
+## Visual Observer Agent + 2D ball tracking repair
+
+- `agents/tracking_repair_agent.py` extracts the ball path, flags missing or
+  suspicious points, repairs only short bounded gaps, and returns a copied
+  repaired timeline plus repair statistics.
+- `agents/visual_observer_agent.py` turns those statistics into a stable
+  confidence level, decision, and readable notes.
+- Uploaded-video reports now consume repaired detections where safe and retain
+  raw detections for comparison. Repair failure falls back to raw detections.
+- Impossible jumps and low-confidence candidates are downgraded rather than
+  silently trusted. Repairs are marked `source="observer_repair"` and
+  `repaired=True`.
+- Session persistence stores a compact repair summary while old JSON records
+  continue to normalize with an empty repair block.
+- No model loading behavior changed, `shot_classifier.keras` remains lazy-only,
+  no map output was reintroduced, and no external service is involved.
+- This is explicitly 2D repair. Live Session integration follows Video Analysis
+  validation; pseudo-3D pitch calibration is later work; true multi-camera 3D
+  tracking is future research.

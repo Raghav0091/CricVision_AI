@@ -7,12 +7,12 @@ tries to load a model whose local weight file is missing.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from typing import Optional
+
+from Backends.src.config.paths import REMOTE_MODEL_DIR
 
 
 HF_REPO_ID = "RAGHAV0049/cricvision-models"
-REMOTE_MODEL_DIR = Path("Models/remote")
 REMOTE_MODEL_FILES = {
     "cricshot_ball": "ball_detector.pt",
     "cricshot_bat": "bat_detector.pt",

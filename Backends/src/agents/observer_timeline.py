@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from Backends.src.analysis.frame_detection_utils import normalize_frame_detections
+from Backends.src.config.constants import (
+    LOW_CONFIDENCE_REVIEW_THRESHOLD,
+    MAX_REASONABLE_BALL_JUMP_PX,
+)
 
 DEBUG_OBSERVER_TIMELINE = False
 
-MAX_REASONABLE_BALL_JUMP_PX = 180
-LOW_CONFIDENCE_THRESHOLD = 0.35
+LOW_CONFIDENCE_THRESHOLD = LOW_CONFIDENCE_REVIEW_THRESHOLD
 
 
 def build_observer_timeline(frame_detections, total_frames=None, fps=None):

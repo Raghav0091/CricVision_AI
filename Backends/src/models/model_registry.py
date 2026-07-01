@@ -10,8 +10,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Optional
 
+from Backends.src.config.paths import PROJECT_ROOT
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 MODEL_REGISTRY = {
     "current_best": {

@@ -5,7 +5,6 @@ from tempfile import TemporaryDirectory
 
 import streamlit as st
 
-from Backends.src.utils.cv2_loader import cv2
 from Backends.src.analysis.cricket_agent import (
     calculate_detection_quality,
     detect_analysis_warnings,
@@ -20,6 +19,16 @@ from Backends.src.analysis.field_zones import (
     save_field_setup,
     suggest_field_adjustment,
 )
+from Backends.src.config.constants import (
+    DETECTION_PRESETS,
+    ENSEMBLE_MODEL_NAME,
+    LOW_CONFIDENCE_REVIEW_THRESHOLD,
+)
+from Backends.src.config.paths import (
+    CRICKET_OBJECTS_MODEL_PATH,
+    REVIEW_FRAMES_DIR,
+)
+from Backends.src.utils.cv2_loader import cv2
 from Backends.src.tracking.ball_tracking_utils import (
     BallKalmanTracker,
     calculate_tracking_quality,
@@ -30,6 +39,10 @@ from Backends.src.tracking.ball_tracking_utils import (
 )
 from Backends.src.models.model_loader import get_cached_yolo_model
 from Backends.src.models.model_registry import get_model_info, get_model_path
+from Backends.src.ui.analysis_helpers import (
+    ensure_delivery_report_fields,
+    persist_result_to_session as _persist_result_to_session,
+)
 from Backends.src.video_pipeline.annotation_writer import (
     convert_to_browser_mp4,
     draw_label,
@@ -53,13 +66,6 @@ from Backends.src.video_pipeline.report_pipeline import build_video_reports
 from Backends.src.video_pipeline.video_reader import write_video_frames
 
 
-CRICKET_OBJECTS_MODEL_PATH = Path("Models/cricket_objects/best.pt")
-EXTERNAL_BALL_MODEL_PATH = Path("Models/cricket_objects/best_external.pt")
-BALL_MODEL_PATH = Path("Models/ball_detector/best.pt")
-REVIEW_FRAMES_DIR = Path("outputs/review_frames")
-ENSEMBLE_MODEL_NAME = "Ensemble: All Ball Models + Stumps"
-
-LOW_CONFIDENCE_REVIEW_THRESHOLD = 0.35
 MIN_TRAJECTORY_POINTS_FOR_BOUNCE = 8
 MIN_MOVEMENT_DISTANCE = 40
 SHORT_MISSING_BALL_SMOOTHING_FRAMES = 8
@@ -67,20 +73,6 @@ MAX_MISSING_BALL_FRAMES = 12
 MAX_TRAJECTORY_POINTS = 35
 MAX_RECORDED_FRAMES = 450
 DEFAULT_RECORDING_FPS = 25
-DETECTION_PRESETS = {
-    "Fast Bowling Mode": {
-        "imgsz": 960,
-        "confidence": 0.15,
-    },
-    "Balanced Mode": {
-        "imgsz": 768,
-        "confidence": 0.25,
-    },
-    "High Precision Mode": {
-        "imgsz": 960,
-        "confidence": 0.35,
-    },
-}
 
 
 def get_live_model_options():
@@ -154,6 +146,7 @@ def write_video(frames, output_path, fps=DEFAULT_RECORDING_FPS):
     return write_video_frames(frames, output_path, fps=fps)
 
 
+# LEGACY / NOT ACTIVE: Kept for future Live Session detector compatibility.
 def collect_detections(result, class_names, get_box_center, ball_confidence):
     ball_detections = []
     low_confidence_ball_detections = []
@@ -234,6 +227,7 @@ def choose_continuous_ball(ball_detections, trajectory_points, previous_ball_cen
     return nearest_detection
 
 
+# LEGACY / NOT ACTIVE: Kept for future manual review export compatibility.
 def save_low_confidence_review_frame(frame, detections, timestamp, frame_index):
     if not detections:
         return
@@ -820,6 +814,7 @@ def process_recorded_delivery(
         batter_handedness=batter_handedness,
         delivery_report=delivery_report,
         impact_result=impact_info,
+        enable_visual_observer_repair=False,
     )
     impact_info = reports["impact_result"]
     shot_info = reports["shot_result"]
@@ -967,6 +962,7 @@ def get_coaching_feedback(result):
     return feedback
 
 
+# LEGACY / NOT ACTIVE: Kept for compatibility with the earlier live report UI.
 def show_delivery_report(result):
     st.subheader("Delivery Report")
 
@@ -1002,18 +998,6 @@ def show_delivery_report(result):
         st.write(f"- {feedback_item}")
 
     st.caption("Clips are prepared in memory. They are not permanently saved unless you download them.")
-
-
-def _persist_result_to_session(result, source_type, video_name=None):
-    from Backends.src.ui.analysis_helpers import persist_result_to_session
-
-    return persist_result_to_session(result, source_type, video_name=video_name)
-
-
-def ensure_delivery_report_fields(result):
-    from Backends.src.ui.analysis_helpers import ensure_delivery_report_fields as apply_defaults
-
-    apply_defaults(result)
 
 
 def show_cricket_delivery_report(result):

@@ -63,59 +63,6 @@ def calculate_distance(point1, point2) -> float:
     return value if value is not None else 0.0
 
 
-def _distance_to_bbox(point, bbox) -> float:
-    x1, y1, x2, y2 = bbox
-    closest_x = min(max(float(point[0]), x1), x2)
-    closest_y = min(max(float(point[1]), y1), y2)
-    return calculate_distance(point, (closest_x, closest_y))
-
-
-def _ball_center_for_frame(ball_tracks, frame_index):
-    if isinstance(ball_tracks, dict):
-        value = ball_tracks.get(frame_index, ball_tracks.get(str(frame_index)))
-    elif frame_index < len(ball_tracks):
-        value = ball_tracks[frame_index]
-    else:
-        value = None
-    if value is None:
-        return None
-    if isinstance(value, dict):
-        return value.get("center") or value.get("ball_center")
-    if isinstance(value, (list, tuple)) and len(value) >= 2:
-        return value[:2]
-    return None
-
-
-def find_possible_impact_frame(ball_tracks, bat_detections_by_frame, max_distance: float = 80) -> dict:
-    """LEGACY: superseded by impact_detection.detect_bat_ball_impact on frame timelines."""
-    from Backends.src.analysis.impact_detection import detect_bat_ball_impact
-
-    frame_detections = []
-    max_frame_count = len(ball_tracks or [])
-    detections_by_frame = bat_detections_by_frame or {}
-    if isinstance(detections_by_frame, dict) and detections_by_frame:
-        max_frame_count = max(max_frame_count, max(int(key) for key in detections_by_frame) + 1)
-
-    for frame_index in range(max_frame_count):
-        ball_center = _ball_center_for_frame(ball_tracks or [], frame_index)
-        ball_detections = []
-        if ball_center is not None:
-            ball_detections.append({"center": ball_center})
-        if isinstance(detections_by_frame, dict):
-            bat_detections = detections_by_frame.get(frame_index, detections_by_frame.get(str(frame_index), []))
-        else:
-            bat_detections = detections_by_frame[frame_index] if frame_index < len(detections_by_frame) else []
-        frame_detections.append(
-            {
-                "frame_index": frame_index,
-                "ball_detections": ball_detections,
-                "bat_detections": bat_detections,
-            }
-        )
-
-    return detect_bat_ball_impact(frame_detections)
-
-
 def draw_bat_detections(frame, bat_detections):
     from Backends.src.utils.cv2_loader import cv2
 

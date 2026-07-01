@@ -29,6 +29,21 @@ def _dummy_timeline():
     ]
 
 
+def _dummy_repair_timeline():
+    timeline = _dummy_timeline()
+    timeline.insert(
+        1,
+        {
+            "frame_index": 1,
+            "ball_detections": [],
+            "bat_detections": [],
+            "stump_detections": [],
+        },
+    )
+    timeline[-1]["frame_index"] = 2
+    return timeline
+
+
 def main() -> int:
     importlib.import_module("Backends.src.models.model_registry")
     importlib.import_module("Backends.src.models.model_loader")
@@ -40,6 +55,7 @@ def main() -> int:
     importlib.import_module("Backends.src.video_pipeline.performance_timer")
 
     from Backends.src.agents.observer_timeline import build_observer_timeline
+    from Backends.src.agents.visual_observer_agent import run_visual_observer_repair
     from Backends.src.agents.vision_agent import run_vision_agent
     from Backends.src.analysis.impact_detection import detect_bat_ball_impact
     from Backends.src.analysis.outcome_prediction import predict_shot_outcome
@@ -67,6 +83,8 @@ def main() -> int:
     timeline = _dummy_timeline()
     observer = build_observer_timeline(timeline, total_frames=2, fps=25)
     assert observer["processed_frames"] == 2
+    repair = run_visual_observer_repair(_dummy_repair_timeline())
+    assert repair["repair_report"]["repaired_frames"] > 0
 
     impact = detect_bat_ball_impact(timeline, fps=25)
     assert "impact_detected" in impact
@@ -99,6 +117,7 @@ def main() -> int:
         delivery_report={"estimated_line": "Middle"},
     )
     expected_report_keys = {
+        "visual_observer_repair",
         "observer_timeline",
         "impact_result",
         "shot_result",

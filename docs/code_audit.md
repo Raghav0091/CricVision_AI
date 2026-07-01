@@ -85,22 +85,22 @@ Shares: `cricket_agent`, `field_zones` (internal context only),
 
 | File | Lines (approx) | Recommendation |
 |------|----------------|----------------|
-| `ui/video_analysis.py` | ~3000 | Split into `detection_pipeline.py`, `report_ui.py` when Live Session decoupled |
-| `ui/live_session.py` | ~1300 | Extract shared pipeline from video analysis first |
+| `ui/video_analysis.py` | ~1900 | Split frame-loop orchestration only after real-video regression coverage |
+| `ui/live_session.py` | ~1360 | Keep stable webcam path; split only after regression coverage |
 | `ui/interactive_field_map.py` | ~800 | Keep; field setup card is shared |
 
 ### Duplicate helpers (partially addressed)
 
 - ✅ `normalize_frame_detections` consolidated → `frame_detection_utils.py`
 - ✅ Session save + report defaults → `analysis_helpers.py`
-- ⚠️ `DETECTION_PRESETS` duplicated in Video Analysis + Live Session
+- ✅ Detection presets, shared thresholds, and stable paths consolidated under `config/`
 - ⚠️ Detection collection helpers differ (`collect_model_detections` vs `collect_detections`)
 - ⚠️ Two YOLO loader entry points (registry vs path string)
 
 ### Dead / legacy active paths
 
 - `detection/yolo_detector.py` — LEGACY, not imported
-- `find_possible_impact_frame`, `run_direction_and_agent_review` — superseded
+- Superseded `find_possible_impact_frame` and `run_direction_and_agent_review` wrappers removed after caller/test audit
 - Registry models `player_type`, `striker_segmentation`, `shot_classifier` — registered, not wired
 - `draw_field_map()` — dev/debug only; not in production reports
 
@@ -118,10 +118,10 @@ Shares: `cricket_agent`, `field_zones` (internal context only),
 |-------|--------|
 | HF_TOKEN printed in UI/logs | **Not found** in active UI paths |
 | `.env` / secrets exposed | **Not committed**; loaded via `remote_model_loader` only |
-| Uploaded video paths | Temp files via `tempfile`; outputs under `outputs/` |
+| Uploaded video paths | Auto-cleaned temporary directory; outputs under project-root `outputs/` |
 | Output filenames | Timestamp-based names; no raw user path concatenation in session JSON |
 | Debug logs expose secrets | Performance/observer notes are detection stats only |
-| Model/output files committed | **Gitignored** (`Models/remote/`, `outputs/`, `data/`) |
+| Model/output files committed | Outputs/remote models ignored; four legacy/current `.pt` weights remain intentionally tracked |
 
 **Continue to avoid:** printing `get_hf_token()`, committing `.streamlit/secrets.toml`, logging full env in Streamlit.
 
@@ -132,7 +132,7 @@ Shares: `cricket_agent`, `field_zones` (internal context only),
 ### Safe (recommended next)
 
 - Decouple Live Session from `video_analysis.py` imports via shared `detection_pipeline.py`
-- Unify `DETECTION_PRESETS` into one module
+- Add model path/failure unit tests without loading weights
 - Extend `best_detection_center` / timeline helpers (xyxy support added in test pass)
 - Keep optional processed video off for batch analysis
 
@@ -183,7 +183,7 @@ Shares: `cricket_agent`, `field_zones` (internal context only),
 
 ```
 python -m compileall -q Backends   → pass
-python -m pytest -q                -> 47 passed, 3 skipped locally (optional OpenCV/imageio packages absent)
+python -m pytest -q                -> 63 passed, 1 skipped locally (optional OpenCV/imageio package absent)
 python scripts/smoke_check.py      → Smoke checks passed
 python scripts/performance_check.py -> pass, including the synthetic report pipeline
 ```
@@ -225,3 +225,25 @@ streamlit run main.py
 3. Add `pytest` to developer onboarding in README
 4. Profile real 197-frame clip with performance expander; compare Smart Balanced vs Accurate
 5. Consider marking slow UI import tests with `@pytest.mark.integration` if split grows
+
+---
+
+## 10. Visual Observer and 2D tracking repair
+
+- Added a local, deterministic Visual Observer layer before uploaded-video
+  impact, shot, direction, outcome, and agent reports.
+- Short bounded ball gaps (up to four frames) are repaired with linear
+  interpolation. Long or unbounded gaps are left unchanged.
+- Low-confidence detections and impossible isolated jumps are marked untrusted
+  and downgraded. Raw detections remain available for debugging.
+- The report and Session Results UI show original versus repaired coverage,
+  repaired frames, suspicious detections, confidence, and the observer decision.
+- This is 2D frame-coordinate repair, not true 3D tracking. No models, external
+  APIs, map outputs, eager Keras/TensorFlow imports, or download behavior were
+  added or changed.
+- Synthetic unit, report-pipeline, smoke, and performance checks cover the
+  feature without YOLO weights, GPU, camera, video, or `HF_TOKEN`.
+
+Future work remains deliberately separate: validate Video Analysis first, then
+consider Live Session integration; pseudo-3D pitch calibration can come later;
+real multi-camera 3D tracking remains research scope.

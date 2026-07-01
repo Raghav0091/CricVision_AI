@@ -9,10 +9,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-SESSION_DATA_DIR = PROJECT_ROOT / "data"
-SESSION_RESULTS_FILE = SESSION_DATA_DIR / "session_results.json"
-SESSION_CLIPS_DIR = SESSION_DATA_DIR / "clips"
+from Backends.src.config.paths import (
+    DATA_DIR,
+    SESSION_CLIPS_DIR,
+    SESSION_RESULTS_FILE,
+)
+
+SESSION_DATA_DIR = DATA_DIR
 
 STRING_DEFAULT = "Unknown"
 TEXT_DEFAULT = "N/A"
@@ -101,6 +104,11 @@ def normalize_session_result(result: dict | None) -> dict:
         review_flags = []
 
     observer = result.get("observer_timeline") if isinstance(result.get("observer_timeline"), dict) else {}
+    repair = (
+        result.get("visual_observer_repair")
+        if isinstance(result.get("visual_observer_repair"), dict)
+        else {}
+    )
 
     return {
         "id": result.get("id") or "",
@@ -197,6 +205,7 @@ def normalize_session_result(result: dict | None) -> dict:
         "detection_quality": result.get("detection_quality", observer.get("detection_quality", STRING_DEFAULT))
         or STRING_DEFAULT,
         "observer_notes": result.get("observer_notes", observer.get("observer_notes", "")) or "",
+        "visual_observer_repair": _normalize_visual_observer_repair(repair),
         "smart_analysis_mode": result.get(
             "smart_analysis_mode",
             result.get("speed_mode", (result.get("performance_profile") or {}).get("speed_mode", STRING_DEFAULT)),
@@ -427,6 +436,7 @@ def build_session_record_from_analysis(
             ),
             "detection_quality": observer.get("detection_quality"),
             "observer_notes": observer.get("observer_notes"),
+            "visual_observer_repair": result.get("visual_observer_repair") or {},
             "ball_tracking_coverage": result.get("ball_tracking_coverage")
             or observer.get("ball_tracking_coverage"),
             "bat_detection_coverage": result.get("bat_detection_coverage")
@@ -558,6 +568,7 @@ def session_record_to_report_view(record: dict) -> dict:
             "detection_quality": record.get("detection_quality"),
             "observer_notes": record.get("observer_notes"),
         },
+        "visual_observer_repair": record.get("visual_observer_repair") or {},
     }
 
 
@@ -565,6 +576,32 @@ def _safe_path(value: Any) -> str | None:
     if value in {None, "", TEXT_DEFAULT}:
         return None
     return str(value)
+
+
+def _normalize_visual_observer_repair(repair: dict) -> dict:
+    if not repair:
+        return {}
+    notes = repair.get("notes") or []
+    if isinstance(notes, str):
+        notes = [notes]
+    elif not isinstance(notes, list):
+        notes = []
+    return {
+        "original_coverage": repair.get("original_coverage"),
+        "repaired_coverage": repair.get("repaired_coverage"),
+        "missing_frames": int(repair.get("missing_frames") or 0),
+        "repaired_frames": int(repair.get("repaired_frames") or 0),
+        "suspicious_detections": int(
+            repair.get(
+                "suspicious_detections",
+                repair.get("removed_or_downgraded_frames"),
+            )
+            or 0
+        ),
+        "repair_confidence": repair.get("repair_confidence") or STRING_DEFAULT,
+        "agent_decision": repair.get("agent_decision") or "",
+        "notes": [str(note) for note in notes if str(note).strip()],
+    }
 
 
 def _resolve_processed_video_path(result: dict, record_id: str) -> str | None:

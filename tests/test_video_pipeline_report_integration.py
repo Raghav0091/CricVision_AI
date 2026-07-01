@@ -4,6 +4,7 @@ from Backends.src.video_pipeline.report_pipeline import build_video_reports
 
 
 EXPECTED_REPORT_KEYS = {
+    "visual_observer_repair",
     "observer_timeline",
     "impact_result",
     "shot_result",
@@ -66,7 +67,7 @@ def test_report_pipeline_contract_with_synthetic_timeline():
     assert isinstance(result, dict)
     assert EXPECTED_REPORT_KEYS <= result.keys()
     assert result["observer_timeline"]["processed_frames"] == 18
-    for key in EXPECTED_REPORT_KEYS - {"observer_timeline"}:
+    for key in EXPECTED_REPORT_KEYS:
         assert isinstance(result[key], dict)
 
 

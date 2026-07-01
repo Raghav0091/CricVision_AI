@@ -13,6 +13,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.pytest_cache/
 
 # Streamlit secrets
 .streamlit/secrets.toml
@@ -40,3 +41,7 @@ Thumbs.db
 # IDE files
 .vscode/
 .idea/
+.cursor/
+
+# Local command-output artifacts
+/cls

@@ -17,6 +17,7 @@ from Backends.src.analysis.field_geometry import (
     polar_to_xy,
     umpire_from_name,
 )
+from Backends.src.config.paths import FIELD_ANALYSIS_HISTORY_PATH, FIELD_SETUP_PATH
 from Backends.src.data.field_presets import PRESET_NAMES, create_preset_fielders
 
 SIMPLE_FIELD_ZONES = [
@@ -90,8 +91,6 @@ FIELD_PRESETS = [
 ]
 
 DEPTH_OPTIONS = ["close", "inner ring", "deep", "boundary"]
-FIELD_SETUP_PATH = Path("outputs/field_setups/latest_field_setup.json")
-FIELD_ANALYSIS_HISTORY_PATH = Path("outputs/video_analysis/field_analysis_history.csv")
 FIELD_COORDINATE_SYSTEM_VERSION = 3
 
 

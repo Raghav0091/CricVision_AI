@@ -7,6 +7,8 @@ import pytest
 
 
 MODULES = [
+    "Backends.src.config.constants",
+    "Backends.src.config.paths",
     "Backends.src.ui.dashboard",
     "Backends.src.ui.results_page",
     "Backends.src.ui.analysis_helpers",
@@ -14,6 +16,8 @@ MODULES = [
     "Backends.src.models.model_loader",
     "Backends.src.analysis.frame_detection_utils",
     "Backends.src.agents.observer_timeline",
+    "Backends.src.agents.tracking_repair_agent",
+    "Backends.src.agents.visual_observer_agent",
     "Backends.src.analysis.impact_detection",
     "Backends.src.analysis.shot_direction",
     "Backends.src.analysis.outcome_prediction",

@@ -1,10 +1,9 @@
 """Software vision agent that reviews detection quality and analysis consistency."""
 
 from Backends.src.analysis.frame_detection_utils import normalize_frame_detections
+from Backends.src.config.constants import MAX_REASONABLE_BALL_JUMP_PX
 
 DEBUG_VISION_AGENT = False
-
-MAX_REASONABLE_BALL_JUMP_PX = 180
 
 
 def run_vision_agent(

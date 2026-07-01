@@ -42,35 +42,6 @@ def run_post_shot_pipeline(
     return direction_info, outcome_info, agent_info, enrichment
 
 
-def run_direction_and_agent_review(
-    frame_detections,
-    impact_info,
-    shot_info,
-    outcome_info,
-    batter_handedness=None,
-    fps=None,
-    delivery_report=None,
-):
-    """LEGACY: superseded by run_post_shot_pipeline(). Kept for backward compatibility."""
-    direction_info = estimate_shot_direction_zone(
-        frame_detections,
-        impact_info,
-        shot_result=shot_info,
-        batter_handedness=batter_handedness,
-        fps=fps,
-    )
-    agent_info = run_vision_agent(
-        frame_detections,
-        delivery_report=delivery_report,
-        impact_result=impact_info,
-        shot_result=shot_info,
-        direction_result=direction_info,
-        outcome_result=outcome_info,
-        fps=fps,
-    )
-    return direction_info, agent_info
-
-
 def merge_direction_and_agent_fields(direction_info, agent_info):
     """Flatten direction and agent dicts for session persistence and UI."""
     direction_info = direction_info or {}
