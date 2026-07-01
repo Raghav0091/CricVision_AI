@@ -104,6 +104,256 @@ def render_delivery_report(report):
         st.markdown(f"- {feedback_item}")
 
 
+def build_analysis_summary_data(result):
+    """Build a compact summary payload for delivery analysis results."""
+    result = result or {}
+    calibration = normalize_calibration_context(result.get("calibration_context"))
+    impact = _normalize_impact(result)
+    shot = _normalize_shot(result)
+    direction = _normalize_direction(result)
+    outcome = _normalize_outcome(result)
+    observer = _normalize_observer_timeline(result)
+    repair = result.get("visual_observer_repair") or {}
+
+    stump = (calibration.get("stumps") or {}).get("batter_end") or {}
+    if not calibration.get("enabled"):
+        calibration_display = "Disabled"
+    elif str(stump.get("source") or "").lower() == "estimated":
+        calibration_display = f"Estimated / {calibration.get('calibration_quality', 'Low')}"
+    else:
+        calibration_display = _display_value(calibration.get("calibration_quality"))
+
+    bat_coverage = observer.get("bat_detection_coverage")
+    bat_coverage_zero = False
+    try:
+        bat_coverage_zero = bat_coverage is not None and float(bat_coverage) == 0.0
+    except (TypeError, ValueError):
+        bat_coverage_zero = False
+
+    impact_detected = bool(impact.get("impact_detected"))
+    shot_available = impact_detected and not bat_coverage_zero
+
+    coach_note = _build_analysis_coach_note(
+        result,
+        impact_detected=impact_detected,
+        bat_coverage_zero=bat_coverage_zero,
+    )
+
+    return {
+        "line": _display_value(result.get("estimated_line")),
+        "length": _display_value(result.get("estimated_length")),
+        "ball_tracking": _format_tracking_quality(result),
+        "calibration_quality": calibration_display,
+        "visual_observer_repair_confidence": _display_value(
+            repair.get("repair_confidence", "Unknown")
+        ),
+        "impact_status": "Detected" if impact_detected else "Not Detected",
+        "shot_type": _display_value(shot.get("shot_type"))
+        if shot_available
+        else "Unavailable",
+        "field_zone": _display_value(direction.get("field_zone"))
+        if shot_available
+        else "Unavailable",
+        "predicted_outcome": _display_value(outcome.get("predicted_outcome"))
+        if shot_available
+        else "Unavailable",
+        "coach_note": coach_note,
+        "impact_detected": impact_detected,
+        "bat_coverage_zero": bat_coverage_zero,
+        "shot_available": shot_available,
+    }
+
+
+def render_analysis_summary_card(result):
+    """Render a compact professional delivery summary."""
+    summary = build_analysis_summary_data(result)
+
+    st.subheader("Quick Result Summary")
+    metric_grid(
+        [
+            ("Line", summary["line"]),
+            ("Length", summary["length"]),
+            ("Ball Tracking Quality", summary["ball_tracking"]),
+            ("Calibration Quality", summary["calibration_quality"]),
+            ("Visual Observer Repair Confidence", summary["visual_observer_repair_confidence"]),
+            ("Impact Status", summary["impact_status"]),
+            ("Shot Type", summary["shot_type"]),
+            ("Field Zone", summary["field_zone"]),
+            ("Predicted Outcome", summary["predicted_outcome"]),
+        ],
+        columns=3,
+    )
+
+    if summary["bat_coverage_zero"]:
+        st.warning(
+            "Shot analysis unavailable because bat was not detected "
+            "(0% bat detection coverage)."
+        )
+    elif not summary["impact_detected"]:
+        st.info(
+            "Shot and outcome analysis are unavailable because bat-ball impact "
+            "was not detected."
+        )
+
+    if summary["visual_observer_repair_confidence"] == "Medium":
+        st.caption(
+            "Visual observer repair confidence is medium — treat tracking repairs "
+            "with moderate caution."
+        )
+
+    st.markdown("**Coach Note**")
+    st.info(summary["coach_note"])
+
+
+def render_processed_video_preview(result, download_key="download_processed_video"):
+    """Validate and preview the processed video with a safe fallback."""
+    from Backends.src.video_pipeline.annotation_writer import (
+        validate_processed_video_path,
+    )
+
+    result = result or {}
+    if result.get("processed_video_skipped") or not result.get(
+        "processed_video_generated", True
+    ):
+        st.info("Processed video generation skipped to speed up analysis.")
+        return
+
+    output_path = result.get("output_path")
+    raw_output_path = result.get("raw_output_path")
+    validation = validate_processed_video_path(output_path)
+    fallback_validation = (
+        validate_processed_video_path(raw_output_path)
+        if raw_output_path and str(raw_output_path) != str(output_path)
+        else {"valid": False}
+    )
+
+    if validation["can_preview"]:
+        st.video(str(output_path))
+        with open(output_path, "rb") as video_file:
+            st.download_button(
+                "Download Processed Video",
+                data=video_file,
+                file_name=Path(output_path).name,
+                mime="video/mp4",
+                use_container_width=True,
+                key=download_key,
+            )
+        return
+
+    if result.get("processed_video_conversion") == "failed":
+        st.warning(
+            "Browser MP4 conversion failed. Analysis results are still available."
+        )
+        if result.get("processed_video_conversion_error"):
+            st.caption(str(result["processed_video_conversion_error"]))
+
+    if fallback_validation.get("can_preview"):
+        st.caption("Showing the raw processed video because browser conversion failed.")
+        st.video(str(raw_output_path))
+        with open(raw_output_path, "rb") as video_file:
+            st.download_button(
+                "Download Raw Processed Video",
+                data=video_file,
+                file_name=Path(raw_output_path).name,
+                mime="video/mp4",
+                use_container_width=True,
+                key=f"{download_key}_raw",
+            )
+        return
+
+    st.warning(
+        "Processed video could not be previewed, but analysis results are available."
+    )
+    if validation.get("error"):
+        st.caption(validation["error"])
+
+
+def render_impact_and_shot_section(result):
+    """Render impact and shot reports, hiding noisy unknown cards by default."""
+    impact = _normalize_impact(result)
+    summary = build_analysis_summary_data(result)
+
+    render_impact_report(result)
+    render_impact_frame_preview(result)
+
+    if not summary["shot_available"]:
+        with st.expander("Unavailable shot/outcome details", expanded=False):
+            render_shot_report(result)
+            render_shot_direction_report(result)
+            render_outcome_prediction(result)
+        return
+
+    render_shot_report(result)
+    render_shot_direction_report(result)
+    render_outcome_prediction(result)
+
+
+def render_video_analysis_results_layout(
+    result,
+    *,
+    context_label="Video Analysis",
+    show_status_banner=False,
+):
+    """Organize analysis results into a clean default view with tabbed details."""
+    from Backends.src.ui.theme import render_status_pill
+
+    result = result or {}
+    if show_status_banner:
+        st.markdown(
+            f'<div style="margin:0.75rem 0 1rem 0;">{render_status_pill("Analysis Complete", "success")} '
+            f'{render_status_pill(result.get("analysis_mode", "Full Delivery Analysis"), "gold")}</div>',
+            unsafe_allow_html=True,
+        )
+
+    video_preview_card("Processed Video Preview")
+    render_processed_video_preview(
+        result,
+        download_key=f"download_{context_label.lower().replace(' ', '_')}",
+    )
+
+    render_analysis_summary_card(result)
+    render_save_status(result, context_label)
+
+    (
+        tab_summary,
+        tab_tracking,
+        tab_impact,
+        tab_calibration,
+        tab_technical,
+    ) = st.tabs(
+        [
+            "Summary",
+            "Tracking Quality",
+            "Impact & Shot",
+            "Calibration",
+            "Technical Details",
+        ]
+    )
+
+    with tab_summary:
+        render_delivery_report(result)
+
+    with tab_tracking:
+        render_visual_observer_repair_card(result)
+        render_observer_timeline_report(result)
+        render_vision_agent_report(result)
+
+    with tab_impact:
+        render_impact_and_shot_section(result)
+
+    with tab_calibration:
+        render_calibration_context_card(result)
+
+    with tab_technical:
+        render_performance_details(result)
+        if result.get("report_path"):
+            st.caption(f"Report JSON: {result['report_path']}")
+        if result.get("output_path"):
+            st.caption(f"Processed video: {result['output_path']}")
+        elif result.get("raw_output_path"):
+            st.caption(f"Raw processed video: {result['raw_output_path']}")
+
+
 def render_impact_report(impact):
     """Render a safe bat-ball impact report."""
     impact = _normalize_impact(impact)
@@ -681,45 +931,51 @@ def render_session_result_card(result: dict, expanded: bool = False):
     source_type = _display_value(result.get("source_type"))
 
     with st.expander(f"{title} — {created_at} ({source_type})", expanded=expanded):
-        summary_cols = st.columns(4)
-        summary_cols[0].metric("Line", _display_value(result.get("line")))
-        summary_cols[1].metric("Length", _display_value(result.get("length")))
-        summary_cols[2].metric("Shot Type", _display_value(result.get("shot_type")))
-        summary_cols[3].metric("Field Zone", _display_value(result.get("field_zone")))
+        render_analysis_summary_card(report_view)
 
-        summary_cols2 = st.columns(4)
-        summary_cols2[0].metric("Predicted Outcome", _display_value(result.get("predicted_outcome")))
-        summary_cols2[1].metric("Run Estimate", _format_run_estimate(result.get("run_estimate")))
-        summary_cols2[2].metric("Agent Quality", _display_value(result.get("agent_quality")))
-        summary_cols2[3].metric("Source", source_type)
-
-        video_path = result.get("processed_video_path")
+        video_path = result.get("processed_video_path") or report_view.get("output_path")
         if video_path:
-            path = Path(str(video_path))
-            if path.exists():
-                st.video(str(path))
-            else:
-                st.info("Preview file not found")
+            preview_result = {
+                **report_view,
+                "output_path": video_path,
+                "processed_video_generated": True,
+            }
+            render_processed_video_preview(
+                preview_result,
+                download_key=f"session_video_{result.get('id', title)}",
+            )
 
-        impact_path = result.get("impact_frame_image_path")
-        if impact_path:
-            path = Path(str(impact_path))
-            if path.exists():
-                st.image(str(path), caption="Impact frame preview", use_container_width=True)
-            else:
-                st.info("Impact frame preview file not found")
+        (
+            tab_summary,
+            tab_tracking,
+            tab_impact,
+            tab_calibration,
+        ) = st.tabs(["Summary", "Tracking", "Impact & Shot", "Calibration"])
 
-        render_observer_timeline_report(report_view)
-        if (report_view.get("calibration_context") or {}).get("enabled"):
-            render_calibration_context_card(report_view, compact=True)
-        render_visual_observer_repair_card(report_view, compact=True)
-        render_delivery_report(report_view)
-        render_impact_report(report_view)
-        render_impact_frame_preview(report_view)
-        render_shot_report(report_view)
-        render_shot_direction_report(report_view)
-        render_outcome_prediction(report_view)
-        render_vision_agent_report(report_view)
+        with tab_summary:
+            render_delivery_report(report_view)
+
+        with tab_tracking:
+            render_observer_timeline_report(report_view)
+            if (report_view.get("calibration_context") or {}).get("enabled"):
+                render_calibration_context_card(report_view, compact=True)
+            render_visual_observer_repair_card(report_view, compact=True)
+            render_vision_agent_report(report_view)
+
+        with tab_impact:
+            impact_path = result.get("impact_frame_image_path")
+            render_impact_and_shot_section(report_view)
+            if impact_path:
+                path = Path(str(impact_path))
+                if path.exists():
+                    st.image(
+                        str(path),
+                        caption="Impact frame preview",
+                        use_container_width=True,
+                    )
+
+        with tab_calibration:
+            render_calibration_context_card(report_view)
 
 
 def analysis_report_card(result):
@@ -1095,6 +1351,34 @@ def _format_result_summary(result):
         return generate_delivery_report(result)
     except Exception:
         return _build_recommendation(result)
+
+
+def _build_analysis_coach_note(result, *, impact_detected=False, bat_coverage_zero=False):
+    length = _display_value((result or {}).get("estimated_length"))
+    line = _display_value((result or {}).get("estimated_line"))
+    notes = []
+
+    if length not in {"", "Unknown", "N/A"}:
+        notes.append(f"{length} length detected.")
+    if line not in {"", "Unknown", "N/A"} and line != length:
+        notes.append(f"Line read as {line}.")
+
+    if bat_coverage_zero:
+        notes.append(
+            "Shot analysis unavailable because bat was not detected."
+        )
+    elif not impact_detected:
+        notes.append(
+            "Bat impact was not detected, so shot and outcome are unavailable."
+        )
+
+    if notes:
+        return " ".join(notes)
+
+    feedback = _format_coach_feedback(result)
+    if feedback:
+        return feedback[0]
+    return "Review the detailed reports for coaching feedback on this delivery."
 
 
 def _format_coach_feedback(result):

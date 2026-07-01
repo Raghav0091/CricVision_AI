@@ -29,8 +29,8 @@ HANDEDNESS_ALIASES = {
 }
 
 
-def default_calibration_context() -> dict:
-    """Return a disabled, JSON-safe calibration context."""
+def _disabled_calibration_template() -> dict:
+    """Return the raw disabled template used before quality finalization."""
     return {
         "enabled": False,
         "confirmed": False,
@@ -75,14 +75,20 @@ def default_calibration_context() -> dict:
             "confidence": 0.0,
         },
         "notes": [],
+        "calibration_version": 1,
     }
+
+
+def default_calibration_context() -> dict:
+    """Return a disabled, JSON-safe calibration context."""
+    return finalize_calibration_quality(deepcopy(_disabled_calibration_template()))
 
 
 def normalize_calibration_context(context) -> dict:
     """Normalize missing, old, or partial context without raising."""
-    default = default_calibration_context()
+    default = _disabled_calibration_template()
     if not isinstance(context, dict):
-        return default
+        return default_calibration_context()
 
     result = deepcopy(default)
     result["enabled"] = bool(context.get("enabled", False))
@@ -164,7 +170,7 @@ def normalize_calibration_context(context) -> dict:
         result["notes"] = [
             str(note) for note in notes if str(note).strip()
         ]
-    return result
+    return finalize_calibration_quality(result)
 
 
 def build_calibration_context(
@@ -236,7 +242,7 @@ def build_calibration_context(
             "treated as estimated context."
         )
     result["notes"] = list(dict.fromkeys(note for note in notes if note))
-    return normalize_calibration_context(result)
+    return finalize_calibration_quality(normalize_calibration_context(result))
 
 
 def validate_calibration_context(context) -> list[str]:
@@ -268,9 +274,109 @@ def calibration_quality_label(score) -> str:
     return "Low"
 
 
-def _calibration_score(context) -> float:
+def finalize_calibration_quality(context) -> dict:
+    """Apply honest quality caps so labels match stump/corridor sources."""
+    result = context
+    if not result["enabled"]:
+        result["calibration_quality"] = "Disabled"
+        result["calibration_score"] = 0.0
+        if not result["notes"]:
+            result["notes"] = [
+                "Practice environment calibration was disabled for this analysis."
+            ]
+        return result
+
+    stump = result["stumps"]["batter_end"]
+    corridor = result["pitch_corridor"] or {}
+    stump_source = str(stump.get("source") or "missing").lower()
+    stump_status = str(stump.get("status") or "missing").lower()
+    stump_conf = _score(stump.get("confidence"))
+    corridor_status = str(corridor.get("status") or "missing").lower()
+    corridor_source = str(corridor.get("source") or "missing").lower()
+
+    score = _calibration_score(result)
+    result["calibration_score"] = score
+    quality = calibration_quality_label(score)
+
+    if stump_source in {"estimated", "missing"} or stump_status == "estimated":
+        quality = _cap_quality(quality, "Medium")
+        if stump_conf < 0.35:
+            quality = "Low"
+    elif stump_conf < 0.65:
+        quality = _cap_quality(quality, "Good")
+
+    if corridor_status == "estimated" or corridor_source == "estimated":
+        quality = _cap_quality(quality, "Medium")
+
+    if quality == "High":
+        if not (
+            stump_source == "auto"
+            and stump_status == "detected"
+            and stump_conf >= 0.65
+        ):
+            quality = "Good"
+
+    result["calibration_quality"] = quality
+    result["notes"] = _harmonize_calibration_notes(result, quality)
+    return result
+
+
+def _cap_quality(current: str, maximum: str) -> str:
+    order = {"Low": 0, "Medium": 1, "Good": 2, "High": 3, "Disabled": -1}
+    current_rank = order.get(current, 0)
+    max_rank = order.get(maximum, 2)
+    if current_rank <= max_rank:
+        return current
+    for label, rank in order.items():
+        if rank == max_rank:
+            return label
+    return maximum
+
+
+def _harmonize_calibration_notes(context, quality: str) -> list[str]:
     stump = context["stumps"]["batter_end"]
-    score = _score(stump.get("confidence")) * 0.55
+    notes = [str(note).strip() for note in (context.get("notes") or []) if str(note).strip()]
+    stump_source = str(stump.get("source") or "missing").lower()
+    stump_status = str(stump.get("status") or "missing").lower()
+
+    filtered = []
+    for note in notes:
+        lowered = note.lower()
+        if stump_source == "estimated" and "detected (auto)" in lowered:
+            continue
+        if stump_status == "estimated" and "estimated from existing detections" in lowered:
+            continue
+        filtered.append(note)
+
+    if stump_source == "estimated" or stump_status == "estimated":
+        filtered.append(
+            "No usable stump detection was available; approximate frame-based geometry was used."
+        )
+    elif stump_source == "auto" and stump_status == "detected":
+        confidence = _score(stump.get("confidence"))
+        filtered.append(
+            f"Batter-end stumps detected from model output ({confidence * 100:.0f}% confidence)."
+        )
+
+    if quality in {"Low", "Medium"}:
+        filtered.append(
+            "Practice-environment geometry is approximate and should be treated as estimated context."
+        )
+    return list(dict.fromkeys(filtered))
+
+
+def _calibration_score(context) -> float:
+    if not context.get("enabled"):
+        return 0.0
+    stump = context["stumps"]["batter_end"]
+    stump_source = str(stump.get("source") or "missing").lower()
+    stump_status = str(stump.get("status") or "missing").lower()
+    stump_conf = _score(stump.get("confidence"))
+
+    if stump_source in {"estimated", "missing"} or stump_status == "estimated":
+        score = min(stump_conf, 0.35) * 0.45
+    else:
+        score = stump_conf * 0.55
     if context.get("frame_width") and context.get("frame_height"):
         score += 0.15
     if context.get("camera_view") != "unknown":

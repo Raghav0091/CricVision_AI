@@ -273,3 +273,17 @@ real multi-camera 3D tracking remains research scope.
   fielder reasoning, and calibrated ROI optimization.
 - Model registry, Hugging Face fallback, and lazy-only Keras behavior are
   unchanged.
+
+## 12. Video Analysis result UI cleanup
+
+- Result screen noise reduced: default expanded sections are processed video,
+  quick summary, and save status; delivery, observer, impact, calibration, and
+  performance details moved into tabs/expanders.
+- `components.py` adds summary rendering, processed-video validation preview,
+  and shared `render_video_analysis_results_layout()`.
+- Calibration confidence logic fixed via `finalize_calibration_quality()`;
+  notes and quality labels are harmonized for estimated vs detected stumps.
+- `annotation_writer.py` adds `validate_processed_video_path()`,
+  `ensure_frame_writer_size()`, and clean overlay draw helpers.
+- Clean overlay is default; debug overlay remains available. Session Results
+  cards use the same compact summary pattern. Old session JSON still normalizes.

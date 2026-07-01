@@ -170,3 +170,17 @@ Dev-only pages remain gated behind `SHOW_DEV_PAGES`: `field_map.py`, `datasets_p
   changed.
 - This establishes a future hook for AR Nets Mode, line/length improvements,
   virtual fielders, and ROI tuning. It is not true 3D or AR hardware support.
+
+## Video Analysis result UI cleanup
+
+- Video Analysis results now default to Processed Video Preview, Quick Result
+  Summary, and Save Status; detailed cards live in Summary / Tracking Quality /
+  Impact & Shot / Calibration / Technical Details tabs.
+- Added `render_analysis_summary_card()` and `build_analysis_summary_data()` in
+  `components.py` for a compact coach-oriented summary.
+- Calibration quality is capped in `finalize_calibration_quality()` so
+  estimated/default stumps cannot read as High.
+- Processed video preview uses `validate_processed_video_path()` before
+  `st.video()` and falls back to raw output when browser MP4 conversion fails.
+- Clean overlay is the default; Debug overlay is optional via the Overlay detail
+  control. No map outputs were reintroduced and model loading behavior is unchanged.

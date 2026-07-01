@@ -90,5 +90,5 @@ def test_save_session_result_preserves_calibration_context(temp_session_store):
     calibration = saved["calibration_context"]
     assert calibration["enabled"] is True
     assert calibration["camera_view"] == "bowler_end"
-    assert calibration["calibration_quality"] == "Good"
+    assert calibration["calibration_quality"] in {"Low", "Medium"}
     assert len(calibration["pitch_corridor"]["polygon"]) == 4

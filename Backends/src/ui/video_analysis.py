@@ -90,6 +90,10 @@ save_review_frame = shared_annotations.save_review_frame
 convert_to_browser_mp4 = shared_annotations.convert_to_browser_mp4
 _add_impact_marker_to_video = shared_annotations.add_impact_marker_to_video
 _draw_ball_detections = shared_annotations.draw_ball_detections
+draw_clean_ball_markers = shared_annotations.draw_clean_ball_markers
+draw_clean_stump_markers = shared_annotations.draw_clean_stump_markers
+draw_trajectory_lines = shared_annotations.draw_trajectory_lines
+ensure_frame_writer_size = shared_annotations.ensure_frame_writer_size
 extract_first_video_frame = read_first_video_frame
 
 
@@ -166,6 +170,7 @@ def process_batting_video(
     max_frames=None,
     generate_processed_video=True,
     calibration_context=None,
+    overlay_detail="Clean",
 ):
     """Process a clip with only the models needed for batting intelligence."""
     from Backends.src.analysis.analysis_speed import (
@@ -208,6 +213,7 @@ def process_batting_video(
     speed_mode = speed_settings.get("mode", speed_mode)
     resize_width = speed_settings.get("resize_width")
     light_annotation = bool(speed_settings.get("light_annotation", False))
+    debug_overlay = str(overlay_detail or "Clean").strip().lower() == "debug"
     generate_processed_video = bool(
         generate_processed_video and speed_settings.get("generate_processed_video", True)
     )
@@ -316,18 +322,22 @@ def process_batting_video(
         if ball_detections and bat_detections:
             impact_frame_candidates[frame_index] = frame.copy()
 
-        _draw_ball_detections(annotated_frame, ball_detections)
-        draw_bat_detections(annotated_frame, bat_detections)
-        if not light_annotation:
+        if debug_overlay:
+            _draw_ball_detections(annotated_frame, ball_detections)
+            draw_bat_detections(annotated_frame, bat_detections)
+        else:
+            draw_clean_ball_markers(annotated_frame, ball_detections)
+
+        if debug_overlay:
             for index in range(1, len(trajectory[-35:])):
                 recent = trajectory[-35:]
-                cv2.line(annotated_frame, recent[index - 1], recent[index], (0, 255, 255), 3)
+                draw_trajectory_lines(annotated_frame, recent)
         elif len(trajectory) >= 2:
-            cv2.line(annotated_frame, trajectory[-2], trajectory[-1], (0, 255, 255), 3)
+            draw_trajectory_lines(annotated_frame, trajectory[-2:])
 
         if writer is not None:
             annotation_started = time.perf_counter()
-            writer.write(annotated_frame)
+            writer.write(ensure_frame_writer_size(annotated_frame, width, height))
             performance["annotation_write_time_sec"] += time.perf_counter() - annotation_started
         frame_index += 1
         if total_frames > 0:
@@ -428,6 +438,7 @@ def process_batting_video(
         "observer_timeline": observer_timeline,
         "performance_profile": performance,
         "speed_mode": speed_mode,
+        "overlay_detail": overlay_detail,
         "smart_pipeline_used": True,
         "shot_info": shot_info,
         "direction_info": direction_info,
@@ -563,6 +574,7 @@ def process_video(
     max_frames=None,
     generate_processed_video=True,
     calibration_context=None,
+    overlay_detail="Clean",
 ):
     from Backends.src.analysis.analysis_speed import (
         get_analysis_mode_settings,
@@ -653,6 +665,7 @@ def process_video(
     inference_imgsz = int(speed_settings.get("yolo_imgsz", imgsz))
     resize_width = speed_settings.get("resize_width")
     light_annotation = bool(speed_settings.get("light_annotation", False))
+    debug_overlay = str(overlay_detail or "Clean").strip().lower() == "debug"
     generate_processed_video = bool(
         generate_processed_video and speed_settings.get("generate_processed_video", True)
     )
@@ -831,7 +844,7 @@ def process_video(
                 roi_x1, roi_y1, roi_x2, roi_y2 = detection_result["roi_box"]
                 last_roi_size = f"{roi_x2 - roi_x1}x{roi_y2 - roi_y1}"
 
-            if show_pitch_roi:
+            if debug_overlay and show_pitch_roi:
                 draw_pitch_roi(annotated_frame, detection_result.get("roi_box"))
 
             confidence_values.extend(item["confidence"] for item in ball_detections)
@@ -867,7 +880,7 @@ def process_video(
                     use_ensemble=use_ensemble,
                 )
 
-                if show_pitch_roi:
+                if debug_overlay and show_pitch_roi:
                     draw_search_roi(annotated_frame, recovery_result.get("search_roi"))
 
                 if recovery_result["recovered"]:
@@ -931,7 +944,8 @@ def process_video(
         if bat_detections:
             bat_detected_frames += 1
             bat_detections_by_frame[frame_index] = bat_detections
-        draw_bat_detections(annotated_frame, bat_detections)
+        if debug_overlay:
+            draw_bat_detections(annotated_frame, bat_detections)
 
         stump_detections_by_frame.append(stump_detections)
         impact_frame_detections.append(
@@ -959,54 +973,58 @@ def process_video(
         if rough_impact_state is not None:
             rough_impact_frame = rough_impact_state[1]
 
-        for detection in ball_detections:
-            x1, y1, x2, y2 = detection["box"]
-            conf = detection["confidence"]
-            center_x, center_y = detection["center"]
+        if debug_overlay:
+            for detection in ball_detections:
+                x1, y1, x2, y2 = detection["box"]
+                conf = detection["confidence"]
+                center_x, center_y = detection["center"]
 
-            cv2.rectangle(
-                annotated_frame,
-                (x1, y1),
-                (x2, y2),
-                (0, 255, 255),
-                2,
-            )
+                cv2.rectangle(
+                    annotated_frame,
+                    (x1, y1),
+                    (x2, y2),
+                    (0, 255, 255),
+                    2,
+                )
 
-            cv2.circle(
-                annotated_frame,
-                (center_x, center_y),
-                5,
-                (0, 255, 255),
-                -1,
-            )
+                cv2.circle(
+                    annotated_frame,
+                    (center_x, center_y),
+                    5,
+                    (0, 255, 255),
+                    -1,
+                )
 
-            draw_label(
-                annotated_frame,
-                f"ball {conf:.2f}",
-                x1,
-                y1,
-                (0, 180, 180),
-            )
+                draw_label(
+                    annotated_frame,
+                    f"ball {conf:.2f}",
+                    x1,
+                    y1,
+                    (0, 180, 180),
+                )
 
-        for detection in stump_detections:
-            x1, y1, x2, y2 = detection["box"]
-            conf = detection["confidence"]
+            for detection in stump_detections:
+                x1, y1, x2, y2 = detection["box"]
+                conf = detection["confidence"]
 
-            cv2.rectangle(
-                annotated_frame,
-                (x1, y1),
-                (x2, y2),
-                (255, 100, 0),
-                2,
-            )
+                cv2.rectangle(
+                    annotated_frame,
+                    (x1, y1),
+                    (x2, y2),
+                    (255, 100, 0),
+                    2,
+                )
 
-            draw_label(
-                annotated_frame,
-                f"stump {conf:.2f}",
-                x1,
-                y1,
-                (255, 100, 0),
-            )
+                draw_label(
+                    annotated_frame,
+                    f"stump {conf:.2f}",
+                    x1,
+                    y1,
+                    (255, 100, 0),
+                )
+        else:
+            draw_clean_ball_markers(annotated_frame, ball_detections)
+            draw_clean_stump_markers(annotated_frame, stump_detections)
 
         main_ball = choose_main_ball(ball_detections, previous_ball_center)
 
@@ -1110,16 +1128,9 @@ def process_video(
 
                 trajectory_points = list(reversed(display_trajectory_points))[-max_trajectory_points:]
 
-        for i in range(1, len(trajectory_points)):
-            cv2.line(
-                annotated_frame,
-                trajectory_points[i - 1],
-                trajectory_points[i],
-                (0, 255, 255),
-                3,
-            )
+        draw_trajectory_lines(annotated_frame, trajectory_points)
 
-        if estimated_bounce_point is not None:
+        if debug_overlay and estimated_bounce_point is not None:
             bx, by = estimated_bounce_point
 
             cv2.circle(
@@ -1162,7 +1173,7 @@ def process_video(
         if estimated_bounce_frame is not None:
             bounce_text = f"Frame {estimated_bounce_frame}"
 
-        if not light_annotation:
+        if debug_overlay and not light_annotation:
             cv2.putText(
                 annotated_frame,
                 f"Frame: {frame_index}/{source_total_frames or frame_index}",
@@ -1235,7 +1246,7 @@ def process_video(
 
         if writer is not None:
             annotation_started = time.perf_counter()
-            writer.write(annotated_frame)
+            writer.write(ensure_frame_writer_size(annotated_frame, width, height))
             performance["annotation_write_time_sec"] += time.perf_counter() - annotation_started
 
         frame_index += 1
@@ -1459,6 +1470,7 @@ def process_video(
         "observer_timeline": observer_timeline,
         "performance_profile": performance,
         "speed_mode": speed_mode,
+        "overlay_detail": overlay_detail,
         "impact_info": impact_info,
         "shot_info": shot_info,
         "direction_info": direction_info,
@@ -1486,112 +1498,19 @@ def process_video(
 
 
 def show_batting_analysis_results(result):
-    from Backends.src.ui.components import (
-        render_delivery_report,
-        render_impact_frame_preview,
-        render_impact_report,
-        render_observer_timeline_report,
-        render_outcome_prediction,
-        render_performance_details,
-        render_save_status,
-        render_shot_direction_report,
-        render_shot_report,
-        render_calibration_context_card,
-        render_visual_observer_repair_card,
-        render_vision_agent_report,
-        video_preview_card,
-    )
+    from Backends.src.ui.components import render_video_analysis_results_layout
 
-    video_preview_card("Processed Video Preview")
-    output_path = result.get("output_path")
-    if output_path:
-        with open(output_path, "rb") as video_file:
-            video_bytes = video_file.read()
-        st.video(video_bytes)
-        with open(output_path, "rb") as video_file:
-            st.download_button(
-                "Download Processed Video",
-                data=video_file,
-                file_name=Path(output_path).name,
-                mime="video/mp4",
-                use_container_width=True,
-                key="download_batting_processed_video",
-            )
-    elif result.get("processed_video_skipped") or not result.get("processed_video_generated", True):
-        st.info("Processed video generation skipped to speed up analysis.")
-    else:
-        st.warning("Processed video preview is not available for this result.")
-
-    render_calibration_context_card(result)
-    render_visual_observer_repair_card(result)
-    render_observer_timeline_report(result)
-    render_delivery_report(result)
-    render_impact_report(result)
-    render_impact_frame_preview(result)
-    render_shot_report(result)
-    render_shot_direction_report(result)
-    render_outcome_prediction(result)
-    render_vision_agent_report(result)
-    render_performance_details(result)
-    render_save_status(result, "Video Analysis")
+    render_video_analysis_results_layout(result, context_label="Video Analysis")
 
 
 def show_video_analysis_results(result, selected_model_name, preset_name, show_pitch_roi):
-    from Backends.src.ui.components import (
-        render_delivery_report,
-        render_impact_frame_preview,
-        render_impact_report,
-        render_observer_timeline_report,
-        render_outcome_prediction,
-        render_performance_details,
-        render_save_status,
-        render_shot_direction_report,
-        render_shot_report,
-        render_calibration_context_card,
-        render_visual_observer_repair_card,
-        render_vision_agent_report,
-        video_preview_card,
+    from Backends.src.ui.components import render_video_analysis_results_layout
+
+    render_video_analysis_results_layout(
+        result,
+        context_label="Video Analysis",
+        show_status_banner=True,
     )
-    from Backends.src.ui.theme import render_status_pill
-
-    st.markdown(
-        f'<div style="margin:0.75rem 0 1rem 0;">{render_status_pill("Analysis Complete", "success")} '
-        f'{render_status_pill(result.get("analysis_mode", "Full Delivery Analysis"), "gold")}</div>',
-        unsafe_allow_html=True,
-    )
-
-    video_preview_card("Processed Video Preview")
-    output_path = result.get("output_path")
-    if output_path:
-        with open(output_path, "rb") as video_file:
-            video_bytes = video_file.read()
-        st.video(video_bytes)
-
-        with open(output_path, "rb") as file:
-            st.download_button(
-                label="Download Processed Video",
-                data=file,
-                file_name="cricvision_processed_video.mp4",
-                mime="video/mp4",
-                use_container_width=True,
-            )
-    elif result.get("processed_video_skipped") or not result.get("processed_video_generated", True):
-        st.info("Processed video generation skipped to speed up analysis.")
-    else:
-        st.warning("Processed video preview is not available for this result.")
-
-    render_calibration_context_card(result)
-    render_visual_observer_repair_card(result)
-    render_observer_timeline_report(result)
-    render_delivery_report(result)
-    render_impact_report(result)
-    render_impact_frame_preview(result)
-    render_shot_report(result)
-    render_shot_direction_report(result)
-    render_outcome_prediction(result)
-    render_vision_agent_report(result)
-    render_performance_details(result)
-    render_save_status(result, "Video Analysis")
 
 
 def show_video_analysis_page():
@@ -1724,6 +1643,14 @@ def show_video_analysis_page():
         help="Disable to run analysis and reports only without writing an annotated video.",
     )
 
+    overlay_detail = st.selectbox(
+        "Overlay detail",
+        ["Clean", "Debug"],
+        index=0,
+        key="video_analysis_overlay_detail",
+        help="Clean keeps ball trail and key markers only. Debug shows ROI, bounce, and labels.",
+    )
+
     with st.expander("Advanced Settings", expanded=False):
         analysis_mode = st.selectbox(
             "Analysis mode",
@@ -1849,6 +1776,7 @@ def show_video_analysis_page():
 
     speed_mode = st.session_state.get("video_analysis_speed_mode", "Smart Balanced")
     generate_processed_video = st.session_state.get("video_analysis_generate_processed_video", True)
+    overlay_detail = st.session_state.get("video_analysis_overlay_detail", "Clean")
     max_frames = resolve_frame_limit(
         st.session_state.get("video_analysis_limit_frames_enabled", False),
         st.session_state.get("video_analysis_frame_limit_choice", "All frames"),
@@ -1925,6 +1853,7 @@ def show_video_analysis_page():
                             max_frames=max_frames,
                             generate_processed_video=generate_processed_video,
                             calibration_context=practice_calibration_context,
+                            overlay_detail=overlay_detail,
                         )
                     else:
                         result = process_video(
@@ -1946,6 +1875,7 @@ def show_video_analysis_page():
                             max_frames=max_frames,
                             generate_processed_video=generate_processed_video,
                             calibration_context=practice_calibration_context,
+                            overlay_detail=overlay_detail,
                         )
                     result["analysis_mode"] = analysis_mode
                     result["active_preset"] = preset_name
@@ -1969,15 +1899,30 @@ def show_video_analysis_page():
             st.error(result.get("error", "Video analysis did not complete."))
             st.session_state.video_analysis_result = None
         else:
-            try:
-                if result.get("processed_video_generated", True) and result.get("output_path"):
+            result["raw_output_path"] = (
+                str(raw_output_path)
+                if result.get("processed_video_generated") and raw_output_path.exists()
+                else None
+            )
+            if result.get("processed_video_generated") and result.get("output_path"):
+                try:
                     final_video_path = convert_to_browser_mp4(
                         input_path=result["output_path"],
                         output_path=browser_output_path,
                     )
-                    result["output_path"] = final_video_path
-                else:
-                    result["output_path"] = None
+                    result["output_path"] = str(final_video_path)
+                    result["processed_video_conversion"] = "converted"
+                except Exception as conv_error:
+                    result["output_path"] = result.get("raw_output_path")
+                    result["processed_video_conversion"] = "failed"
+                    result["processed_video_conversion_error"] = str(conv_error)
+                    st.warning(
+                        "Processed video preview conversion failed. "
+                        "Analysis results are still available and the raw video can be downloaded."
+                    )
+            else:
+                result["output_path"] = None
+            try:
                 if analysis_mode in {"Batting Analysis", "Full Delivery Analysis"}:
                     save_batting_report(result, analysis_mode)
                 video_name = uploaded_video.name if uploaded_video is not None else None
@@ -1991,13 +1936,14 @@ def show_video_analysis_page():
                     "shot_trajectory_mode": shot_trajectory_mode,
                     "speed_mode": speed_mode,
                     "generate_processed_video": generate_processed_video,
+                    "overlay_detail": overlay_detail,
                     "show_performance_details": show_performance,
                 }
                 st.success("Analysis complete.")
             except Exception as error:
                 raw_output_path.unlink(missing_ok=True)
                 browser_output_path.unlink(missing_ok=True)
-                st.error(f"Video conversion failed: {error}")
+                st.error(f"Could not save analysis results: {error}")
                 st.session_state.video_analysis_result = None
 
     result = st.session_state.video_analysis_result

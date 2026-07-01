@@ -128,4 +128,4 @@ def test_report_pipeline_normalizes_custom_calibration_context():
     assert calibration["enabled"] is True
     assert calibration["camera_view"] == "umpire_end"
     assert calibration["batter_handedness"] == "left"
-    assert calibration["calibration_quality"] == "Good"
+    assert calibration["calibration_quality"] in {"Low", "Medium"}

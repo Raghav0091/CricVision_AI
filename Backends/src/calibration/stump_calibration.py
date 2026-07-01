@@ -51,7 +51,9 @@ def estimate_stump_reference(
             "stump_reference": stump_reference,
             "frame_width": width,
             "frame_height": height,
-            "notes": ["Batter-end stumps were estimated from existing detections."],
+            "notes": [
+                f"Batter-end stumps detected from model output ({confidence * 100:.0f}% confidence)."
+            ],
         }
 
     center = [round(width * 0.5, 3), round(height * 0.68, 3)]

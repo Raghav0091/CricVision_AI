@@ -58,6 +58,98 @@ def draw_ball_detections(frame, ball_detections):
         )
 
 
+def draw_clean_ball_markers(frame, ball_detections):
+    """Draw minimal ball markers for the clean overlay mode."""
+    for detection in ball_detections or []:
+        center = detection.get("center")
+        if center is None:
+            box = detection.get("bbox") or detection.get("box")
+            if box is None or len(box) < 4:
+                continue
+            center_x = int((box[0] + box[2]) / 2)
+            center_y = int((box[1] + box[3]) / 2)
+        else:
+            center_x, center_y = int(center[0]), int(center[1])
+        cv2.circle(frame, (center_x, center_y), 6, (0, 255, 255), 2)
+        cv2.circle(frame, (center_x, center_y), 3, (0, 255, 255), -1)
+
+
+def draw_clean_stump_markers(frame, stump_detections):
+    """Draw stump boxes without debug labels."""
+    for detection in stump_detections or []:
+        box = detection.get("bbox") or detection.get("box")
+        if box is None or len(box) < 4:
+            continue
+        x1, y1, x2, y2 = (int(value) for value in box[:4])
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 140, 0), 2)
+
+
+def draw_trajectory_lines(frame, trajectory_points, *, color=(0, 255, 255), thickness=3):
+    points = [point for point in (trajectory_points or []) if point is not None]
+    for index in range(1, len(points)):
+        cv2.line(frame, points[index - 1], points[index], color, thickness)
+
+
+def ensure_frame_writer_size(frame, width, height):
+    """Resize a frame when annotation output does not match the writer size."""
+    if frame is None:
+        return frame
+    frame_height, frame_width = frame.shape[:2]
+    if frame_width == width and frame_height == height:
+        return frame
+    return cv2.resize(frame, (width, height))
+
+
+def validate_processed_video_path(video_path):
+    """Validate that a processed video can be previewed in the UI."""
+    path = Path(str(video_path)) if video_path else None
+    result = {
+        "valid": False,
+        "exists": False,
+        "file_size": 0,
+        "width": 0,
+        "height": 0,
+        "error": "",
+        "can_preview": False,
+        "path": str(path) if path else "",
+    }
+    if path is None or not path.is_file():
+        result["error"] = "Processed video file is missing."
+        return result
+
+    result["exists"] = True
+    result["file_size"] = int(path.stat().st_size)
+    if result["file_size"] <= 0:
+        result["error"] = "Processed video file is empty."
+        return result
+
+    capture = cv2.VideoCapture(str(path))
+    if not capture.isOpened():
+        result["error"] = "Processed video could not be opened."
+        return result
+
+    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    success, frame = capture.read()
+    capture.release()
+    if not success or frame is None:
+        result["error"] = "Processed video has no readable frames."
+        return result
+
+    frame_height, frame_width = frame.shape[:2]
+    if width <= 0 or height <= 0:
+        width, height = frame_width, frame_height
+    if width <= 0 or height <= 0:
+        result["error"] = "Processed video has invalid dimensions."
+        return result
+
+    result["width"] = width
+    result["height"] = height
+    result["valid"] = True
+    result["can_preview"] = True
+    return result
+
+
 def _draw_box_detections(frame, detections, color, label):
     for detection in detections or []:
         box = detection.get("bbox") or detection.get("box")
@@ -124,7 +216,7 @@ def write_annotated_video(
                 (255, 100, 0),
                 "stump",
             )
-            writer.write(frame)
+            writer.write(ensure_frame_writer_size(frame, width, height))
     finally:
         writer.release()
 
@@ -136,7 +228,13 @@ def write_annotated_video(
 def convert_to_browser_mp4(input_path, output_path):
     import imageio_ffmpeg
 
-    subprocess.run(
+    input_path = Path(input_path)
+    output_path = Path(output_path)
+    if not input_path.is_file() or input_path.stat().st_size <= 0:
+        raise FileNotFoundError(f"Processed video source is missing or empty: {input_path}")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    completed = subprocess.run(
         [
             imageio_ffmpeg.get_ffmpeg_exe(),
             "-y",
@@ -152,8 +250,15 @@ def convert_to_browser_mp4(input_path, output_path):
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        check=True,
+        check=False,
     )
+    if completed.returncode != 0 or not output_path.is_file() or output_path.stat().st_size <= 0:
+        raise RuntimeError(
+            "Browser MP4 conversion failed. Download the raw processed video instead."
+        )
+    validation = validate_processed_video_path(output_path)
+    if not validation["valid"]:
+        raise RuntimeError(validation["error"] or "Converted video failed validation.")
     return output_path
 
 
@@ -188,7 +293,7 @@ def add_impact_marker_to_video(video_path, impact_info):
         if not success:
             break
         draw_impact_marker(frame, impact_info, frame_index)
-        writer.write(frame)
+        writer.write(ensure_frame_writer_size(frame, width, height))
         frame_index += 1
     capture.release()
     writer.release()

@@ -444,3 +444,14 @@ Production-safety findings:
 Scope boundary: this is 2D context scaffolding for future AR Nets Mode. True 3D,
 Meta/AR hardware, full virtual fielders, and calibrated metric line/length
 remain future work.
+
+## Video Analysis result UI cleanup (2026-06)
+
+- Report cards organized into summary, tabs, and expanders; unavailable
+  shot/outcome details are tucked behind expanders when impact or bat coverage
+  is missing.
+- Calibration confidence logic fixed so estimated stumps cannot display as High.
+- Processed video validation improved before preview; conversion failures keep
+  analysis results and offer raw download.
+- Clean overlay is default; debug overlay is optional. No map outputs
+  reintroduced; no model loading behavior changed.
