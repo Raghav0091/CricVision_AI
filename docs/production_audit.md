@@ -335,9 +335,9 @@ Findings:
 - Local untracked `.cursor/`, `AGENTS.md`, and `cls` exist. `cls` is captured
   terminal output. They are outside production code and must not be staged
   accidentally.
-- The old root `.pytest_cache` is unreadable on this Windows workspace.
-  `pytest.ini` now routes both temporary files and cache data under ignored
-  `outputs/`, so the documented pytest command remains portable and clean.
+- Stale root `.pytest_cache` folders can become unreadable on some Windows
+  workspaces. Pytest now uses the OS temp directory and default cache handling;
+  `.pytest_cache/` remains gitignored.
 
 ## 11. Planned safe cleanup for this pass
 
@@ -385,7 +385,7 @@ cleanup was then performed:
 | Dev-only `C:\Dataset` | Machine-specific and not portable | Replaced with project-root `data/datasets` |
 | Persistent uploaded-video temp file | File is not needed after processing returns | `TemporaryDirectory` cleans success/failure paths |
 | Partial outputs from failed analysis/conversion | Failed results are not displayed or persisted | Only paths created for that failed run are unlinked |
-| Pytest global temp/cache location | Permission-denied machine state broke the documented command | `pytest.ini` now uses ignored workspace output paths |
+| Pytest global temp/cache location | Permission-denied machine state broke the documented command | `pytest.ini` uses OS/default pytest temp and gitignored `.pytest_cache/` |
 
 No files, models, pages, registry entries, remote-loading behavior, reports, or
 session compatibility paths were removed.

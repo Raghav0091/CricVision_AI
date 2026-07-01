@@ -40,7 +40,7 @@ Dev-only pages remain gated behind `SHOW_DEV_PAGES`: `field_map.py`, `datasets_p
 | Duplicate page forwarding wrappers | Replaced with direct imports from `ui/analysis_helpers.py` |
 | Duplicate paths and detection presets | Consolidated into import-safe `config/paths.py` and `config/constants.py` |
 | Persistent uploaded-video temp file | Replaced with auto-cleaned `TemporaryDirectory` |
-| Machine-specific pytest temp/cache failure | Routed pytest temp/cache under ignored `outputs/` |
+| Machine-specific pytest temp/cache failure | Use pytest/OS default temp paths; keep `.pytest_cache/` gitignored |
 
 ## Marked legacy / inactive (kept on disk)
 
