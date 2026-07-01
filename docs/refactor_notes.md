@@ -151,3 +151,22 @@ Dev-only pages remain gated behind `SHOW_DEV_PAGES`: `field_map.py`, `datasets_p
 - This is explicitly 2D repair. Live Session integration follows Video Analysis
   validation; pseudo-3D pitch calibration is later work; true multi-camera 3D
   tracking is future research.
+
+## Practice Environment Calibration — Part 1
+
+- Added `calibration_context.py`, `stump_calibration.py`, and
+  `pitch_calibration.py`; all are deterministic, JSON-safe, and model-free.
+- Video Analysis builds a confirmed provisional context from camera view and
+  handedness, then refines it from existing stump detections after the frame
+  loop.
+- The context includes batter-end stumps, approximate crease, pitch corridor,
+  batter/bowler pitch ends, stump-line references, frame dimensions, quality,
+  and explanatory notes.
+- The report contract and session schema now carry normalized
+  `calibration_context`; missing old values become a disabled default.
+- Calibration UI is text/card-based only. Existing field setup and report
+  outputs remain intact, and no map renderer was added.
+- No model loading, remote fallback, TensorFlow/Keras, or external API behavior
+  changed.
+- This establishes a future hook for AR Nets Mode, line/length improvements,
+  virtual fielders, and ROI tuning. It is not true 3D or AR hardware support.

@@ -22,6 +22,7 @@ def test_normalize_session_result_handles_old_records():
     assert normalized["shot_type"] == "Unknown"
     assert normalized["smart_pipeline_used"] is False
     assert normalized["visual_observer_repair"] == {}
+    assert normalized["calibration_context"]["enabled"] is False
 
 
 def test_save_session_result_writes_lightweight_json(temp_session_store):
@@ -66,3 +67,28 @@ def test_corrupt_json_does_not_crash(temp_session_store):
     results = load_session_results()
     assert results == []
     assert not temp_session_store.exists()
+
+
+def test_save_session_result_preserves_calibration_context(temp_session_store):
+    saved = save_session_result(
+        {
+            "id": "calibration-id",
+            "calibration_context": {
+                "enabled": True,
+                "camera_view": "Bowler End",
+                "batter_handedness": "right",
+                "calibration_score": 0.75,
+                "pitch_corridor": {
+                    "polygon": [[1, 2], [3, 2], [4, 8], [0, 8]],
+                    "bbox": [0, 2, 4, 8],
+                    "source": "estimated",
+                },
+            },
+        }
+    )
+
+    calibration = saved["calibration_context"]
+    assert calibration["enabled"] is True
+    assert calibration["camera_view"] == "bowler_end"
+    assert calibration["calibration_quality"] == "Good"
+    assert len(calibration["pitch_corridor"]["polygon"]) == 4

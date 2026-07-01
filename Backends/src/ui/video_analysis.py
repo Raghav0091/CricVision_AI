@@ -20,6 +20,10 @@ from Backends.src.analysis.field_zones import (
     save_field_setup,
     suggest_field_adjustment,
 )
+from Backends.src.calibration.calibration_context import (
+    build_calibration_context,
+    normalize_calibration_context,
+)
 from Backends.src.config.constants import DETECTION_PRESETS
 from Backends.src.config.paths import (
     PROCESSED_VIDEO_DIR,
@@ -142,6 +146,7 @@ def save_batting_report(result, analysis_mode):
         ),
         "ball_model_used": result.get("ball_model_used", "Unknown"),
         "bat_model_used": result.get("bat_model_used", "Unknown"),
+        "calibration_context": result.get("calibration_context"),
         "processed_video_path": str(result.get("output_path", "")),
     }
     with open(report_path, "w", encoding="utf-8") as report_file:
@@ -160,6 +165,7 @@ def process_batting_video(
     speed_mode="Smart Balanced",
     max_frames=None,
     generate_processed_video=True,
+    calibration_context=None,
 ):
     """Process a clip with only the models needed for batting intelligence."""
     from Backends.src.analysis.analysis_speed import (
@@ -364,14 +370,24 @@ def process_batting_video(
             impact_info["impact_frame_image_path"] = str(preview_path)
     if generate_processed_video:
         _add_impact_marker_to_video(output_path, impact_info)
+    calibration_context = build_calibration_context(
+        calibration_context,
+        frame_detections=frame_detections,
+        frame_width=width,
+        frame_height=height,
+    )
+    report_handedness = calibration_context.get("batter_handedness")
+    if report_handedness == "unknown":
+        report_handedness = None
     reports = timed_video_reports(
         frame_detections,
         fps=fps,
         total_frames=frame_index,
-        batter_handedness=None,
+        batter_handedness=report_handedness,
         impact_result=impact_info,
         frame_width=width,
         frame_height=height,
+        calibration_context=calibration_context,
     )
     impact_info = reports["impact_result"]
     shot_info = reports["shot_result"]
@@ -407,6 +423,7 @@ def process_batting_video(
         "frame_detections": reports["frame_detections"],
         "raw_frame_detections": reports["raw_frame_detections"],
         "impact_frame_detections": reports["frame_detections"],
+        "calibration_context": reports["calibration_context"],
         "visual_observer_repair": visual_observer_repair,
         "observer_timeline": observer_timeline,
         "performance_profile": performance,
@@ -545,6 +562,7 @@ def process_video(
     speed_mode="Smart Balanced",
     max_frames=None,
     generate_processed_video=True,
+    calibration_context=None,
 ):
     from Backends.src.analysis.analysis_speed import (
         get_analysis_mode_settings,
@@ -723,6 +741,12 @@ def process_video(
     batter_handedness = normalize_handedness(field_setup.get("batter_handedness", "right"))
     bowler_arm = field_setup.get("bowler_arm", "Right-arm bowler")
     camera_view = field_setup.get("camera_view", "Behind bowler")
+    calibration_context = normalize_calibration_context(calibration_context)
+    if calibration_context.get("enabled"):
+        if calibration_context.get("batter_handedness") != "unknown":
+            batter_handedness = calibration_context["batter_handedness"]
+        if calibration_context.get("camera_view") != "unknown":
+            camera_view = calibration_context["camera_view"]
     fielders = field_setup.get("fielders", [])
     field_preset = field_setup.get("preset", "Custom")
 
@@ -1289,6 +1313,12 @@ def process_video(
         "ball_detection_rate": ball_detection_rate,
         "overall_tracking_quality": overall_tracking_quality,
     }
+    calibration_context = build_calibration_context(
+        calibration_context,
+        frame_detections=frame_detections,
+        frame_width=width,
+        frame_height=height,
+    )
     reports = timed_video_reports(
         frame_detections,
         fps=fps,
@@ -1298,6 +1328,7 @@ def process_video(
         impact_result=impact_info,
         frame_width=width,
         frame_height=height,
+        calibration_context=calibration_context,
     )
     impact_info = reports["impact_result"]
     shot_info = reports["shot_result"]
@@ -1423,6 +1454,7 @@ def process_video(
         "frame_detections": reports["frame_detections"],
         "raw_frame_detections": reports["raw_frame_detections"],
         "impact_frame_detections": reports["frame_detections"],
+        "calibration_context": reports["calibration_context"],
         "visual_observer_repair": visual_observer_repair,
         "observer_timeline": observer_timeline,
         "performance_profile": performance,
@@ -1464,6 +1496,7 @@ def show_batting_analysis_results(result):
         render_save_status,
         render_shot_direction_report,
         render_shot_report,
+        render_calibration_context_card,
         render_visual_observer_repair_card,
         render_vision_agent_report,
         video_preview_card,
@@ -1489,6 +1522,7 @@ def show_batting_analysis_results(result):
     else:
         st.warning("Processed video preview is not available for this result.")
 
+    render_calibration_context_card(result)
     render_visual_observer_repair_card(result)
     render_observer_timeline_report(result)
     render_delivery_report(result)
@@ -1513,6 +1547,7 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
         render_save_status,
         render_shot_direction_report,
         render_shot_report,
+        render_calibration_context_card,
         render_visual_observer_repair_card,
         render_vision_agent_report,
         video_preview_card,
@@ -1545,6 +1580,7 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
     else:
         st.warning("Processed video preview is not available for this result.")
 
+    render_calibration_context_card(result)
     render_visual_observer_repair_card(result)
     render_observer_timeline_report(result)
     render_delivery_report(result)
@@ -1559,7 +1595,10 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
 
 
 def show_video_analysis_page():
-    from Backends.src.ui.components import clean_upload_box
+    from Backends.src.ui.components import (
+        clean_upload_box,
+        render_calibration_context_card,
+    )
     from Backends.src.ui.theme import render_empty_state, render_page_header
 
     render_page_header(
@@ -1577,6 +1616,79 @@ def show_video_analysis_page():
     from Backends.src.ui.interactive_field_map import render_field_setup_card
 
     field_setup = render_field_setup_card(key_prefix="video_analysis_field", compact=True, default_preset="Balanced")
+
+    st.subheader("Practice Environment Calibration")
+    calibration_enabled = st.checkbox(
+        "Enable practice environment calibration",
+        value=True,
+        key="practice_calibration_enabled",
+        help="Adds approximate 2D stump, crease, pitch-corridor, and line references.",
+    )
+    calibration_cols = st.columns(2)
+    camera_view_labels = {
+        "Umpire End": "umpire_end",
+        "Batter View": "batter_view",
+        "Bowler End": "bowler_end",
+        "Side View": "side_view",
+        "Unknown": "unknown",
+    }
+    handedness_labels = {
+        "Right-handed": "right",
+        "Left-handed": "left",
+        "Unknown": "unknown",
+    }
+    with calibration_cols[0]:
+        calibration_camera_label = st.selectbox(
+            "Camera view",
+            list(camera_view_labels),
+            index=0,
+            key="practice_calibration_camera_view",
+            disabled=not calibration_enabled,
+        )
+    with calibration_cols[1]:
+        calibration_handedness_label = st.selectbox(
+            "Batter handedness",
+            list(handedness_labels),
+            index=0,
+            key="practice_calibration_handedness",
+            disabled=not calibration_enabled,
+        )
+    calibration_auto_estimate = st.checkbox(
+        "Auto-estimate stumps and pitch corridor from analysis detections",
+        value=True,
+        key="practice_calibration_auto_estimate",
+        disabled=not calibration_enabled,
+        help="Uses stump detections already produced after Analyze is clicked; it does not run another model.",
+    )
+    calibration_confirmed = st.checkbox(
+        "Confirm calibration for analysis",
+        value=True,
+        key="practice_calibration_confirmed",
+        disabled=not calibration_enabled,
+    )
+    practice_calibration_context = build_calibration_context(
+        {
+            "enabled": calibration_enabled and calibration_confirmed,
+            "confirmed": calibration_confirmed,
+            "auto_estimate": calibration_auto_estimate,
+            "camera_view": camera_view_labels[calibration_camera_label],
+            "batter_handedness": handedness_labels[
+                calibration_handedness_label
+            ],
+            "notes": (
+                [
+                    "Provisional geometry will be refined from existing stump "
+                    "detections during analysis."
+                ]
+                if calibration_enabled and calibration_confirmed
+                else []
+            ),
+        }
+    )
+    render_calibration_context_card(
+        practice_calibration_context,
+        compact=True,
+    )
 
     clean_upload_box("Upload cricket video")
     uploaded_video = st.file_uploader(
@@ -1812,6 +1924,7 @@ def show_video_analysis_page():
                             speed_mode=speed_mode,
                             max_frames=max_frames,
                             generate_processed_video=generate_processed_video,
+                            calibration_context=practice_calibration_context,
                         )
                     else:
                         result = process_video(
@@ -1832,6 +1945,7 @@ def show_video_analysis_page():
                             speed_mode=speed_mode,
                             max_frames=max_frames,
                             generate_processed_video=generate_processed_video,
+                            calibration_context=practice_calibration_context,
                         )
                     result["analysis_mode"] = analysis_mode
                     result["active_preset"] = preset_name

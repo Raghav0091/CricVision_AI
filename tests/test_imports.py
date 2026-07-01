@@ -7,6 +7,9 @@ import pytest
 
 
 MODULES = [
+    "Backends.src.calibration.calibration_context",
+    "Backends.src.calibration.pitch_calibration",
+    "Backends.src.calibration.stump_calibration",
     "Backends.src.config.constants",
     "Backends.src.config.paths",
     "Backends.src.ui.dashboard",

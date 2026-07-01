@@ -92,7 +92,7 @@ largest architecture debt, but moving them now would be a risky rewrite.
 
 ### Tests and scripts
 
-There are 64 collected lightweight tests across configuration, normalization, impact,
+There are 80 collected lightweight tests across calibration, configuration, normalization, impact,
 direction, outcome, observer timeline, tracking repair, report integration,
 session compatibility, import safety, and video helpers. OpenCV-dependent
 modules may be skipped when the optional codec/runtime is absent.
@@ -354,20 +354,29 @@ Findings:
 
 ## 12. Manual Streamlit checklist
 
-- [ ] Dashboard opens quickly.
-- [ ] Dashboard import/status does not load a model.
-- [ ] Video Analysis opens.
+- [x] Dashboard opens quickly.
+- [x] Dashboard import/status does not load a model.
+- [x] Video Analysis opens.
+- [x] Practice Environment Calibration controls and provisional text summary appear.
+- [x] Camera view and batter handedness selectors appear.
+- [x] Calibration enable, auto-estimate, and confirmation controls appear.
 - [ ] A short video uploads and previews.
 - [ ] Smart Balanced completes.
+- [ ] Analysis completes with calibration disabled and enabled.
+- [ ] Final Calibration Context card appears after analysis.
 - [ ] Visual Observer Repair card appears.
 - [ ] Impact, Shot, Direction, and Outcome reports appear.
 - [ ] Session Results saves the new record.
 - [ ] Old saved results still open.
 - [ ] Live Session opens and webcam controls remain stable.
-- [ ] Dev-only pages remain hidden with `SHOW_DEV_PAGES=False`.
+- [x] Dev-only pages remain hidden with `SHOW_DEV_PAGES=False`.
 - [ ] No bounce map, field map, shot-placement map, or wagon-wheel output is
   rendered in production reports.
 - [ ] No secrets are printed in the UI or logs.
+
+Checked items were verified against the local Streamlit app on 2026-07-01.
+Video/model inference, saved-result display, and webcam checks remain manual
+because no real clip or camera was used during this audit.
 
 ## 13. Cleanup record
 
@@ -406,3 +415,32 @@ session compatibility paths were removed.
    coverage exists.
 8. Consider optional model-registry cleanup later; keep experimental entries
    and lazy Keras metadata until that decision is explicit.
+
+## 15. Practice Environment Calibration — Part 1
+
+Production architecture now includes `Backends/src/calibration/`:
+
+- `calibration_context.py` owns the backward-compatible JSON contract, quality
+  labels, validation, and high-level context construction.
+- `stump_calibration.py` consumes existing detections and falls back to a
+  conservative frame-relative estimate; it never runs a model.
+- `pitch_calibration.py` derives approximate 2D corridor, crease, pitch-end, and
+  handedness-aware stump-line references.
+
+Video Analysis presents simple optional controls and passes a provisional
+context into processing. Once detections exist, the same context is refined and
+sent through the report pipeline. Reports and session records retain the small
+normalized dictionary; old records receive a disabled default.
+
+Production-safety findings:
+
+- No Dashboard or Video Analysis page-load model call was introduced.
+- No new dependency, network call, Keras path, or Hugging Face behavior exists.
+- Calibration failure or missing detections produces estimated/disabled context
+  rather than blocking existing analysis.
+- Live Session continues passing no context and remains behaviorally unchanged.
+- UI output is metrics, status text, and notes only; no map output returned.
+
+Scope boundary: this is 2D context scaffolding for future AR Nets Mode. True 3D,
+Meta/AR hardware, full virtual fielders, and calibrated metric line/length
+remain future work.

@@ -9,6 +9,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from Backends.src.calibration.calibration_context import (
+    normalize_calibration_context,
+)
 from Backends.src.config.paths import (
     DATA_DIR,
     SESSION_CLIPS_DIR,
@@ -205,6 +208,9 @@ def normalize_session_result(result: dict | None) -> dict:
         "detection_quality": result.get("detection_quality", observer.get("detection_quality", STRING_DEFAULT))
         or STRING_DEFAULT,
         "observer_notes": result.get("observer_notes", observer.get("observer_notes", "")) or "",
+        "calibration_context": normalize_calibration_context(
+            result.get("calibration_context")
+        ),
         "visual_observer_repair": _normalize_visual_observer_repair(repair),
         "smart_analysis_mode": result.get(
             "smart_analysis_mode",
@@ -436,6 +442,7 @@ def build_session_record_from_analysis(
             ),
             "detection_quality": observer.get("detection_quality"),
             "observer_notes": observer.get("observer_notes"),
+            "calibration_context": result.get("calibration_context"),
             "visual_observer_repair": result.get("visual_observer_repair") or {},
             "ball_tracking_coverage": result.get("ball_tracking_coverage")
             or observer.get("ball_tracking_coverage"),
@@ -569,6 +576,7 @@ def session_record_to_report_view(record: dict) -> dict:
             "observer_notes": record.get("observer_notes"),
         },
         "visual_observer_repair": record.get("visual_observer_repair") or {},
+        "calibration_context": record.get("calibration_context"),
     }
 
 

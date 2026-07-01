@@ -4,6 +4,7 @@ from Backends.src.video_pipeline.report_pipeline import build_video_reports
 
 
 EXPECTED_REPORT_KEYS = {
+    "calibration_context",
     "visual_observer_repair",
     "observer_timeline",
     "impact_result",

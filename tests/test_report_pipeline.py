@@ -48,6 +48,7 @@ def test_report_pipeline_returns_safe_result_keys():
     )
 
     expected_keys = {
+        "calibration_context",
         "visual_observer_repair",
         "observer_timeline",
         "impact_result",
@@ -58,6 +59,7 @@ def test_report_pipeline_returns_safe_result_keys():
     }
     assert expected_keys <= result.keys()
     assert result["visual_observer_repair"]["repair_confidence"] in {"Low", "Medium", "High"}
+    assert result["calibration_context"]["enabled"] is False
     assert result["observer_timeline"]["processed_frames"] == 2
     assert result["impact_result"]["impact_detected"] in {True, False}
     assert result["shot_result"]["shot_type"]
@@ -107,3 +109,23 @@ def test_report_pipeline_falls_back_to_raw_timeline_when_repair_fails(monkeypatc
     ]
     assert result["visual_observer_repair"]["repair_confidence"] == "Low"
     assert "raw detections" in result["visual_observer_repair"]["agent_decision"]
+
+
+def test_report_pipeline_normalizes_custom_calibration_context():
+    result = build_video_reports(
+        _dummy_frame_detections(),
+        fps=25,
+        total_frames=2,
+        calibration_context={
+            "enabled": True,
+            "camera_view": "Umpire End",
+            "batter_handedness": "Left-handed",
+            "calibration_score": 0.75,
+        },
+    )
+
+    calibration = result["calibration_context"]
+    assert calibration["enabled"] is True
+    assert calibration["camera_view"] == "umpire_end"
+    assert calibration["batter_handedness"] == "left"
+    assert calibration["calibration_quality"] == "Good"

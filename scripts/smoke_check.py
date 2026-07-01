@@ -115,8 +115,15 @@ def main() -> int:
         total_frames=2,
         batter_handedness="right",
         delivery_report={"estimated_line": "Middle"},
+        calibration_context={
+            "enabled": True,
+            "camera_view": "umpire_end",
+            "batter_handedness": "right",
+            "calibration_score": 0.75,
+        },
     )
     expected_report_keys = {
+        "calibration_context",
         "visual_observer_repair",
         "observer_timeline",
         "impact_result",
@@ -126,6 +133,7 @@ def main() -> int:
         "agent_result",
     }
     assert expected_report_keys <= pipeline_reports.keys()
+    assert pipeline_reports["calibration_context"]["calibration_quality"] == "Good"
     assert pipeline_reports["observer_timeline"]["processed_frames"] == 2
 
     print("Smoke checks passed")

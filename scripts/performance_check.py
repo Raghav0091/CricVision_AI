@@ -42,6 +42,9 @@ def benchmark_helpers(frame_count: int = 500, repeats: int = 5) -> dict[str, flo
     from Backends.src.analysis.impact_detection import detect_bat_ball_impact
     from Backends.src.analysis.outcome_prediction import predict_shot_outcome
     from Backends.src.analysis.shot_direction import estimate_shot_direction_zone
+    from Backends.src.calibration.calibration_context import (
+        build_calibration_context,
+    )
     from Backends.src.video_pipeline.report_pipeline import build_video_reports
 
     raw = _build_dummy_timeline(frame_count)
@@ -53,6 +56,22 @@ def benchmark_helpers(frame_count: int = 500, repeats: int = 5) -> dict[str, flo
     timings["normalize_frame_detections_ms"] = ((time.perf_counter() - start) / repeats) * 1000
 
     frames = normalize_frame_detections(raw)
+    start = time.perf_counter()
+    for _ in range(repeats):
+        build_calibration_context(
+            {
+                "enabled": True,
+                "camera_view": "umpire_end",
+                "batter_handedness": "right",
+            },
+            frame_detections=frames,
+            frame_width=1280,
+            frame_height=720,
+        )
+    timings["practice_calibration_ms"] = (
+        (time.perf_counter() - start) / repeats
+    ) * 1000
+
     repair_frames = _build_dummy_timeline(200)
     start = time.perf_counter()
     for _ in range(repeats):

@@ -183,7 +183,7 @@ Shares: `cricket_agent`, `field_zones` (internal context only),
 
 ```
 python -m compileall -q Backends   → pass
-python -m pytest -q                -> 63 passed, 1 skipped locally (optional OpenCV/imageio package absent)
+python -m pytest -q                -> 79 passed, 1 skipped locally (optional OpenCV/imageio package absent)
 python scripts/smoke_check.py      → Smoke checks passed
 python scripts/performance_check.py -> pass, including the synthetic report pipeline
 ```
@@ -247,3 +247,29 @@ streamlit run main.py
 Future work remains deliberately separate: validate Video Analysis first, then
 consider Live Session integration; pseudo-3D pitch calibration can come later;
 real multi-camera 3D tracking remains research scope.
+
+---
+
+## 11. Practice Environment Calibration — Part 1
+
+- Added an import-safe, model-free `calibration/` package with stable context
+  normalization, validation, stump-reference estimation, pitch-corridor
+  estimation, pitch-end/crease references, and handedness-aware stump-line
+  references.
+- Video Analysis now offers optional camera-view, batter-handedness,
+  auto-estimation, and confirmation controls before analysis.
+- The provisional context is refined from stump detections already produced by
+  the normal frame loop. No extra YOLO pass or page-load model activity was
+  added.
+- `report_pipeline.py` accepts and returns normalized `calibration_context`
+  while preserving every existing report.
+- Video Analysis and Session Results render text-only calibration summaries;
+  no pitch, field, bounce, wagon-wheel, or shot-placement map was introduced.
+- Session JSON stores only the small JSON-safe context. Old records normalize
+  to a disabled default.
+- This is approximate 2D practice-environment context, not metric 3D tracking,
+  AR glasses integration, or a virtual-field engine.
+- The context prepares future AR Nets Mode, improved line/length rules, virtual
+  fielder reasoning, and calibrated ROI optimization.
+- Model registry, Hugging Face fallback, and lazy-only Keras behavior are
+  unchanged.

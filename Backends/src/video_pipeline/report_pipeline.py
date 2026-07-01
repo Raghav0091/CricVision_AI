@@ -10,6 +10,9 @@ from Backends.src.analysis.delivery_enrichment import run_post_shot_pipeline
 from Backends.src.analysis.frame_detection_utils import normalize_frame_detections
 from Backends.src.analysis.impact_detection import detect_bat_ball_impact
 from Backends.src.analysis.shot_classification import classify_shot_type
+from Backends.src.calibration.calibration_context import (
+    normalize_calibration_context,
+)
 
 
 def build_video_reports(
@@ -24,10 +27,33 @@ def build_video_reports(
     frame_width=None,
     frame_height=None,
     enable_visual_observer_repair=True,
+    calibration_context=None,
 ) -> dict:
     """Build every report from the same timeline without running detection."""
     raw_frames = normalize_frame_detections(frame_detections)
     frame_count = len(raw_frames) if total_frames is None else int(total_frames)
+    calibration_context = normalize_calibration_context(calibration_context)
+    calibrated_handedness = calibration_context.get("batter_handedness")
+    if (
+        batter_handedness in {None, "", "unknown", "Unknown"}
+        and calibration_context.get("enabled")
+        and calibrated_handedness != "unknown"
+    ):
+        batter_handedness = calibrated_handedness
+    if isinstance(delivery_report, dict):
+        delivery_report = dict(delivery_report)
+        delivery_report.setdefault(
+            "calibration_quality",
+            calibration_context["calibration_quality"],
+        )
+        if (
+            calibration_context.get("enabled")
+            and calibration_context["calibration_quality"] in {"Low", "Medium"}
+        ):
+            delivery_report.setdefault(
+                "calibration_note",
+                "Practice-environment context is estimated.",
+            )
 
     if enable_visual_observer_repair:
         visual_observer = run_visual_observer_repair(
@@ -83,6 +109,7 @@ def build_video_reports(
     return {
         "frame_detections": frames,
         "raw_frame_detections": raw_frame_detections,
+        "calibration_context": calibration_context,
         "visual_observer_repair": visual_observer_repair,
         "observer_timeline": observer_timeline,
         "impact_result": impact_result,

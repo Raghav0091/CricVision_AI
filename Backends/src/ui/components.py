@@ -5,6 +5,9 @@ from pathlib import Path
 
 import streamlit as st
 
+from Backends.src.calibration.calibration_context import (
+    normalize_calibration_context,
+)
 from Backends.src.ui.theme import (
     render_empty_state,
     render_metric_card,
@@ -306,6 +309,73 @@ def render_observer_timeline_report(timeline):
         st.info(str(notes))
     else:
         st.info("Observer timeline data is not available for this result.")
+
+
+def render_calibration_context_card(calibration_context, compact=False):
+    """Render text-only practice-environment calibration context."""
+    data = calibration_context or {}
+    if isinstance(data, dict) and "calibration_context" in data:
+        data = data.get("calibration_context")
+    data = normalize_calibration_context(data)
+
+    st.subheader("Calibration Context")
+    enabled = bool(data.get("enabled"))
+    stump = (data.get("stumps") or {}).get("batter_end") or {}
+    corridor = data.get("pitch_corridor") or {}
+
+    if compact:
+        cols = st.columns(4)
+        cols[0].metric("Enabled", "Yes" if enabled else "No")
+        cols[1].metric(
+            "Camera View",
+            _display_value(data.get("camera_view")).replace("_", " ").title(),
+        )
+        cols[2].metric(
+            "Handedness",
+            _display_value(data.get("batter_handedness")).replace("_", " ").title(),
+        )
+        cols[3].metric(
+            "Quality",
+            _display_value(data.get("calibration_quality")),
+        )
+        st.caption(
+            "Stumps: "
+            f"{_display_value(stump.get('status')).title()} "
+            f"({_display_value(stump.get('source'))}); "
+            "pitch corridor: "
+            f"{_display_value(corridor.get('status')).title()}."
+        )
+    else:
+        cols = st.columns(4)
+        cols[0].metric("Calibration Enabled", "Yes" if enabled else "No")
+        cols[1].metric(
+            "Camera View",
+            _display_value(data.get("camera_view")).replace("_", " ").title(),
+        )
+        cols[2].metric(
+            "Batter Handedness",
+            _display_value(data.get("batter_handedness")).replace("_", " ").title(),
+        )
+        cols[3].metric(
+            "Calibration Quality",
+            _display_value(data.get("calibration_quality")),
+        )
+        detail_cols = st.columns(2)
+        detail_cols[0].metric(
+            "Stumps",
+            f"{_display_value(stump.get('status')).title()} "
+            f"({_display_value(stump.get('source'))})",
+        )
+        detail_cols[1].metric(
+            "Pitch Corridor",
+            _display_value(corridor.get("status")).title(),
+        )
+
+    notes = data.get("notes") or []
+    if not enabled and not notes:
+        notes = ["Practice environment calibration was disabled for this analysis."]
+    for note in notes:
+        st.caption(f"• {note}")
 
 
 def render_visual_observer_repair_card(repair_report, compact=False):
@@ -640,6 +710,8 @@ def render_session_result_card(result: dict, expanded: bool = False):
                 st.info("Impact frame preview file not found")
 
         render_observer_timeline_report(report_view)
+        if (report_view.get("calibration_context") or {}).get("enabled"):
+            render_calibration_context_card(report_view, compact=True)
         render_visual_observer_repair_card(report_view, compact=True)
         render_delivery_report(report_view)
         render_impact_report(report_view)
