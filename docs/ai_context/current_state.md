@@ -11,6 +11,8 @@
 ## Implemented
 
 - Video Analysis, Live Session, Session Results, and processed-video preview.
+- Reusable `analyze_delivery_clip()` engine entrypoint with engine-owned
+  delivery/batting processors, normalized options, and a stable result.
 - Visual Observer Agent with deterministic 2D ball-tracking repair.
 - Practice Environment Calibration and Calibration Context card.
 - Observer Timeline and Delivery, Impact, and Shot reports.
@@ -23,6 +25,7 @@
 Core code is organized under:
 
 - `Backends/src/video_pipeline/`
+- `Backends/src/engine/`
 - `Backends/src/agents/`
 - `Backends/src/calibration/`
 - `Backends/src/analysis/`
@@ -44,9 +47,8 @@ Pro Nets Capture → Continuous Batter Session Engine → Fast Analysis Mode →
 
 ## Next Engineering Tasks
 
-1. Finish Video Analysis UI cleanup if any gaps remain.
-2. Extract CricVision Core Engine with `analyze_delivery_clip()`.
+1. Add a real-video benchmark pack for the extracted engine.
+2. Manually verify all Video Analysis modes and overlays.
 3. Build a Continuous Batter Session MVP with a manual delivery marker.
-4. Add a real-video benchmark pack.
-5. Add Fast Analysis Mode.
-6. Add Coaching Agent v1.
+4. Add Fast Analysis Mode.
+5. Add Coaching Agent v1.

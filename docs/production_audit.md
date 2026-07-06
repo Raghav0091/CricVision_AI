@@ -11,8 +11,9 @@ lazy, one shared detection timeline feeds reports, and deterministic observer
 repair has no model or network dependency. The main production risks are not
 algorithmic. They are maintenance and lifecycle risks:
 
-- `ui/video_analysis.py` (about 1,900 lines) and `ui/live_session.py` (about
-  1,360 lines) each combine UI, orchestration, frame loops, and result shaping.
+- `ui/live_session.py` (about 1,360 lines) still combines webcam UI,
+  orchestration, frame loops, and result shaping. Uploaded Video Analysis now
+  delegates its frame loops to the engine.
 - Output and model paths are repeated and mostly relative to the current
   process directory.
 - Uploaded Video Analysis input is written with `delete=False` and is not
@@ -61,8 +62,23 @@ large page modules should not be split in the same pass.
   conversion, and impact markers.
 - `video_pipeline/performance_timer.py`: stable timing/profile schema.
 
-The mature frame loops still live in the two UI page modules. That is the
-largest architecture debt, but moving them now would be a risky rewrite.
+The uploaded-video frame loops now live under `engine/processors/`. The Live
+Session webcam loop remains UI-local because its camera lifecycle is separate.
+
+### Delivery engine
+
+- `engine/analyze_delivery.py`: public single-clip entrypoint, early input
+  validation, analysis-mode dispatch, processed-video finalization, and warning
+  collection.
+- `engine/engine_options.py`: normalized public and compatibility options.
+- `engine/engine_result.py`: stable structured result while retaining the
+  legacy flat keys used by Streamlit and Session Results.
+- `engine/processors/delivery.py`: full Bowling/Full Delivery frame loop.
+- `engine/processors/batting.py`: batting-focused frame loop.
+
+Video Analysis calls the engine instead of selecting processors and converting
+outputs itself. Engine imports remain model-free and do not import Streamlit or
+UI modules. Optional progress callbacks preserve Streamlit progress feedback.
 
 ### Agents
 
@@ -125,9 +141,10 @@ experimental, `lazy_only`, and has no active caller.
 
 ### Internal dependency direction
 
-- UI modules import analysis, models, storage, and video-pipeline modules.
+- UI modules import the engine, models, storage, and presentation helpers.
 - No analysis, agent, model, storage, or video-pipeline module imports
   `Backends.src.ui`.
+- No engine module imports `Backends.src.ui` or Streamlit.
 - Tests can import backend report and repair modules without starting
   Streamlit.
 - Model modules optionally know how to display Streamlit warnings. This is a
@@ -149,7 +166,9 @@ by moving code during this cleanup.
 
 | Approx. lines | File | Purpose and risk | Action |
 |---:|---|---|---|
-| 1,901 | `ui/video_analysis.py` | UI, upload lifecycle, two frame loops, calibration, outputs | Split later, after real-video regression fixture |
+| ~870 | `ui/video_analysis.py` | UI, upload lifecycle, calibration controls, persistence, rendering | Keep as Streamlit adapter |
+| ~1,230 | `engine/processors/delivery.py` | Full uploaded-video frame loop and result shaping | Benchmark with representative real clips |
+| ~410 | `engine/processors/batting.py` | Batting-focused frame loop and result shaping | Benchmark with representative real clips |
 | 1,359 | `ui/live_session.py` | WebRTC state, recording, detection loop, reports, UI | Split later; webcam behavior is high risk |
 | 1,056 | `ui/components.py` | All report, result, filter, and utility renderers | Optional domain-based UI split later |
 | 791 | `ui/interactive_field_map.py` | Field input plus dev-only plotting/canvas code | Keep; separate input from plotting later |
@@ -159,8 +178,8 @@ by moving code during this cleanup.
 | 492 | `agents/tracking_repair_agent.py` | Defensive shape handling and repair | Keep now; consider helper reduction after validation |
 | 421 | `ui/theme.py` | CSS and shared UI primitives | Keep |
 
-No large file should be split in this pass. Tests do not yet exercise real
-Video Analysis or Live Session frame loops deeply enough to make that safe.
+The extracted delivery processor remains large because this pass moved proven
+behavior mechanically. Split it only after real-video regression coverage.
 
 ## 5. Duplicate-code audit
 
@@ -309,7 +328,8 @@ Important missing coverage:
   have import guards but few direct unit tests.
 - `analysis_speed`, `smart_pipeline`, `ball_tracking_utils`, field geometry,
   and field-zone persistence lack focused tests.
-- Video Analysis and Live Session frame loops remain mostly manual.
+- Engine delivery processors and Live Session remain mostly manual/real-video
+  verification paths.
 - Upload cleanup and generated-output retention are not tested.
 - Dashboard “no model load” is inferred through import tests, not a Streamlit
   AppTest.
@@ -411,7 +431,7 @@ session compatibility paths were removed.
    makes local JSON insufficient.
 6. Consider pseudo-3D pitch calibration later. Real multi-camera 3D tracking is
    research scope.
-7. Split UI components or page frame loops only after real-video regression
+7. Split the large delivery processor only after real-video regression
    coverage exists.
 8. Consider optional model-registry cleanup later; keep experimental entries
    and lazy Keras metadata until that decision is explicit.
@@ -455,3 +475,35 @@ remain future work.
   analysis results and offer raw download.
 - Clean overlay is default; debug overlay is optional. No map outputs
   reintroduced; no model loading behavior changed.
+
+## 16. CricVision Core Engine - Sprint 1 (2026-07-05)
+
+- Added `Backends/src/engine/` with a public `analyze_delivery_clip()` function,
+  normalized `EngineOptions`, and backward-compatible `EngineResult`.
+- Missing or unreadable videos fail before any processor or model load.
+- Existing Bowling, Batting, and Full Delivery modes retain their model,
+  confidence, smart-mode, calibration, overlay, Visual Observer, report, and
+  processed-video paths.
+- Processed-video browser conversion and validation moved from the Streamlit
+  action handler into the engine.
+- Streamlit still owns upload lifecycle, report/session persistence, and
+  rendering. Session storage schemas were not changed.
+- Import/default/error/result-normalization tests require no model files, GPU,
+  camera, token, or internet.
+
+## 17. CricVision Core Engine extraction completed (2026-07-06)
+
+- Moved the established full-delivery and batting frame loops from
+  `ui/video_analysis.py` to `engine/processors/`.
+- Removed the engine-to-UI import. Engine modules are Streamlit-free and retain
+  lazy model loading.
+- Added an optional progress callback to `EngineOptions`; Streamlit preserves
+  its frame progress/status display without entering the processor layer.
+- Video Analysis retains widgets, upload cleanup, report/session persistence,
+  preview warnings, and rendering only.
+- Existing success-result key sets remain unchanged for Session Results and
+  report compatibility.
+
+Remaining verification: run all modes against representative real cricket
+clips, including clean/debug overlays, calibration on/off, processed video
+on/off, and browser-conversion fallback.

@@ -14,6 +14,9 @@ Production navigation (`main.py`, `SHOW_DEV_PAGES=False`):
 
 Analysis stack:
 
+- Engine: `engine/analyze_delivery.py`, `engine/engine_options.py`,
+  `engine/engine_result.py`, `engine/processors/delivery.py`,
+  `engine/processors/batting.py`
 - Video pipeline: `video_pipeline/video_reader.py`, `detection_pipeline.py`,
   `report_pipeline.py`, `annotation_writer.py`, `performance_timer.py`
 - Smart pipeline: `analysis/smart_pipeline.py`, `analysis/analysis_speed.py`
@@ -24,6 +27,29 @@ Analysis stack:
 - Storage: `storage/session_store.py`
 
 Dev-only pages remain gated behind `SHOW_DEV_PAGES`: `field_map.py`, `datasets_page.py`, `training_page.py`.
+
+## CricVision Core Engine
+
+- Added the model-free import surface
+  `analyze_delivery_clip(video_path, calibration_context=None, options=None)`.
+- `EngineOptions` normalizes analysis/smart mode, processed-video behavior,
+  clean/debug overlays, confidence, and existing advanced Video Analysis
+  controls.
+- `EngineResult` preserves the legacy flat result consumed by Streamlit and
+  adds stable nested report, calibration, observer, performance, warning, and
+  error fields.
+- The engine validates the input before processor/model access, dispatches the
+  current analysis mode, and owns browser conversion plus processed-video
+  validation.
+- Video Analysis now calls the engine and retains existing report saving,
+  Session Results persistence, spinner/progress, and result rendering.
+- Visual Observer repair, calibration, reports, output annotation, and lazy
+  model loading still use the established pipeline.
+- The full-delivery and batting frame loops now live in
+  `engine/processors/`. Progress is an optional callback, so processors have no
+  Streamlit dependency while the existing progress UI remains.
+- `engine/` has no import of `Backends.src.ui`; model construction remains
+  lazy inside processor calls.
 
 ## Removed from active path
 
@@ -41,6 +67,7 @@ Dev-only pages remain gated behind `SHOW_DEV_PAGES`: `field_map.py`, `datasets_p
 | Duplicate paths and detection presets | Consolidated into import-safe `config/paths.py` and `config/constants.py` |
 | Persistent uploaded-video temp file | Replaced with auto-cleaned `TemporaryDirectory` |
 | Machine-specific pytest temp/cache failure | Use pytest/OS default temp paths; keep `.pytest_cache/` gitignored |
+| Uploaded-video processing loops in `ui/video_analysis.py` | Moved mechanically to `engine/processors/`; UI now calls `analyze_delivery_clip()` | Engine/UI import tests and result-key comparison |
 
 ## Marked legacy / inactive (kept on disk)
 
@@ -72,13 +99,9 @@ Dev-only pages remain gated behind `SHOW_DEV_PAGES`: `field_map.py`, `datasets_p
 
 ## Not removed (risky / future work)
 
-- The two established frame loops remain in `video_analysis.py` for this safe
-  pass. Shared model, ROI, annotation, report, video I/O, and timing helpers now
-  resolve through `video_pipeline/`; moving the loops themselves is the next
-  isolated refactor.
+- The Live Session webcam frame loop remains in `ui/live_session.py`; webcam
+  lifecycle is separate from uploaded-clip engine extraction.
 - Detection presets and stable project paths now come from import-safe config modules.
-- The duplicate shared helper definitions were removed from `video_analysis.py`;
-  its established frame loops now call `video_pipeline` implementations.
 - `player_frame_stride` in smart settings: reserved for future player model wiring.
 
 ## Video pipeline extraction

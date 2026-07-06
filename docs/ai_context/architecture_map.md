@@ -6,6 +6,19 @@
 
 Streamlit entrypoint and page router. `SHOW_DEV_PAGES` gates non-production pages.
 
+### `Backends/src/engine/`
+
+- `analyze_delivery.py`
+- `engine_options.py`
+- `engine_result.py`
+- `processors/delivery.py`
+- `processors/batting.py`
+
+Owns the reusable `analyze_delivery_clip(video_path, calibration_context,
+options)` entrypoint, input validation, mode dispatch, processed-video
+finalization, warnings/errors, the stable result contract, and both uploaded
+video frame loops. Engine imports do not load models or import Streamlit/UI.
+
 ### `Backends/src/ui/`
 
 - `dashboard.py`
@@ -16,7 +29,9 @@ Streamlit entrypoint and page router. `SHOW_DEV_PAGES` gates non-production page
 - `analysis_helpers.py`
 - `theme.py`
 
-Owns presentation and Streamlit interaction where possible. It should not become the whole product.
+Owns presentation, widgets, upload lifecycle, report/session persistence, and
+Streamlit interaction. Video Analysis calls the engine and contains no
+detection/report frame loop.
 
 ### `Backends/src/video_pipeline/`
 
@@ -92,14 +107,17 @@ Fast contract and performance checks.
 
 ## Target Direction
 
-Add a framework-neutral engine:
+Continue the framework-neutral engine:
 
 ```text
 Backends/src/engine/
     analyze_delivery.py
-    session_engine.py
     engine_options.py
     engine_result.py
+    processors/
+        delivery.py
+        batting.py
+    session_engine.py      # later
 
 services/api/       # later
 services/worker/    # later
@@ -111,4 +129,6 @@ The engine should expose:
 analyze_delivery_clip(video_path, calibration_context, options)
 ```
 
-Streamlit should call this engine. Future FastAPI, worker, mobile, and glasses clients should call the same engine. Avoid adding more heavy analysis logic directly to large Streamlit pages.
+Streamlit calls this engine. Future FastAPI, worker, mobile, and glasses
+clients should call the same engine. Do not move analysis logic back into
+Streamlit pages.
