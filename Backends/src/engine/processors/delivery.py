@@ -32,6 +32,7 @@ from Backends.src.tracking.ball_tracking_utils import (
     interpolate_missing_positions,
     smooth_trajectory,
 )
+from Backends.src.tracking.trajectory_scorer import TrajectoryBallSelector
 from Backends.src.utils.cv2_loader import cv2
 from Backends.src.video_pipeline.annotation_writer import (
     add_impact_marker_to_video,
@@ -45,7 +46,6 @@ from Backends.src.video_pipeline.annotation_writer import (
     save_review_frame,
 )
 from Backends.src.video_pipeline.detection_pipeline import (
-    choose_main_ball,
     compute_pitch_homography,
     estimate_auto_pitch_corners,
     estimate_length_from_bounce,
@@ -276,6 +276,7 @@ def process_delivery_video(
 
     previous_ball_center = None
     kalman_tracker = BallKalmanTracker(max_missing_frames=10)
+    trajectory_selector = TrajectoryBallSelector(width, height)
     missing_ball_frames = 0
     max_missing_ball_frames = 12
     estimated_bounce_point = None
@@ -645,9 +646,10 @@ def process_delivery_video(
                 stump_detections,
             )
 
-        main_ball = choose_main_ball(
+        main_ball = trajectory_selector.select(
             ball_detections,
             previous_ball_center,
+            kalman_prediction=kalman_tracker.last_prediction,
         )
 
         if main_ball is not None:
@@ -977,6 +979,19 @@ def process_delivery_video(
         tracking_quality["interpolated_frames"],
         kalman_predicted_frames,
     )
+    if (
+        not trajectory_selector.has_reliable_track()
+        or overall_tracking_quality == "Poor"
+    ):
+        estimated_bounce_point = None
+        estimated_bounce_frame = None
+        estimated_line = "Unknown"
+        estimated_length = "Unknown"
+        pitch_normalized_bounce_point = None
+        overall_tracking_quality = "Poor"
+    ball_tracking_debug = trajectory_selector.debug_summary(
+        overall_tracking_quality
+    )
     delivery_report = {
         "estimated_line": estimated_line,
         "estimated_length": estimated_length,
@@ -1143,6 +1158,7 @@ def process_delivery_video(
         "kalman_predicted_frames": kalman_predicted_frames,
         "tracker_recoveries": tracker_recoveries,
         "overall_tracking_quality": overall_tracking_quality,
+        "ball_tracking_debug": ball_tracking_debug,
         "stump_detection_rate": stump_detection_rate,
         "average_ball_confidence": average_confidence,
         "full_frame_detection_time_ms": (
