@@ -1,6 +1,9 @@
 """Trajectory-aware ball selection tests use only fake detections."""
 
-from Backends.src.tracking.trajectory_scorer import TrajectoryBallSelector
+from Backends.src.tracking.trajectory_scorer import (
+    TrajectoryBallSelector,
+    resolve_delivery_tracking_quality,
+)
 
 
 def _ball(center, confidence=0.9):
@@ -381,3 +384,118 @@ def test_select_can_report_candidate_diagnostics():
         item["rejected"] and "impossible_jump" in item["rejection_reason"]
         for item in diagnostics
     )
+
+
+def _moving_track(
+    selector,
+    *,
+    count=10,
+    start=(100, 100),
+    step=(12, 2),
+    start_frame=62,
+):
+    previous = None
+    for index in range(count):
+        center = (start[0] + step[0] * index, start[1] + step[1] * index)
+        chosen = selector.select(
+            [_ball(center, 0.8)],
+            previous_center=previous,
+            frame_index=start_frame + index,
+        )
+        if chosen is not None:
+            previous = chosen["center"]
+    return previous
+
+
+def test_ten_frame_moving_segment_reports_delivery_track_found():
+    selector = TrajectoryBallSelector(frame_width=640, frame_height=360)
+    _moving_track(selector, count=10, start_frame=62)
+
+    summary = selector.debug_summary("Partial", fps=25.0)
+
+    assert selector.delivery_track_found() is True
+    assert selector.has_reliable_track() is True
+    assert summary["delivery_track_found"] is True
+    assert summary["selected_track_start_frame"] == 62
+    assert summary["selected_track_end_frame"] == 71
+    assert summary["selected_track_frame_count"] == 10
+    assert summary["selected_track_duration_sec"] == 0.4
+
+
+def test_short_reliable_segment_is_partial_not_poor():
+    selector = TrajectoryBallSelector(frame_width=640, frame_height=360)
+    _moving_track(selector, count=10, start_frame=62)
+    selector.select([], frame_index=90)
+
+    quality, suppress = resolve_delivery_tracking_quality(selector)
+
+    assert selector.has_reliable_track() is True
+    assert selector.is_short_for_delivery_analysis() is True
+    assert quality == "Partial"
+    assert suppress is True
+    summary = selector.debug_summary(quality, fps=25.0)
+    assert summary["trajectory_reliable"] is True
+    assert summary["tracking_quality"] == "Partial"
+    assert summary["short_track_reason"] is not None
+
+
+def test_short_reliable_segment_suppresses_delivery_estimates():
+    selector = TrajectoryBallSelector(frame_width=640, frame_height=360)
+    _moving_track(selector, count=10, start_frame=62)
+
+    quality, suppress = resolve_delivery_tracking_quality(selector)
+
+    assert quality == "Partial"
+    assert suppress is True
+    assert selector.short_track_reason() is not None
+
+
+def test_after_track_terminated_rejections_do_not_reduce_quality():
+    selector = TrajectoryBallSelector(frame_width=640, frame_height=360)
+    _moving_track(selector, count=10, start_frame=62)
+    selector.select([], frame_index=90)
+
+    for frame in range(100, 130):
+        selector.select([_ball((216, 183), 0.99)], frame_index=frame)
+
+    assert selector.rejection_reasons["after_track_terminated"] >= 20
+
+    quality, suppress = resolve_delivery_tracking_quality(selector)
+    summary = selector.debug_summary(quality, fps=25.0)
+
+    assert quality == "Partial"
+    assert summary["trajectory_reliable"] is True
+    assert summary["delivery_track_terminated"] is True
+    assert summary["tracking_quality"] == "Partial"
+
+
+def test_no_valid_moving_segment_stays_poor():
+    selector = TrajectoryBallSelector(frame_width=640, frame_height=360)
+    static = (216, 183)
+
+    for frame in range(6):
+        selector.select([_ball(static, 0.99)], frame_index=frame)
+
+    quality, suppress = resolve_delivery_tracking_quality(selector)
+    summary = selector.debug_summary(quality)
+
+    assert selector.delivery_track_found() is False
+    assert selector.has_reliable_track() is False
+    assert quality == "Poor"
+    assert suppress is True
+    assert summary["tracking_quality"] == "Poor"
+    assert summary["delivery_track_found"] is False
+
+
+def test_long_reliable_segment_can_reach_good_quality():
+    selector = TrajectoryBallSelector(frame_width=640, frame_height=360)
+    _moving_track(selector, count=14, start_frame=10)
+
+    quality, suppress = resolve_delivery_tracking_quality(selector)
+    summary = selector.debug_summary(quality, fps=25.0)
+
+    assert selector.has_reliable_track() is True
+    assert selector.is_short_for_delivery_analysis() is False
+    assert quality in {"Excellent", "Good", "Medium"}
+    assert suppress is False
+    assert summary["short_track_reason"] is None

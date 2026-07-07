@@ -19,6 +19,7 @@ BOOTSTRAP_MAX_EDGE_FRACTION = 0.5
 BOOTSTRAP_MAX_DOMINANT_STEP_RATIO = 0.65
 BOOTSTRAP_PARTIAL_CHAIN_LIMIT = 50
 MIN_ACCEPTED_POINTS_FOR_RELIABILITY = 5
+MIN_FULL_ANALYSIS_TRACK_POINTS = 12
 MAX_CONSECUTIVE_REJECT_FRAMES = 4
 DELIVERY_MAX_FRAME_GAP = 8
 DELIVERY_MAX_CONSECUTIVE_MISSES = 5
@@ -64,6 +65,7 @@ class TrajectoryBallSelector:
         self._bootstrap_window: list[list[dict]] = []
         self._bootstrap_provisional_point_count = 0
         self._rejected_bootstrap_cells: set[tuple[int, int]] = set()
+        self._accepted_frame_indices: list[int] = []
 
     def _max_jump_px(self) -> float:
         return max(60.0, hypot(self.frame_width, self.frame_height) * 0.12)
@@ -137,8 +139,12 @@ class TrajectoryBallSelector:
         self.rejection_reasons["static_bootstrap_rejected"] += 1
 
     def _confirm_bootstrap_chain(self, chain, current_frame: int | None = None) -> None:
-        for _, detection in chain:
-            self._accept(detection, rejected=0)
+        last_window_index = len(self._bootstrap_window) - 1
+        for window_index, detection in chain:
+            frame_index = None
+            if current_frame is not None:
+                frame_index = current_frame - (last_window_index - window_index)
+            self._accept(detection, rejected=0, frame_index=frame_index)
         self._track_confirmed = True
         self._active_delivery_track = True
         if current_frame is not None:
@@ -259,7 +265,7 @@ class TrajectoryBallSelector:
 
     def _on_delivery_accept_frame(self, detection, current_frame: int) -> None:
         center = detection["center"]
-        self._accept(detection, rejected=0)
+        self._accept(detection, rejected=0, frame_index=current_frame)
         step = (
             _distance(self.accepted_positions[-2], center)
             if len(self.accepted_positions) >= 2
@@ -738,11 +744,112 @@ class TrajectoryBallSelector:
             self._accept(best, rejected=alternate_rejections)
         return best
 
-    def _accept(self, detection, rejected=0) -> None:
+    def _accept(self, detection, rejected=0, frame_index=None) -> None:
         self.accepted_positions.append(tuple(detection["center"]))
         self.accepted_point_count += 1
+        if frame_index is not None:
+            self._accepted_frame_indices.append(int(frame_index))
+        elif self._select_call_index >= 0:
+            self._accepted_frame_indices.append(self._select_call_index)
         self.rejected_candidate_count += max(rejected, 0)
         self.consecutive_reject_frames = 0
+
+    def delivery_track_found(self) -> bool:
+        if not self._track_confirmed:
+            return False
+        if self.accepted_point_count < BOOTSTRAP_MIN_FRAMES:
+            return False
+        if len(self.accepted_positions) < 2:
+            return False
+        return (
+            _distance(
+                self.accepted_positions[0],
+                self.accepted_positions[-1],
+            )
+            >= BOOTSTRAP_MIN_MOVEMENT_PX * 0.5
+        )
+
+    def selected_track_start_frame(self) -> int | None:
+        if not self._accepted_frame_indices:
+            return None
+        return int(self._accepted_frame_indices[0])
+
+    def selected_track_end_frame(self) -> int | None:
+        if not self._accepted_frame_indices:
+            return None
+        return int(self._accepted_frame_indices[-1])
+
+    def selected_track_frame_count(self) -> int:
+        return len(self._accepted_frame_indices)
+
+    def selected_track_span_frames(self) -> int:
+        if len(self._accepted_frame_indices) < 2:
+            return len(self._accepted_frame_indices)
+        return (
+            self._accepted_frame_indices[-1] - self._accepted_frame_indices[0] + 1
+        )
+
+    def selected_track_duration_sec(self, fps: float | None) -> float | None:
+        if fps is None or fps <= 0:
+            return None
+        span = self.selected_track_span_frames()
+        if span <= 0:
+            return None
+        return span / float(fps)
+
+    def segment_tracking_rate(self) -> float:
+        span = self.selected_track_span_frames()
+        if span <= 0:
+            return 0.0
+        return (self.accepted_point_count / span) * 100.0
+
+    def is_short_for_delivery_analysis(
+        self,
+        min_frames: int = 8,
+        min_movement: float = 40.0,
+    ) -> bool:
+        if not self.has_reliable_track():
+            return False
+        if self.accepted_point_count < min_frames:
+            return True
+        if len(self.accepted_positions) < 2:
+            return True
+        if (
+            _distance(
+                self.accepted_positions[0],
+                self.accepted_positions[-1],
+            )
+            < min_movement
+        ):
+            return True
+        if self.accepted_point_count < MIN_FULL_ANALYSIS_TRACK_POINTS:
+            return True
+        return False
+
+    def short_track_reason(
+        self,
+        min_frames: int = 8,
+        min_movement: float = 40.0,
+    ) -> str | None:
+        if not self.delivery_track_found() or not self.is_short_for_delivery_analysis(
+            min_frames=min_frames,
+            min_movement=min_movement,
+        ):
+            return None
+        reasons: list[str] = []
+        if self.accepted_point_count < min_frames:
+            reasons.append("too_few_track_points")
+        if len(self.accepted_positions) >= 2 and (
+            _distance(
+                self.accepted_positions[0],
+                self.accepted_positions[-1],
+            )
+            < min_movement
+        ):
+            reasons.append("insufficient_track_movement")
+        if self.accepted_point_count < MIN_FULL_ANALYSIS_TRACK_POINTS:
+            reasons.append("too_short_for_bounce_length")
+        return ";".join(reasons) if reasons else "short_delivery_segment"
 
     def has_reliable_track(self) -> bool:
         if not self._track_confirmed:
@@ -762,7 +869,14 @@ class TrajectoryBallSelector:
             self.accepted_positions[-1],
         ) >= 25.0
 
-    def debug_summary(self, tracking_quality_label: str) -> dict:
+    def debug_summary(
+        self,
+        tracking_quality_label: str,
+        *,
+        fps: float | None = None,
+        min_track_points_for_bounce: int = 8,
+        min_movement_distance: float = 40.0,
+    ) -> dict:
         trajectory_reliable = self.has_reliable_track()
         return {
             "raw_ball_candidate_count": self.raw_candidate_count,
@@ -781,7 +895,17 @@ class TrajectoryBallSelector:
             ),
             "tracking_quality": tracking_quality_label,
             "trajectory_reliable": trajectory_reliable,
+            "delivery_track_found": self.delivery_track_found(),
             "delivery_track_terminated": self._track_terminated,
+            "selected_track_start_frame": self.selected_track_start_frame(),
+            "selected_track_end_frame": self.selected_track_end_frame(),
+            "selected_track_frame_count": self.selected_track_frame_count(),
+            "selected_track_span_frames": self.selected_track_span_frames(),
+            "selected_track_duration_sec": self.selected_track_duration_sec(fps),
+            "short_track_reason": self.short_track_reason(
+                min_frames=min_track_points_for_bounce,
+                min_movement=min_movement_distance,
+            ),
         }
 
     def _bootstrap_can_reach_reliability(self) -> bool:
@@ -792,3 +916,34 @@ class TrajectoryBallSelector:
         prefix = self.accepted_positions[:BOOTSTRAP_MIN_FRAMES]
         chain = [(index, {"center": center}) for index, center in enumerate(prefix)]
         return self._is_valid_bootstrap_chain(chain)
+
+
+def resolve_delivery_tracking_quality(
+    selector: TrajectoryBallSelector,
+    *,
+    interpolated_frames: int = 0,
+    kalman_predicted_frames: int = 0,
+    min_track_points_for_bounce: int = 8,
+    min_movement_distance: float = 40.0,
+) -> tuple[str, bool]:
+    """Return overall quality label and whether line/length/bounce should stay unknown."""
+    from Backends.src.tracking.ball_tracking_utils import get_tracking_quality_label
+
+    if not selector.has_reliable_track():
+        return "Poor", True
+
+    if selector.is_short_for_delivery_analysis(
+        min_frames=min_track_points_for_bounce,
+        min_movement=min_movement_distance,
+    ):
+        return "Partial", True
+
+    overall_tracking_quality = get_tracking_quality_label(
+        selector.segment_tracking_rate(),
+        interpolated_frames,
+        kalman_predicted_frames,
+    )
+    if overall_tracking_quality == "Poor":
+        # ponytail: a reliable segment should not be downgraded to Poor by span math alone.
+        overall_tracking_quality = "Medium"
+    return overall_tracking_quality, False

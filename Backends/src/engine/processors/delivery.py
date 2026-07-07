@@ -28,11 +28,13 @@ from Backends.src.tracking.ball_tracking_utils import (
     BallKalmanTracker,
     calculate_tracking_quality,
     detect_bounce_by_direction_change,
-    get_tracking_quality_label,
     interpolate_missing_positions,
     smooth_trajectory,
 )
-from Backends.src.tracking.trajectory_scorer import TrajectoryBallSelector
+from Backends.src.tracking.trajectory_scorer import (
+    TrajectoryBallSelector,
+    resolve_delivery_tracking_quality,
+)
 from Backends.src.utils.cv2_loader import cv2
 from Backends.src.video_pipeline.annotation_writer import (
     add_impact_marker_to_video,
@@ -650,6 +652,7 @@ def process_delivery_video(
             ball_detections,
             previous_ball_center,
             kalman_prediction=kalman_tracker.last_prediction,
+            frame_index=frame_index,
         )
 
         if main_ball is not None:
@@ -974,23 +977,26 @@ def process_delivery_video(
         ball_positions,
         frame_index,
     )
-    overall_tracking_quality = get_tracking_quality_label(
-        tracking_quality["tracking_rate"],
-        tracking_quality["interpolated_frames"],
-        kalman_predicted_frames,
+    overall_tracking_quality, suppress_delivery_estimates = (
+        resolve_delivery_tracking_quality(
+            trajectory_selector,
+            interpolated_frames=tracking_quality["interpolated_frames"],
+            kalman_predicted_frames=kalman_predicted_frames,
+            min_track_points_for_bounce=min_track_points_for_bounce,
+            min_movement_distance=min_movement_distance,
+        )
     )
-    if (
-        not trajectory_selector.has_reliable_track()
-        or overall_tracking_quality == "Poor"
-    ):
+    if suppress_delivery_estimates:
         estimated_bounce_point = None
         estimated_bounce_frame = None
         estimated_line = "Unknown"
         estimated_length = "Unknown"
         pitch_normalized_bounce_point = None
-        overall_tracking_quality = "Poor"
     ball_tracking_debug = trajectory_selector.debug_summary(
-        overall_tracking_quality
+        overall_tracking_quality,
+        fps=fps,
+        min_track_points_for_bounce=min_track_points_for_bounce,
+        min_movement_distance=min_movement_distance,
     )
     delivery_report = {
         "estimated_line": estimated_line,
