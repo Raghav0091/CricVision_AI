@@ -10,6 +10,7 @@ ENV/
 __pycache__/
 **/__pycache__/
 **pycache**/
+.pytest_tmp/
 *.pyc
 *.pyo
 *.pyd
