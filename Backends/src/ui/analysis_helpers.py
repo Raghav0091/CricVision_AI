@@ -33,4 +33,6 @@ def ensure_delivery_report_fields(result):
     result.setdefault("calibration_status", "Not calibrated")
     result.setdefault("calibration_source", "None")
     result.setdefault("calibration_warning", "Confidence warning: pitch calibration is missing.")
-    result.setdefault("wagon_wheel", {})
+    result.setdefault("ball_tracking_mode", "Balanced")
+    result.setdefault("final_tracking_quality", result.get("overall_tracking_quality", "Poor"))
+    result.setdefault("short_track_reason", None)

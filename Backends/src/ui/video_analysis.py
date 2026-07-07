@@ -413,6 +413,18 @@ def show_video_analysis_page():
     )
 
     st.selectbox(
+        "Ball tracking mode",
+        ["Balanced", "Accuracy / Small Ball"],
+        index=0,
+        key="video_analysis_ball_tracking_mode",
+        help=(
+            "Balanced keeps current defaults. Accuracy / Small Ball "
+            "uses lower confidence and larger image size for distant "
+            "or small balls."
+        ),
+    )
+
+    st.selectbox(
         "Analysis Mode",
         ["Smart Balanced", "Smart Accurate", "Debug Full Frame"],
         index=0,
@@ -603,6 +615,10 @@ def show_video_analysis_page():
         "video_analysis_speed_mode",
         "Smart Balanced",
     )
+    ball_tracking_mode = st.session_state.get(
+        "video_analysis_ball_tracking_mode",
+        "Balanced",
+    )
     generate_processed_video = st.session_state.get(
         "video_analysis_generate_processed_video",
         True,
@@ -734,6 +750,7 @@ def show_video_analysis_page():
                     engine_options = EngineOptions(
                         analysis_mode=analysis_mode,
                         smart_mode=speed_mode,
+                        ball_tracking_mode=ball_tracking_mode,
                         processed_video_enabled=(
                             generate_processed_video
                         ),
@@ -824,6 +841,7 @@ def show_video_analysis_page():
                 st.session_state.video_analysis_result = result
                 st.session_state.video_analysis_settings = {
                     "analysis_mode": analysis_mode,
+                    "ball_tracking_mode": ball_tracking_mode,
                     "selected_model_name": selected_model_name,
                     "preset_name": preset_name,
                     "show_pitch_roi": show_pitch_roi,
