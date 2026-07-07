@@ -413,7 +413,7 @@ def show_video_analysis_page():
     )
 
     st.selectbox(
-        "Ball tracking mode",
+        "Ball Analysis Mode",
         ["Balanced", "Accuracy / Small Ball"],
         index=0,
         key="video_analysis_ball_tracking_mode",

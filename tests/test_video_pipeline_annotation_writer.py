@@ -5,7 +5,10 @@ import pytest
 
 pytest.importorskip("cv2")
 
-from Backends.src.video_pipeline.annotation_writer import write_annotated_video
+from Backends.src.video_pipeline.annotation_writer import (
+    draw_fitted_trajectory_overlay,
+    write_annotated_video,
+)
 from Backends.src.video_pipeline.video_reader import iter_video_frames, open_video
 
 
@@ -78,3 +81,58 @@ def test_annotation_writer_handles_missing_detections(tmp_path):
     if result is None:
         pytest.skip("OpenCV mp4v writer is unavailable.")
     assert output_path.is_file()
+
+
+def test_poor_fit_does_not_draw_confident_full_trajectory():
+    frame = np.zeros((120, 160, 3), dtype=np.uint8)
+    draw_fitted_trajectory_overlay(
+        frame,
+        observed_points=[(20, 60), (30, 62)],
+        fitted_points=[(20, 60), (40, 64), (60, 68)],
+        visualization_mode="hidden",
+        trajectory_quality="Poor",
+    )
+
+    pure_red_pixels = np.count_nonzero(
+        (frame[:, :, 2] > 240)
+        & (frame[:, :, 1] < 20)
+        & (frame[:, :, 0] < 20)
+    )
+    assert pure_red_pixels < 160
+
+
+def test_fitted_overlay_accepts_line_length_without_bounce_kwarg():
+    frame = np.zeros((120, 220, 3), dtype=np.uint8)
+    draw_fitted_trajectory_overlay(
+        frame,
+        observed_points=[(20, 70), (35, 65)],
+        fitted_points=[(20, 70), (35, 65), (50, 60)],
+        visualization_mode="full_fit",
+        trajectory_quality="Good",
+        tracking_quality="Partial",
+        line="Unknown",
+        length="Unknown",
+        calibration_context={"calibration_quality": "Disabled"},
+    )
+
+
+def test_fitted_overlay_consumes_points_without_crashing():
+    frame = np.zeros((120, 220, 3), dtype=np.uint8)
+    draw_fitted_trajectory_overlay(
+        frame,
+        observed_points=[(20, 70), (35, 65), (50, 60)],
+        fitted_points=[(20, 70), (35, 65), (50, 60), (65, 54)],
+        visualization_mode="partial_fit",
+        trajectory_quality="Partial",
+        bounce_point=(50, 60),
+        line="Middle",
+        length="Good Length",
+        tracking_quality="Partial",
+        calibration_context={
+            "pitch_corridor": {
+                "polygon": [[10, 40], [90, 40], [120, 110], [0, 110]]
+            }
+        },
+    )
+
+    assert frame.sum() > 0

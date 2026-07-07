@@ -499,3 +499,251 @@ def test_long_reliable_segment_can_reach_good_quality():
     assert quality in {"Excellent", "Good", "Medium"}
     assert suppress is False
     assert summary["short_track_reason"] is None
+
+
+def _extension_det(center: tuple[int, int], confidence: float = 0.9) -> dict:
+    x, y = center
+    return {
+        "center": center,
+        "confidence": confidence,
+        "box": (x - 5, y - 5, x + 5, y + 5),
+        "class_name": "ball",
+    }
+
+
+def _build_moving_candidates(
+    start_frame: int,
+    count: int,
+    *,
+    origin: tuple[int, int] = (200, 300),
+    step: tuple[int, int] = (20, 10),
+) -> tuple[list[dict], dict[int, list[dict]]]:
+    points: list[dict] = []
+    candidates: dict[int, list[dict]] = {}
+    for offset in range(count):
+        frame_index = start_frame + offset
+        center = (
+            origin[0] + offset * step[0],
+            origin[1] + offset * step[1],
+        )
+        points.append(
+            {
+                "frame_index": frame_index,
+                "x": float(center[0]),
+                "y": float(center[1]),
+                "confidence": 0.9,
+            }
+        )
+        candidates[frame_index] = [_extension_det(center)]
+    return points, candidates
+
+
+def test_backward_extension_adds_matching_earlier_candidates():
+    from Backends.src.tracking.trajectory_scorer import extend_ranked_tracklet
+
+    tracklet, candidates = _build_moving_candidates(60, 4)
+    for frame_index in range(57, 60):
+        center = (
+            200 + (frame_index - 60) * 20,
+            300 + (frame_index - 60) * 10,
+        )
+        candidates[frame_index] = [_extension_det(center)]
+
+    result = extend_ranked_tracklet(tracklet, candidates, 1280, 720, fps=25.0)
+
+    assert result["extension_applied"] is True
+    assert result["backward_extension_points"] >= 2
+    assert result["extended_segment_start_frame"] < 60
+
+
+def test_backward_extension_rejects_far_and_static_candidates():
+    from Backends.src.tracking.trajectory_scorer import extend_ranked_tracklet
+
+    tracklet, candidates = _build_moving_candidates(60, 4)
+    candidates[59] = [_extension_det((500, 500))]
+    candidates[58] = [_extension_det((201, 301))]
+
+    result = extend_ranked_tracklet(tracklet, candidates, 1280, 720, fps=25.0)
+
+    assert result["backward_extension_points"] == 0
+    assert "too_far_from_prediction" in result["extension_rejection_reasons"]
+
+
+def test_forward_extension_adds_plausible_continuation():
+    from Backends.src.tracking.trajectory_scorer import extend_ranked_tracklet
+
+    tracklet, candidates = _build_moving_candidates(60, 4)
+    for frame_index in range(64, 67):
+        center = (
+            200 + (frame_index - 60) * 20,
+            300 + (frame_index - 60) * 10,
+        )
+        candidates[frame_index] = [_extension_det(center)]
+
+    result = extend_ranked_tracklet(tracklet, candidates, 1280, 720, fps=25.0)
+
+    assert result["extension_applied"] is True
+    assert result["forward_extension_points"] >= 2
+    assert result["extended_segment_end_frame"] > 63
+
+
+def test_extension_stops_after_too_many_missing_frames():
+    from Backends.src.tracking.trajectory_scorer import extend_ranked_tracklet
+
+    tracklet, candidates = _build_moving_candidates(60, 3)
+    candidates[59] = [_extension_det((180, 290))]
+
+    result = extend_ranked_tracklet(tracklet, candidates, 1280, 720, fps=25.0)
+
+    assert result["backward_extension_points"] <= 1
+    assert "missing_frames_exceeded" in result["extension_rejection_reasons"]
+
+
+def test_extension_preserves_original_when_smoothness_degrades(monkeypatch):
+    from Backends.src.tracking import trajectory_scorer as trajectory_scorer_module
+    from Backends.src.tracking.trajectory_scorer import extend_ranked_tracklet
+
+    tracklet, candidates = _build_moving_candidates(60, 4)
+    for frame_index in range(57, 60):
+        center = (
+            200 + (frame_index - 60) * 20,
+            300 + (frame_index - 60) * 10,
+        )
+        candidates[frame_index] = [_extension_det(center)]
+
+    def _fake_smoothness(points):
+        if len(points) == 4:
+            return 1.0
+        return 0.5
+
+    monkeypatch.setattr(
+        trajectory_scorer_module,
+        "_tracklet_smoothness",
+        _fake_smoothness,
+    )
+
+    result = extend_ranked_tracklet(tracklet, candidates, 1280, 720, fps=25.0)
+
+    assert result["extension_applied"] is False
+    assert result["extension_fallback_reason"] == "smoothness_degraded"
+    assert result["extension_preserved_original_segment"] is True
+    assert result["extended_segment_start_frame"] == 60
+
+
+def test_extension_preserves_original_when_fit_quality_degrades(monkeypatch):
+    from Backends.src.tracking import trajectory_scorer as trajectory_scorer_module
+    from Backends.src.tracking.trajectory_scorer import extend_ranked_tracklet
+
+    tracklet, candidates = _build_moving_candidates(60, 4)
+    for frame_index in range(57, 60):
+        center = (
+            200 + (frame_index - 60) * 20,
+            300 + (frame_index - 60) * 10,
+        )
+        candidates[frame_index] = [_extension_det(center)]
+
+    def _fake_fit_quality(points, frame_width, frame_height, fps):
+        if len(points) <= 4:
+            return "Good"
+        return "Poor"
+
+    monkeypatch.setattr(
+        trajectory_scorer_module,
+        "_extension_fit_quality",
+        _fake_fit_quality,
+    )
+
+    result = extend_ranked_tracklet(tracklet, candidates, 1280, 720, fps=25.0)
+
+    assert result["extension_applied"] is False
+    assert result["extension_fallback_reason"] == "fit_quality_degraded"
+    assert result["extension_preserved_original_segment"] is True
+    assert result["extension_fit_delta"] < 0
+    assert result["trajectory_fit_quality_after_extension"] == "Good"
+
+
+def test_extension_keeps_good_fit_when_valid():
+    from Backends.src.tracking.trajectory_scorer import extend_ranked_tracklet
+
+    tracklet, candidates = _build_moving_candidates(60, 18)
+    for frame_index in range(57, 60):
+        center = (
+            200 + (frame_index - 60) * 20,
+            300 + (frame_index - 60) * 10,
+        )
+        candidates[frame_index] = [_extension_det(center)]
+    for frame_index in range(78, 81):
+        center = (
+            200 + (frame_index - 60) * 20,
+            300 + (frame_index - 60) * 10,
+        )
+        candidates[frame_index] = [_extension_det(center)]
+
+    result = extend_ranked_tracklet(tracklet, candidates, 1280, 720, fps=25.0)
+
+    assert result["extension_applied"] is True
+    assert result["trajectory_fit_quality_after_extension"] == "Good"
+    assert result["extension_fit_delta"] >= 0
+
+
+def test_no_extension_leaves_original_segment_unchanged():
+    from Backends.src.tracking.trajectory_scorer import extend_ranked_tracklet
+
+    tracklet, candidates = _build_moving_candidates(60, 4)
+
+    result = extend_ranked_tracklet(tracklet, candidates, 1280, 720, fps=25.0)
+
+    assert result["extension_applied"] is False
+    assert result["extension_preserved_original_segment"] is True
+    assert result["extended_segment_start_frame"] == 60
+    assert result["extended_segment_end_frame"] == 63
+    assert result["extended_segment_point_count"] == 4
+
+
+def test_replay_and_debug_share_extension_logic():
+    from Backends.src.tracking.trajectory_scorer import (
+        extend_ranked_tracklet,
+        select_online_best_tracklet,
+    )
+
+    candidates: dict[int, list[dict]] = {}
+    for frame_index in range(40, 55):
+        center = (120 + frame_index * 15, 200 + frame_index * 8)
+        candidates[frame_index] = [_extension_det(center)]
+    for frame_index in range(37, 40):
+        center = (120 + frame_index * 15, 200 + frame_index * 8)
+        candidates[frame_index] = [_extension_det(center)]
+
+    shared = select_online_best_tracklet(candidates, 1280, 720, fps=25.0)
+    winner_points = shared["ranking"]["winner"]["tracklet_points"]
+    direct = extend_ranked_tracklet(
+        winner_points,
+        candidates,
+        1280,
+        720,
+        fps=25.0,
+    )
+
+    assert shared["backward_extension_points"] == direct["backward_extension_points"]
+    assert shared["forward_extension_points"] == direct["forward_extension_points"]
+    assert shared["extension_applied"] == direct["extension_applied"]
+
+
+def test_select_online_best_tracklet_populates_extension_fields():
+    from Backends.src.tracking.trajectory_scorer import select_online_best_tracklet
+
+    candidates: dict[int, list[dict]] = {}
+    for frame_index in range(40, 55):
+        center = (120 + frame_index * 15, 200 + frame_index * 8)
+        candidates[frame_index] = [_extension_det(center)]
+    for frame_index in range(37, 40):
+        center = (120 + frame_index * 15, 200 + frame_index * 8)
+        candidates[frame_index] = [_extension_det(center)]
+
+    result = select_online_best_tracklet(candidates, 1280, 720, fps=25.0)
+
+    assert result["applied"] is True
+    assert result["extension_enabled"] is True
+    assert "backward_extension_points" in result
+    assert "extension_rejection_reasons" in result
+    assert result["extended_segment_point_count"] >= result["best_segment_point_count"]

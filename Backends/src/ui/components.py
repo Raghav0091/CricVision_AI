@@ -334,6 +334,7 @@ def render_video_analysis_results_layout(
         render_delivery_report(result)
 
     with tab_tracking:
+        render_ball_tracking_details_card(result)
         render_visual_observer_repair_card(result)
         render_observer_timeline_report(result)
         render_vision_agent_report(result)
@@ -626,6 +627,68 @@ def render_calibration_context_card(calibration_context, compact=False):
         notes = ["Practice environment calibration was disabled for this analysis."]
     for note in notes:
         st.caption(f"• {note}")
+
+
+def render_ball_tracking_details_card(result):
+    """Render best-tracklet and trajectory-fit diagnostics for delivery analysis."""
+    result = result or {}
+
+    st.subheader("Ball Tracking Mode")
+    mode_cols = st.columns(3)
+    mode_cols[0].metric(
+        "Tracking Mode",
+        _display_value(result.get("ball_tracking_mode", "Balanced")),
+    )
+    mode_cols[1].metric(
+        "Best Tracklet Applied",
+        "Yes" if result.get("best_tracklet_applied") else "No",
+    )
+    mode_cols[2].metric(
+        "Tracking Quality",
+        _display_value(
+            result.get("tracking_quality")
+            or result.get("overall_tracking_quality")
+        ),
+    )
+
+    fit_cols = st.columns(4)
+    fit_cols[0].metric(
+        "Trajectory Fit",
+        _display_value(result.get("trajectory_fit_quality")),
+    )
+    fit_cols[1].metric(
+        "Visualization",
+        _display_value(result.get("trajectory_visualization_mode")),
+    )
+    fit_cols[2].metric(
+        "Selected Ball Points",
+        _display_value(result.get("selected_ball_points")),
+    )
+    fit_cols[3].metric(
+        "Extension Applied",
+        "Yes" if result.get("extension_applied") else "No",
+    )
+
+    segment_cols = st.columns(3)
+    segment_cols[0].metric(
+        "Best Segment Start",
+        _display_value(result.get("best_segment_start_frame")),
+    )
+    segment_cols[1].metric(
+        "Best Segment End",
+        _display_value(result.get("best_segment_end_frame")),
+    )
+    segment_cols[2].metric(
+        "Segment Point Count",
+        _display_value(result.get("best_segment_point_count")),
+    )
+
+    extension_reason = result.get("extension_fallback_reason")
+    fallback_reason = result.get("best_tracklet_fallback_reason")
+    if extension_reason:
+        st.caption(f"Extension fallback: {extension_reason}")
+    if fallback_reason and fallback_reason not in {"", "disabled"}:
+        st.caption(f"Best-tracklet fallback: {fallback_reason}")
 
 
 def render_visual_observer_repair_card(repair_report, compact=False):

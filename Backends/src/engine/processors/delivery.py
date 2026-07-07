@@ -34,13 +34,21 @@ from Backends.src.tracking.ball_tracking_utils import (
 )
 from Backends.src.tracking.trajectory_scorer import (
     TrajectoryBallSelector,
+    build_ball_positions_from_tracklet,
+    count_after_track_terminated_from_frame,
     resolve_delivery_tracking_quality,
+    select_online_best_tracklet,
+    should_enable_online_best_tracklet,
 )
+from Backends.src.tracking.trajectory_fit import fit_delivery_trajectory
 from Backends.src.utils.cv2_loader import cv2
 from Backends.src.video_pipeline.annotation_writer import (
+    add_delivery_trajectory_overlay_to_video,
     add_impact_marker_to_video,
+    delivery_overlay_metrics,
     draw_clean_ball_markers,
     draw_clean_stump_markers,
+    draw_fitted_trajectory_overlay,
     draw_label,
     draw_pitch_roi,
     draw_search_roi,
@@ -223,6 +231,10 @@ def process_delivery_video(
         speed_settings.get("light_annotation", False)
     )
     debug_overlay = str(overlay_detail or "Clean").strip().lower() == "debug"
+    online_best_tracklet_enabled = should_enable_online_best_tracklet(
+        ball_tracking_mode=ball_tracking_mode,
+        speed_mode=speed_mode,
+    )
     generate_processed_video = bool(
         generate_processed_video
         and speed_settings.get("generate_processed_video", True)
@@ -288,6 +300,24 @@ def process_delivery_video(
         "using image-space fallback."
     )
     pitch_normalized_bounce_point = None
+    trajectory_fit_result = {
+        "fitted_trajectory_points": [],
+        "observed_trajectory_points": [],
+        "trajectory_fit_quality": None,
+        "trajectory_fit_reason": "not_enough_points_yet",
+        "start_frame": None,
+        "end_frame": None,
+        "best_segment_start_frame": None,
+        "best_segment_end_frame": None,
+        "best_segment_point_count": 0,
+        "best_segment_duration_sec": None,
+        "selected_segment_score": 0.0,
+        "selected_segment_reason": "not_enough_points_yet",
+        "observed_point_count": 0,
+        "predicted_point_count": 0,
+        "extrapolation_used": False,
+        "trajectory_visualization_mode": "hidden",
+    }
 
     if calibration_mode.startswith("Manual"):
         pitch_homography = compute_pitch_homography(manual_pitch_points)
@@ -300,6 +330,18 @@ def process_delivery_video(
     previous_ball_center = None
     kalman_tracker = BallKalmanTracker(max_missing_frames=10)
     trajectory_selector = TrajectoryBallSelector(width, height)
+    online_tracking_selector = (
+        TrajectoryBallSelector(width, height)
+        if online_best_tracklet_enabled
+        else trajectory_selector
+    )
+    raw_frame_ball_candidates: dict[int, list[dict]] = {}
+    best_tracklet_result: dict = {
+        "applied": False,
+        "fallback_reason": "disabled",
+        "online_best_tracklet_enabled": online_best_tracklet_enabled,
+    }
+    online_best_tracklet_after_terminated = 0
     missing_ball_frames = 0
     max_missing_ball_frames = 12
     estimated_bounce_point = None
@@ -466,6 +508,15 @@ def process_delivery_video(
             if ball_detections:
                 ball_detected_frames += 1
                 total_ball_detections += len(ball_detections)
+                raw_frame_ball_candidates[frame_index] = [
+                    {
+                        "center": detection["center"],
+                        "confidence": detection.get("confidence", 0.0),
+                        "box": detection.get("box"),
+                        "class_name": detection.get("class_name", "ball"),
+                    }
+                    for detection in ball_detections
+                ]
             elif speed_settings.get("enable_local_redetection", True):
                 search_center = (
                     previous_ball_center
@@ -495,6 +546,15 @@ def process_delivery_video(
                         detection_scale,
                         stats=detection_stats,
                     )
+                    raw_frame_ball_candidates[frame_index] = [
+                        {
+                            "center": detection["center"],
+                            "confidence": detection.get("confidence", 0.0),
+                            "box": detection.get("box"),
+                            "class_name": detection.get("class_name", "ball"),
+                        }
+                        for detection in ball_detections
+                    ]
                     tracker_recoveries += 1
                     ball_detected_frames += 1
                     total_ball_detections += len(ball_detections)
@@ -672,117 +732,20 @@ def process_delivery_video(
                 stump_detections,
             )
 
-        main_ball = trajectory_selector.select(
+        main_ball = online_tracking_selector.select(
             ball_detections,
             previous_ball_center,
             kalman_prediction=kalman_tracker.last_prediction,
             frame_index=frame_index,
         )
 
-        if main_ball is not None:
-            missing_ball_frames = 0
-            previous_ball_center = main_ball["center"]
-            kalman_tracker.update(previous_ball_center)
-            ball_positions.append(previous_ball_center)
+        if not online_best_tracklet_enabled:
+            if main_ball is not None:
+                missing_ball_frames = 0
+                previous_ball_center = main_ball["center"]
+                kalman_tracker.update(previous_ball_center)
+                ball_positions.append(previous_ball_center)
 
-            smoothed_positions = smooth_trajectory(ball_positions)
-            display_trajectory_points = []
-
-            for point in reversed(smoothed_positions):
-                if point is None:
-                    if display_trajectory_points:
-                        break
-                    continue
-                display_trajectory_points.append(point)
-
-            trajectory_points = list(
-                reversed(display_trajectory_points)
-            )[-max_trajectory_points:]
-            interpolated_positions = interpolate_missing_positions(
-                ball_positions
-            )
-            usable_trajectory_points = [
-                point
-                for point in interpolated_positions
-                if point is not None
-            ]
-            bounce_result = None
-
-            if (
-                len(usable_trajectory_points)
-                >= min_track_points_for_bounce
-                and has_enough_ball_movement(
-                    usable_trajectory_points,
-                    min_movement_distance,
-                )
-            ):
-                bounce_result = detect_bounce_by_direction_change(
-                    ball_positions
-                )
-
-            if (
-                bounce_result is not None
-                and estimated_bounce_point is None
-            ):
-                estimated_bounce_point = bounce_result["point"]
-                estimated_bounce_frame = bounce_result["frame_index"]
-                bounce_stump_detections = get_nearest_stump_detections(
-                    stump_detections_by_frame,
-                    estimated_bounce_frame,
-                )
-
-                estimated_line = estimate_line_from_stumps(
-                    estimated_bounce_point,
-                    bounce_stump_detections,
-                    batter_handedness,
-                )
-                estimated_length = estimate_length_from_bounce(
-                    estimated_bounce_point,
-                    height,
-                )
-                pitch_normalized_bounce_point = transform_point_to_pitch(
-                    estimated_bounce_point,
-                    pitch_homography,
-                )
-
-                if pitch_normalized_bounce_point is not None:
-                    pitch_x, pitch_y = pitch_normalized_bounce_point
-                    estimated_line = estimate_line_from_pitch_x(
-                        pitch_x,
-                        batter_handedness,
-                    )
-                    estimated_length = estimate_length_from_pitch_y(
-                        pitch_y
-                    )
-        else:
-            missing_ball_frames += 1
-            predicted_center = kalman_tracker.predict()
-
-            if predicted_center is not None and missing_ball_frames <= 10:
-                ball_positions.append(predicted_center)
-                previous_ball_center = predicted_center
-                kalman_predicted_frames += 1
-            else:
-                ball_positions.append(None)
-
-            if missing_ball_frames >= max_missing_ball_frames:
-                kalman_tracker.reset()
-                if review_frame_count < MAX_REVIEW_FRAMES_PER_ANALYSIS:
-                    save_review_frame(
-                        frame,
-                        timestamp,
-                        frame_index,
-                        "poor_tracking",
-                        source="video_analysis",
-                        note=(
-                            f"Ball missing for {missing_ball_frames} "
-                            "consecutive frames."
-                        ),
-                    )
-                    review_frame_count += 1
-                trajectory_points.clear()
-                previous_ball_center = None
-            else:
                 smoothed_positions = smooth_trajectory(ball_positions)
                 display_trajectory_points = []
 
@@ -796,8 +759,178 @@ def process_delivery_video(
                 trajectory_points = list(
                     reversed(display_trajectory_points)
                 )[-max_trajectory_points:]
+                interpolated_positions = interpolate_missing_positions(
+                    ball_positions
+                )
+                usable_trajectory_points = [
+                    point
+                    for point in interpolated_positions
+                    if point is not None
+                ]
+                bounce_result = None
 
-        draw_trajectory_lines(annotated_frame, trajectory_points)
+                if (
+                    len(usable_trajectory_points)
+                    >= min_track_points_for_bounce
+                    and has_enough_ball_movement(
+                        usable_trajectory_points,
+                        min_movement_distance,
+                    )
+                ):
+                    bounce_result = detect_bounce_by_direction_change(
+                        ball_positions
+                    )
+
+                if (
+                    bounce_result is not None
+                    and estimated_bounce_point is None
+                ):
+                    estimated_bounce_point = bounce_result["point"]
+                    estimated_bounce_frame = bounce_result["frame_index"]
+                    bounce_stump_detections = get_nearest_stump_detections(
+                        stump_detections_by_frame,
+                        estimated_bounce_frame,
+                    )
+
+                    estimated_line = estimate_line_from_stumps(
+                        estimated_bounce_point,
+                        bounce_stump_detections,
+                        batter_handedness,
+                    )
+                    estimated_length = estimate_length_from_bounce(
+                        estimated_bounce_point,
+                        height,
+                    )
+                    pitch_normalized_bounce_point = transform_point_to_pitch(
+                        estimated_bounce_point,
+                        pitch_homography,
+                    )
+
+                    if pitch_normalized_bounce_point is not None:
+                        pitch_x, pitch_y = pitch_normalized_bounce_point
+                        estimated_line = estimate_line_from_pitch_x(
+                            pitch_x,
+                            batter_handedness,
+                        )
+                        estimated_length = estimate_length_from_pitch_y(
+                            pitch_y
+                        )
+            else:
+                missing_ball_frames += 1
+                predicted_center = kalman_tracker.predict()
+
+                if predicted_center is not None and missing_ball_frames <= 10:
+                    ball_positions.append(predicted_center)
+                    previous_ball_center = predicted_center
+                    kalman_predicted_frames += 1
+                else:
+                    ball_positions.append(None)
+
+                if missing_ball_frames >= max_missing_ball_frames:
+                    kalman_tracker.reset()
+                    if review_frame_count < MAX_REVIEW_FRAMES_PER_ANALYSIS:
+                        save_review_frame(
+                            frame,
+                            timestamp,
+                            frame_index,
+                            "poor_tracking",
+                            source="video_analysis",
+                            note=(
+                                f"Ball missing for {missing_ball_frames} "
+                                "consecutive frames."
+                            ),
+                        )
+                        review_frame_count += 1
+                    trajectory_points.clear()
+                    previous_ball_center = None
+                else:
+                    smoothed_positions = smooth_trajectory(ball_positions)
+                    display_trajectory_points = []
+
+                    for point in reversed(smoothed_positions):
+                        if point is None:
+                            if display_trajectory_points:
+                                break
+                            continue
+                        display_trajectory_points.append(point)
+
+                    trajectory_points = list(
+                        reversed(display_trajectory_points)
+                    )[-max_trajectory_points:]
+        elif main_ball is not None:
+            previous_ball_center = main_ball["center"]
+            kalman_tracker.update(previous_ball_center)
+        else:
+            missing_ball_frames += 1
+            predicted_center = kalman_tracker.predict()
+            if predicted_center is not None and missing_ball_frames <= 10:
+                previous_ball_center = predicted_center
+                kalman_predicted_frames += 1
+            if missing_ball_frames >= max_missing_ball_frames:
+                kalman_tracker.reset()
+                previous_ball_center = None
+
+        if not online_best_tracklet_enabled:
+            accepted_points_for_fit = [
+                {
+                    "frame_index": frame_no,
+                    "x": position[0],
+                    "y": position[1],
+                }
+                for frame_no, position in zip(
+                    trajectory_selector._accepted_frame_indices,
+                    trajectory_selector.accepted_positions,
+                )
+            ]
+            trajectory_fit_result = fit_delivery_trajectory(
+                accepted_points_for_fit,
+                frame_size=(width, height),
+                fps=fps,
+                calibration_context=calibration_context,
+                delivery_track_terminated_frame=trajectory_selector.selected_track_end_frame(),
+            )
+            fitted_for_overlay = trajectory_fit_result.get(
+                "fitted_trajectory_points",
+                [],
+            )[-max_trajectory_points:]
+            observed_for_overlay = trajectory_fit_result.get(
+                "observed_trajectory_points",
+                [],
+            )[-max_trajectory_points:]
+            visualization_mode = trajectory_fit_result.get(
+                "trajectory_visualization_mode",
+                "hidden",
+            )
+            overlay_line, overlay_length, _overlay_bounce = (
+                delivery_overlay_metrics(
+                    calibration_context,
+                    line=estimated_line,
+                    length=estimated_length,
+                    bounce_point=estimated_bounce_point,
+                )
+            )
+            if visualization_mode == "hidden":
+                draw_trajectory_lines(annotated_frame, trajectory_points)
+            draw_fitted_trajectory_overlay(
+                annotated_frame,
+                observed_points=observed_for_overlay,
+                fitted_points=fitted_for_overlay,
+                visualization_mode=visualization_mode,
+                trajectory_quality=trajectory_fit_result.get(
+                    "trajectory_fit_quality",
+                ),
+                fit_quality=trajectory_fit_result.get(
+                    "trajectory_fit_quality",
+                ),
+                bounce_point=estimated_bounce_point,
+                line=overlay_line,
+                length=overlay_length,
+                tracking_quality=trajectory_fit_result.get(
+                    "trajectory_fit_quality",
+                    "Poor",
+                ),
+                calibration_context=calibration_context,
+            )
 
         if debug_overlay and estimated_bounce_point is not None:
             bx, by = estimated_bounce_point
@@ -932,6 +1065,107 @@ def process_delivery_video(
     if writer is not None:
         writer.release()
 
+    if online_best_tracklet_enabled and raw_frame_ball_candidates:
+        best_tracklet_result = select_online_best_tracklet(
+            raw_frame_ball_candidates,
+            width,
+            height,
+            fps,
+        )
+        best_tracklet_result["online_best_tracklet_enabled"] = True
+        if best_tracklet_result.get("applied"):
+            segment_end_frame = (
+                best_tracklet_result.get("extended_segment_end_frame")
+                or best_tracklet_result["best_segment_end_frame"]
+            )
+            trajectory_selector.apply_ranked_tracklet(
+                best_tracklet_result["tracklet_points"],
+                segment_end_frame=segment_end_frame,
+            )
+            ball_positions = build_ball_positions_from_tracklet(
+                best_tracklet_result["tracklet_points"],
+                frame_index,
+            )
+            online_best_tracklet_after_terminated = (
+                count_after_track_terminated_from_frame(
+                    raw_frame_ball_candidates,
+                    best_tracklet_result["tracklet_points"],
+                    frame_width=width,
+                    frame_height=height,
+                    segment_end_frame=segment_end_frame,
+                )
+            )
+            smoothed_positions = smooth_trajectory(ball_positions)
+            display_trajectory_points = []
+            for point in reversed(smoothed_positions):
+                if point is None:
+                    if display_trajectory_points:
+                        break
+                    continue
+                display_trajectory_points.append(point)
+            trajectory_points = list(
+                reversed(display_trajectory_points)
+            )[-max_trajectory_points:]
+            estimated_bounce_point = None
+            estimated_bounce_frame = None
+            estimated_line = "Unknown"
+            estimated_length = "Unknown"
+            pitch_normalized_bounce_point = None
+            interpolated_positions = interpolate_missing_positions(
+                ball_positions
+            )
+            usable_trajectory_points = [
+                point
+                for point in interpolated_positions
+                if point is not None
+            ]
+            if (
+                len(usable_trajectory_points)
+                >= min_track_points_for_bounce
+                and has_enough_ball_movement(
+                    usable_trajectory_points,
+                    min_movement_distance,
+                )
+            ):
+                bounce_result = detect_bounce_by_direction_change(
+                    ball_positions
+                )
+                if bounce_result is not None:
+                    estimated_bounce_point = bounce_result["point"]
+                    estimated_bounce_frame = bounce_result["frame_index"]
+                    bounce_stump_detections = get_nearest_stump_detections(
+                        stump_detections_by_frame,
+                        estimated_bounce_frame,
+                    )
+                    estimated_line = estimate_line_from_stumps(
+                        estimated_bounce_point,
+                        bounce_stump_detections,
+                        batter_handedness,
+                    )
+                    estimated_length = estimate_length_from_bounce(
+                        estimated_bounce_point,
+                        height,
+                    )
+                    pitch_normalized_bounce_point = transform_point_to_pitch(
+                        estimated_bounce_point,
+                        pitch_homography,
+                    )
+                    if pitch_normalized_bounce_point is not None:
+                        pitch_x, pitch_y = pitch_normalized_bounce_point
+                        estimated_line = estimate_line_from_pitch_x(
+                            pitch_x,
+                            batter_handedness,
+                        )
+                        estimated_length = estimate_length_from_pitch_y(
+                            pitch_y
+                        )
+        elif not best_tracklet_result.get("fallback_reason"):
+            best_tracklet_result["fallback_reason"] = "no_valid_ranked_segment"
+            trajectory_selector = online_tracking_selector
+    elif online_best_tracklet_enabled:
+        best_tracklet_result["fallback_reason"] = "no_raw_ball_candidates"
+        trajectory_selector = online_tracking_selector
+
     if frame_index == 0:
         return {
             "success": False,
@@ -1001,6 +1235,24 @@ def process_delivery_video(
         ball_positions,
         frame_index,
     )
+    accepted_points_for_fit = [
+        {
+            "frame_index": frame_no,
+            "x": position[0],
+            "y": position[1],
+        }
+        for frame_no, position in zip(
+            trajectory_selector._accepted_frame_indices,
+            trajectory_selector.accepted_positions,
+        )
+    ]
+    trajectory_fit_result = fit_delivery_trajectory(
+        accepted_points_for_fit,
+        frame_size=(width, height),
+        fps=fps,
+        calibration_context=calibration_context,
+        delivery_track_terminated_frame=trajectory_selector.selected_track_end_frame(),
+    )
     overall_tracking_quality, suppress_delivery_estimates = (
         resolve_delivery_tracking_quality(
             trajectory_selector,
@@ -1016,19 +1268,186 @@ def process_delivery_video(
         estimated_line = "Unknown"
         estimated_length = "Unknown"
         pitch_normalized_bounce_point = None
+    elif (
+        trajectory_fit_result.get("extrapolation_used")
+        and trajectory_fit_result.get("observed_point_count", 0)
+        < min_track_points_for_bounce + 2
+    ):
+        estimated_bounce_point = None
+        estimated_bounce_frame = None
+        estimated_line = "Unknown"
+        estimated_length = "Unknown"
+        pitch_normalized_bounce_point = None
     ball_tracking_debug = trajectory_selector.debug_summary(
         overall_tracking_quality,
         fps=fps,
         min_track_points_for_bounce=min_track_points_for_bounce,
         min_movement_distance=min_movement_distance,
     )
+    ball_tracking_debug.update(
+        {
+            "trajectory_fit_quality": trajectory_fit_result.get(
+                "trajectory_fit_quality"
+            ),
+            "fitted_trajectory_point_count": len(
+                trajectory_fit_result.get("fitted_trajectory_points", [])
+            ),
+            "observed_track_point_count": trajectory_fit_result.get(
+                "observed_point_count",
+                0,
+            ),
+            "trajectory_fit_reason": trajectory_fit_result.get(
+                "trajectory_fit_reason"
+            ),
+            "trajectory_visualization_mode": trajectory_fit_result.get(
+                "trajectory_visualization_mode",
+                "hidden",
+            ),
+            "best_segment_start_frame": trajectory_fit_result.get(
+                "best_segment_start_frame"
+            ),
+            "best_segment_end_frame": trajectory_fit_result.get(
+                "best_segment_end_frame"
+            ),
+            "best_segment_point_count": trajectory_fit_result.get(
+                "best_segment_point_count",
+                0,
+            ),
+            "best_segment_duration_sec": trajectory_fit_result.get(
+                "best_segment_duration_sec"
+            ),
+            "selected_segment_score": trajectory_fit_result.get(
+                "selected_segment_score",
+                0.0,
+            ),
+            "selected_segment_reason": trajectory_fit_result.get(
+                "selected_segment_reason",
+                "",
+            ),
+        }
+    )
+    line_confidence = _delivery_metric_confidence(
+        estimated_line,
+        overall_tracking_quality,
+        trajectory_fit_result,
+    )
+    length_confidence = _delivery_metric_confidence(
+        estimated_length,
+        overall_tracking_quality,
+        trajectory_fit_result,
+    )
+    bounce_confidence = _delivery_metric_confidence(
+        estimated_bounce_point,
+        overall_tracking_quality,
+        trajectory_fit_result,
+    )
     tracking_result_fields = {
         "ball_tracking_mode": ball_tracking_mode,
         "confidence_threshold_used": confidence,
         "image_size_used": inference_imgsz,
         "full_frame_roi_mode": full_frame_roi_mode,
-        "total_raw_ball_candidates": trajectory_selector.raw_candidate_count,
+        "online_best_tracklet_enabled": online_best_tracklet_enabled,
+        "best_tracklet_applied": bool(best_tracklet_result.get("applied")),
+        "best_tracklet_fallback_reason": best_tracklet_result.get("fallback_reason"),
+        "total_raw_ball_candidates": (
+            sum(len(items) for items in raw_frame_ball_candidates.values())
+            if online_best_tracklet_enabled
+            else trajectory_selector.raw_candidate_count
+        ),
         "selected_ball_points": trajectory_selector.accepted_point_count,
+        "candidate_segment_count": best_tracklet_result.get(
+            "candidate_segment_count",
+            0,
+        ),
+        "rejected_static_segment_count": best_tracklet_result.get(
+            "rejected_static_segment_count",
+            0,
+        ),
+        "best_segment_start_frame": (
+            best_tracklet_result.get("best_segment_start_frame")
+            if best_tracklet_result.get("applied")
+            else trajectory_fit_result.get("best_segment_start_frame")
+        ),
+        "best_segment_end_frame": (
+            best_tracklet_result.get("best_segment_end_frame")
+            if best_tracklet_result.get("applied")
+            else trajectory_fit_result.get("best_segment_end_frame")
+        ),
+        "best_segment_point_count": (
+            best_tracklet_result.get("best_segment_point_count")
+            if best_tracklet_result.get("applied")
+            else trajectory_fit_result.get("best_segment_point_count", 0)
+        ),
+        "best_segment_duration_sec": (
+            best_tracklet_result.get("best_segment_duration_sec")
+            if best_tracklet_result.get("applied")
+            else trajectory_fit_result.get("best_segment_duration_sec")
+        ),
+        "best_segment_score": (
+            best_tracklet_result.get("best_segment_score")
+            if best_tracklet_result.get("applied")
+            else trajectory_fit_result.get("selected_segment_score", 0.0)
+        ),
+        "best_segment_reason": (
+            best_tracklet_result.get("best_segment_reason")
+            if best_tracklet_result.get("applied")
+            else trajectory_fit_result.get("selected_segment_reason", "")
+        ),
+        "extension_enabled": best_tracklet_result.get("extension_enabled", False),
+        "extension_applied": best_tracklet_result.get("extension_applied", False),
+        "extension_fallback_reason": best_tracklet_result.get(
+            "extension_fallback_reason"
+        ),
+        "backward_extension_points": best_tracklet_result.get(
+            "backward_extension_points",
+            0,
+        ),
+        "forward_extension_points": best_tracklet_result.get(
+            "forward_extension_points",
+            0,
+        ),
+        "extended_segment_start_frame": best_tracklet_result.get(
+            "extended_segment_start_frame"
+        ),
+        "extended_segment_end_frame": best_tracklet_result.get(
+            "extended_segment_end_frame"
+        ),
+        "extended_segment_point_count": best_tracklet_result.get(
+            "extended_segment_point_count",
+            0,
+        ),
+        "extension_rejection_reasons": best_tracklet_result.get(
+            "extension_rejection_reasons",
+            {},
+        ),
+        "extension_preserved_original_segment": best_tracklet_result.get(
+            "extension_preserved_original_segment",
+            not best_tracklet_result.get("extension_applied", False),
+        ),
+        "extension_fit_delta": best_tracklet_result.get("extension_fit_delta", 0),
+        "trajectory_fit_quality_after_extension": best_tracklet_result.get(
+            "trajectory_fit_quality_after_extension"
+        ),
+        "online_selected_start_frame": (
+            online_tracking_selector.selected_track_start_frame()
+            if online_best_tracklet_enabled
+            else ball_tracking_debug.get("selected_track_start_frame")
+        ),
+        "online_selected_end_frame": (
+            online_tracking_selector.selected_track_end_frame()
+            if online_best_tracklet_enabled
+            else ball_tracking_debug.get("selected_track_end_frame")
+        ),
+        "online_after_track_terminated_count": (
+            online_best_tracklet_after_terminated
+            if best_tracklet_result.get("applied")
+            else online_tracking_selector.rejection_reasons.get(
+                "after_track_terminated",
+                0,
+            )
+            if online_best_tracklet_enabled
+            else 0
+        ),
         "delivery_track_found": ball_tracking_debug["delivery_track_found"],
         "delivery_track_terminated": ball_tracking_debug[
             "delivery_track_terminated"
@@ -1042,14 +1461,85 @@ def process_delivery_video(
         "selected_track_frame_count": ball_tracking_debug[
             "selected_track_frame_count"
         ],
+        "selected_segment_score": trajectory_fit_result.get(
+            "selected_segment_score",
+            0.0,
+        ),
+        "selected_segment_reason": trajectory_fit_result.get(
+            "selected_segment_reason",
+            "",
+        ),
         "final_tracking_quality": overall_tracking_quality,
+        "tracking_quality": overall_tracking_quality,
         "short_track_reason": ball_tracking_debug.get("short_track_reason"),
+        "trajectory_fit_quality": trajectory_fit_result.get(
+            "trajectory_fit_quality"
+        ),
+        "fitted_trajectory_point_count": len(
+            trajectory_fit_result.get("fitted_trajectory_points", [])
+        ),
+        "observed_track_point_count": trajectory_fit_result.get(
+            "observed_point_count",
+            0,
+        ),
+        "trajectory_fit_reason": trajectory_fit_result.get(
+            "trajectory_fit_reason"
+        ),
+        "trajectory_visualization_mode": trajectory_fit_result.get(
+            "trajectory_visualization_mode",
+            "hidden",
+        ),
+        "line_confidence": line_confidence,
+        "length_confidence": length_confidence,
+        "bounce_confidence": bounce_confidence,
     }
     delivery_report = {
         "estimated_line": estimated_line,
         "estimated_length": estimated_length,
+        "line_confidence": line_confidence,
+        "length_confidence": length_confidence,
+        "bounce_confidence": bounce_confidence,
         "ball_detection_rate": ball_detection_rate,
         "overall_tracking_quality": overall_tracking_quality,
+        "tracking_quality": overall_tracking_quality,
+        "trajectory_fit_quality": trajectory_fit_result.get(
+            "trajectory_fit_quality"
+        ),
+        "fitted_trajectory_point_count": len(
+            trajectory_fit_result.get("fitted_trajectory_points", [])
+        ),
+        "observed_track_point_count": trajectory_fit_result.get(
+            "observed_point_count",
+            0,
+        ),
+        "trajectory_fit_reason": trajectory_fit_result.get(
+            "trajectory_fit_reason"
+        ),
+        "trajectory_visualization_mode": trajectory_fit_result.get(
+            "trajectory_visualization_mode",
+            "hidden",
+        ),
+        "best_segment_start_frame": trajectory_fit_result.get(
+            "best_segment_start_frame"
+        ),
+        "best_segment_end_frame": trajectory_fit_result.get(
+            "best_segment_end_frame"
+        ),
+        "best_segment_point_count": trajectory_fit_result.get(
+            "best_segment_point_count",
+            0,
+        ),
+        "best_segment_duration_sec": trajectory_fit_result.get(
+            "best_segment_duration_sec"
+        ),
+        "selected_segment_score": trajectory_fit_result.get(
+            "selected_segment_score",
+            0.0,
+        ),
+        "selected_segment_reason": trajectory_fit_result.get(
+            "selected_segment_reason",
+            "",
+        ),
     }
     calibration_context = build_calibration_context(
         calibration_context,
@@ -1057,6 +1547,20 @@ def process_delivery_video(
         frame_width=width,
         frame_height=height,
     )
+    if (
+        online_best_tracklet_enabled
+        and generate_processed_video
+        and output_path
+    ):
+        add_delivery_trajectory_overlay_to_video(
+            output_path,
+            trajectory_fit_result=trajectory_fit_result,
+            overall_tracking_quality=overall_tracking_quality,
+            estimated_line=estimated_line,
+            estimated_length=estimated_length,
+            estimated_bounce_point=estimated_bounce_point,
+            calibration_context=calibration_context,
+        )
     reports = timed_video_reports(
         frame_detections,
         fps=fps,
@@ -1295,6 +1799,20 @@ def process_delivery_video(
         ),
         **enrichment,
     }
+
+
+def _delivery_metric_confidence(value, tracking_quality, trajectory_fit_result):
+    if value in {None, "", "Unknown"}:
+        return "Low"
+    fit_quality = (trajectory_fit_result or {}).get("trajectory_fit_quality")
+    if tracking_quality in {"Excellent", "Good"} and fit_quality == "Good":
+        return "Good"
+    if tracking_quality in {"Medium", "Partial", "Good"} and fit_quality in {
+        "Partial",
+        "Good",
+    }:
+        return "Medium"
+    return "Low"
 
 
 def _report_progress(callback, frame_index, total_frames):

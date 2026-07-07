@@ -1,8 +1,12 @@
 """Lightweight tests for Accuracy / Small Ball ball-tracking mode."""
 
 import importlib
+import inspect
 import tempfile
 from pathlib import Path
+
+import numpy as np
+import pytest
 
 from Backends.src.engine.engine_options import (
     ACCURACY_BALL_CONFIDENCE,
@@ -13,7 +17,15 @@ from Backends.src.engine.engine_options import (
 from Backends.src.tracking.trajectory_scorer import (
     TrajectoryBallSelector,
     resolve_delivery_tracking_quality,
+    should_enable_online_best_tracklet,
 )
+from Backends.src.video_pipeline.annotation_writer import (
+    add_delivery_trajectory_overlay_to_video,
+    delivery_overlay_metrics,
+    draw_fitted_trajectory_overlay,
+)
+
+pytest.importorskip("cv2")
 
 
 def _ball(center, confidence=0.8):
@@ -157,3 +169,101 @@ def test_balanced_mode_remains_compatible():
     assert settings["image_size"] == 768
     assert settings["ball_candidate_confidence"] is None
     assert options.ball_tracking_mode == "Balanced"
+
+
+def test_accuracy_mode_enables_online_best_tracklet_ranking():
+    assert should_enable_online_best_tracklet(
+        ball_tracking_mode="Accuracy / Small Ball",
+        speed_mode="Smart Balanced",
+    )
+    assert not should_enable_online_best_tracklet(
+        ball_tracking_mode="Balanced",
+        speed_mode="Smart Balanced",
+    )
+
+
+def test_video_analysis_passes_ball_tracking_mode_to_engine():
+    video_analysis = importlib.import_module("Backends.src.ui.video_analysis")
+    source = inspect.getsource(video_analysis.show_video_analysis_page)
+    assert "ball_tracking_mode=ball_tracking_mode" in source
+    assert "EngineOptions(" in source
+
+
+def test_delivery_result_tracking_fields_present():
+    delivery = importlib.import_module(
+        "Backends.src.engine.processors.delivery"
+    )
+    source = inspect.getsource(delivery.process_delivery_video)
+    for field_name in (
+        "best_tracklet_applied",
+        "best_segment_start_frame",
+        "best_segment_end_frame",
+        "best_segment_point_count",
+        "selected_ball_points",
+        "trajectory_fit_quality",
+        "trajectory_visualization_mode",
+        "tracking_quality",
+        "extension_applied",
+        "extension_fallback_reason",
+        "ball_tracking_mode",
+    ):
+        assert field_name in source
+
+
+def test_delivery_overlay_metrics_unknown_when_calibration_disabled():
+    line, length, bounce = delivery_overlay_metrics(
+        {"enabled": False, "calibration_quality": "Disabled"},
+        line="Middle",
+        length="Good Length",
+        bounce_point=(100, 200),
+    )
+    assert line == "Unknown"
+    assert length == "Unknown"
+    assert bounce == "Unknown"
+
+
+def test_clean_overlay_does_not_draw_rejection_labels():
+    frame = np.zeros((120, 220, 3), dtype=np.uint8)
+    draw_fitted_trajectory_overlay(
+        frame,
+        observed_points=[(20, 70), (35, 65)],
+        fitted_points=[(20, 70), (35, 65), (50, 60)],
+        visualization_mode="full_fit",
+        trajectory_quality="Good",
+        fit_quality="Good",
+        tracking_quality="Partial",
+        line="Unknown",
+        length="Unknown",
+        calibration_context={"enabled": False},
+    )
+    assert b"rejected" not in frame.tobytes()
+    assert b"static" not in frame.tobytes()
+
+
+def test_add_delivery_trajectory_overlay_rewrites_video(tmp_path):
+    output_path = tmp_path / "delivery.mp4"
+    from Backends.src.video_pipeline.annotation_writer import write_annotated_video
+
+    result = write_annotated_video(
+        [np.zeros((120, 160, 3), dtype=np.uint8) for _ in range(3)],
+        output_path,
+        fps=12,
+    )
+    if result is None:
+        pytest.skip("OpenCV mp4v writer is unavailable.")
+
+    add_delivery_trajectory_overlay_to_video(
+        output_path,
+        trajectory_fit_result={
+            "fitted_trajectory_points": [(20, 60), (40, 64), (60, 68)],
+            "observed_trajectory_points": [(20, 60), (40, 64)],
+            "trajectory_visualization_mode": "full_fit",
+            "trajectory_fit_quality": "Good",
+        },
+        overall_tracking_quality="Partial",
+        estimated_line="Unknown",
+        estimated_length="Unknown",
+        calibration_context={"enabled": False},
+    )
+    assert output_path.is_file()
+    assert output_path.stat().st_size > 0

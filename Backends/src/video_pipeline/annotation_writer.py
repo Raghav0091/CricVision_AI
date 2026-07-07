@@ -90,6 +90,186 @@ def draw_trajectory_lines(frame, trajectory_points, *, color=(0, 255, 255), thic
         cv2.line(frame, points[index - 1], points[index], color, thickness)
 
 
+def delivery_overlay_metrics(
+    calibration_context,
+    *,
+    line="Unknown",
+    length="Unknown",
+    bounce_point=None,
+):
+    """Return line/length/bounce labels for the clean delivery overlay."""
+    if not (calibration_context or {}).get("enabled"):
+        return "Unknown", "Unknown", "Unknown"
+    bounce = "Found" if bounce_point is not None else "Unknown"
+    return line or "Unknown", length or "Unknown", bounce
+
+
+def draw_fitted_trajectory_overlay(
+    frame,
+    *,
+    observed_points=None,
+    fitted_points=None,
+    visualization_mode="hidden",
+    trajectory_quality=None,
+    fit_quality=None,
+    bounce_point=None,
+    impact_point=None,
+    line=None,
+    length=None,
+    speed=None,
+    tracking_quality=None,
+    calibration_context=None,
+):
+    """Draw the polished CricVision trajectory layer.
+
+    Poor/hidden fits keep only small observed markers; they do not draw a
+    confident curve.
+    """
+    quality = trajectory_quality or (
+        "Good" if visualization_mode == "full_fit" else
+        "Partial" if visualization_mode == "partial_fit" else
+        "Poor"
+    )
+    _draw_pitch_corridor_from_context(frame, calibration_context)
+    for point in observed_points or []:
+        x, y = int(point[0]), int(point[1])
+        cv2.circle(frame, (x, y), 3, (255, 255, 255), -1)
+        cv2.circle(frame, (x, y), 5, (0, 0, 255), 1)
+
+    if visualization_mode in {"partial_fit", "full_fit"} and fitted_points:
+        draw_trajectory_lines(
+            frame,
+            fitted_points,
+            color=(0, 0, 255),
+            thickness=3 if visualization_mode == "partial_fit" else 4,
+        )
+    if bounce_point is not None:
+        _draw_event_marker(frame, bounce_point, "Bounce", (0, 80, 255))
+    if impact_point is not None:
+        _draw_event_marker(frame, impact_point, "Impact", (0, 220, 255))
+    track_quality = tracking_quality or quality
+    _draw_tracking_confidence(
+        frame,
+        track_quality,
+        fit_quality or quality,
+    )
+    overlay_line, overlay_length, overlay_bounce = delivery_overlay_metrics(
+        calibration_context,
+        line=line,
+        length=length,
+        bounce_point=bounce_point,
+    )
+    cards_y = 90 if (fit_quality or quality) else 58
+    _draw_metric_cards(
+        frame,
+        speed=speed,
+        line=overlay_line,
+        length=overlay_length,
+        bounce=overlay_bounce,
+        tracking_quality=track_quality,
+        y=cards_y,
+    )
+
+
+def _draw_event_marker(frame, point, label, color):
+    try:
+        x, y = int(point[0]), int(point[1])
+    except (TypeError, ValueError, IndexError):
+        return
+    cv2.circle(frame, (x, y), 8, color, -1)
+    cv2.circle(frame, (x, y), 14, (255, 255, 255), 2)
+    draw_label(frame, label, x + 10, y - 10, color)
+
+
+def _draw_tracking_confidence(frame, track_quality, fit_quality=None):
+    label = str(track_quality or "Poor")
+    color = {
+        "Good": (40, 180, 40),
+        "Partial": (0, 160, 255),
+        "Medium": (0, 160, 255),
+        "Poor": (40, 40, 220),
+        "None": (40, 40, 220),
+    }.get(label, (0, 160, 255))
+    draw_label(frame, f"Track: {label}", 16, 34, color)
+    if fit_quality:
+        fit_label = str(fit_quality)
+        fit_color = {
+            "Good": (40, 180, 40),
+            "Partial": (0, 160, 255),
+            "Medium": (0, 160, 255),
+            "Poor": (40, 40, 220),
+        }.get(fit_label, (0, 160, 255))
+        draw_label(frame, f"Fit: {fit_label}", 16, 62, fit_color)
+
+
+def _draw_metric_cards(
+    frame,
+    *,
+    speed=None,
+    line=None,
+    length=None,
+    bounce=None,
+    tracking_quality=None,
+    y=58,
+):
+    cards = [
+        ("Speed", speed if speed not in {None, ""} else "N/A"),
+        ("Line", line or "Unknown"),
+        ("Length", length or "Unknown"),
+        ("Bounce", bounce or "Unknown"),
+        ("Tracking", tracking_quality or "Unknown"),
+    ]
+    x, start_y = 16, y
+    card_width, card_height = 124, 42
+    gap = 8
+    for index, (title, value) in enumerate(cards):
+        x1 = x + index * (card_width + gap)
+        y1 = start_y
+        x2 = x1 + card_width
+        y2 = y1 + card_height
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (18, 18, 18), -1)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (70, 70, 70), 1)
+        cv2.putText(
+            frame,
+            title,
+            (x1 + 8, y1 + 15),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.38,
+            (190, 190, 190),
+            1,
+        )
+        cv2.putText(
+            frame,
+            str(value)[:16],
+            (x1 + 8, y1 + 34),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            (255, 255, 255),
+            1,
+        )
+
+
+def _draw_pitch_corridor_from_context(frame, calibration_context):
+    corridor = (calibration_context or {}).get("pitch_corridor") or {}
+    polygon = corridor.get("polygon") or []
+    if len(polygon) < 4:
+        return
+    points = []
+    for point in polygon:
+        try:
+            points.append((int(point[0]), int(point[1])))
+        except (TypeError, ValueError, IndexError):
+            return
+    for index in range(len(points)):
+        cv2.line(
+            frame,
+            points[index],
+            points[(index + 1) % len(points)],
+            (80, 255, 80),
+            1,
+        )
+
+
 def ensure_frame_writer_size(frame, width, height):
     """Resize a frame when annotation output does not match the writer size."""
     if frame is None:
@@ -260,6 +440,76 @@ def convert_to_browser_mp4(input_path, output_path):
     if not validation["valid"]:
         raise RuntimeError(validation["error"] or "Converted video failed validation.")
     return output_path
+
+
+def add_delivery_trajectory_overlay_to_video(
+    video_path,
+    *,
+    trajectory_fit_result,
+    overall_tracking_quality="Poor",
+    estimated_line="Unknown",
+    estimated_length="Unknown",
+    estimated_bounce_point=None,
+    calibration_context=None,
+):
+    """Rewrite a processed delivery video with the final fitted trajectory layer."""
+    fit_result = trajectory_fit_result or {}
+    visualization_mode = fit_result.get("trajectory_visualization_mode", "hidden")
+    fitted_points = fit_result.get("fitted_trajectory_points") or []
+    observed_points = fit_result.get("observed_trajectory_points") or []
+    if visualization_mode == "hidden" and not fitted_points and not observed_points:
+        return Path(video_path)
+
+    video_path = Path(video_path)
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        return video_path
+
+    fps = capture.get(cv2.CAP_PROP_FPS) or 25
+    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    temp_path = video_path.with_name(
+        f"{video_path.stem}_trajectory{video_path.suffix}"
+    )
+    writer = cv2.VideoWriter(
+        str(temp_path),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps,
+        (width, height),
+    )
+    if not writer.isOpened():
+        capture.release()
+        return video_path
+
+    fit_quality = fit_result.get("trajectory_fit_quality") or "Poor"
+    overlay_line, overlay_length, _overlay_bounce = delivery_overlay_metrics(
+        calibration_context,
+        line=estimated_line,
+        length=estimated_length,
+        bounce_point=estimated_bounce_point,
+    )
+    while True:
+        success, frame = capture.read()
+        if not success:
+            break
+        draw_fitted_trajectory_overlay(
+            frame,
+            observed_points=observed_points,
+            fitted_points=fitted_points,
+            visualization_mode=visualization_mode,
+            trajectory_quality=fit_quality,
+            fit_quality=fit_quality,
+            bounce_point=estimated_bounce_point,
+            line=overlay_line,
+            length=overlay_length,
+            tracking_quality=overall_tracking_quality,
+            calibration_context=calibration_context,
+        )
+        writer.write(ensure_frame_writer_size(frame, width, height))
+    capture.release()
+    writer.release()
+    temp_path.replace(video_path)
+    return video_path
 
 
 def add_impact_marker_to_video(video_path, impact_info):

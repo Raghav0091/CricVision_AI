@@ -53,10 +53,16 @@ from Backends.src.tracking.ball_tracking_utils import (  # noqa: E402
 )
 from Backends.src.tracking.trajectory_scorer import (  # noqa: E402
     TrajectoryBallSelector,
+    build_ball_positions_from_tracklet,
+    count_after_track_terminated_from_frame,
     resolve_delivery_tracking_quality,
+    select_online_best_tracklet,
+    should_enable_online_best_tracklet,
 )
+from Backends.src.tracking.trajectory_fit import fit_delivery_trajectory  # noqa: E402
 from Backends.src.utils.cv2_loader import cv2  # noqa: E402
 from Backends.src.video_pipeline.annotation_writer import (  # noqa: E402
+    draw_fitted_trajectory_overlay,
     draw_label,
     draw_pitch_roi,
     draw_search_roi,
@@ -200,6 +206,156 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
+def apply_best_tracklet_post_pass(
+    *,
+    selector: TrajectoryBallSelector,
+    raw_frame_ball_candidates: dict[int, list[dict]],
+    width: int,
+    height: int,
+    fps: float,
+    speed_mode: str,
+    ball_positions: list,
+    calibration_context,
+    ball_tracking_mode: str = "Balanced",
+) -> dict:
+    """Apply shared offline best-tracklet ranking after the debug detection loop."""
+    enabled = should_enable_online_best_tracklet(
+        ball_tracking_mode=ball_tracking_mode,
+        speed_mode=speed_mode,
+    )
+    result: dict = {
+        "online_best_tracklet_enabled": enabled,
+        "best_tracklet_applied": False,
+        "fallback_reason": None,
+        "online_selector_original_start_frame": selector.selected_track_start_frame(),
+        "online_selector_original_end_frame": selector.selected_track_end_frame(),
+        "online_selector_after_track_terminated_count": selector.rejection_reasons.get(
+            "after_track_terminated",
+            0,
+        ),
+        "candidate_segment_count": 0,
+        "rejected_static_segment_count": 0,
+        "best_segment_start_frame": None,
+        "best_segment_end_frame": None,
+        "best_segment_point_count": 0,
+        "best_segment_duration_sec": None,
+        "best_segment_score": None,
+        "best_segment_reason": None,
+        "ball_positions": ball_positions,
+        "selected_ball_points": selector.accepted_point_count,
+        "fit_result": None,
+    }
+    if not enabled:
+        result["fallback_reason"] = "disabled"
+        return result
+    if not raw_frame_ball_candidates:
+        result["fallback_reason"] = "no_raw_ball_candidates"
+        return result
+
+    best_tracklet = select_online_best_tracklet(
+        raw_frame_ball_candidates,
+        width,
+        height,
+        fps,
+    )
+    ranking = best_tracklet.get("ranking") or {}
+    result["candidate_segment_count"] = ranking.get("candidate_segment_count", 0)
+    result["rejected_static_segment_count"] = ranking.get(
+        "rejected_static_segment_count",
+        0,
+    )
+    if not best_tracklet.get("applied"):
+        result["fallback_reason"] = best_tracklet.get(
+            "fallback_reason",
+            "no_valid_ranked_segment",
+        )
+        return result
+
+    selector.apply_ranked_tracklet(
+        best_tracklet["tracklet_points"],
+        segment_end_frame=(
+            best_tracklet.get("extended_segment_end_frame")
+            or best_tracklet["best_segment_end_frame"]
+        ),
+    )
+    ranked_ball_positions = build_ball_positions_from_tracklet(
+        best_tracklet["tracklet_points"],
+        len(ball_positions),
+    )
+    segment_end_frame = (
+        best_tracklet.get("extended_segment_end_frame")
+        or best_tracklet["best_segment_end_frame"]
+    )
+    fit_result = fit_delivery_trajectory(
+        best_tracklet["tracklet_points"],
+        frame_size=(width, height),
+        fps=fps,
+        calibration_context=calibration_context,
+        delivery_track_terminated_frame=segment_end_frame,
+    )
+    result.update(
+        {
+            "best_tracklet_applied": True,
+            "best_segment_start_frame": best_tracklet.get("best_segment_start_frame"),
+            "best_segment_end_frame": best_tracklet.get("best_segment_end_frame"),
+            "best_segment_point_count": best_tracklet.get("best_segment_point_count"),
+            "best_segment_duration_sec": best_tracklet.get(
+                "best_segment_duration_sec"
+            ),
+            "best_segment_score": best_tracklet.get("best_segment_score"),
+            "best_segment_reason": best_tracklet.get("best_segment_reason"),
+            "extension_enabled": best_tracklet.get("extension_enabled", False),
+            "extension_applied": best_tracklet.get("extension_applied", False),
+            "backward_extension_points": best_tracklet.get(
+                "backward_extension_points",
+                0,
+            ),
+            "forward_extension_points": best_tracklet.get(
+                "forward_extension_points",
+                0,
+            ),
+            "extended_segment_start_frame": best_tracklet.get(
+                "extended_segment_start_frame"
+            ),
+            "extended_segment_end_frame": best_tracklet.get(
+                "extended_segment_end_frame"
+            ),
+            "extended_segment_point_count": best_tracklet.get(
+                "extended_segment_point_count",
+                len(best_tracklet["tracklet_points"]),
+            ),
+            "extension_rejection_reasons": best_tracklet.get(
+                "extension_rejection_reasons",
+                {},
+            ),
+            "extension_fallback_reason": best_tracklet.get(
+                "extension_fallback_reason"
+            ),
+            "extension_preserved_original_segment": best_tracklet.get(
+                "extension_preserved_original_segment",
+                not best_tracklet.get("extension_applied", False),
+            ),
+            "extension_fit_delta": best_tracklet.get("extension_fit_delta", 0),
+            "trajectory_fit_quality_after_extension": best_tracklet.get(
+                "trajectory_fit_quality_after_extension"
+            ),
+            "online_selector_after_track_terminated_count": (
+                count_after_track_terminated_from_frame(
+                    raw_frame_ball_candidates,
+                    best_tracklet["tracklet_points"],
+                    frame_width=width,
+                    frame_height=height,
+                    segment_end_frame=segment_end_frame,
+                )
+            ),
+            "ball_positions": ranked_ball_positions,
+            "selected_ball_points": len(best_tracklet["tracklet_points"]),
+            "fit_result": fit_result,
+        }
+    )
+    return result
+
+
 def analyze_video(args) -> dict:
     video_path = Path(args.video_path).expanduser()
     if not video_path.is_file():
@@ -252,9 +408,15 @@ def analyze_video(args) -> dict:
         else float(args.conf)
     )
     full_frame_roi_mode = "roi_enabled" if use_roi else "full_frame_no_roi"
+    online_best_tracklet_enabled = should_enable_online_best_tracklet(
+        ball_tracking_mode="Balanced",
+        speed_mode=speed_settings.get("mode", args.speed_mode),
+    )
+    defer_overlay_write = bool(args.write_overlay and online_best_tracklet_enabled)
 
     writer = None
-    if args.write_overlay:
+    overlay_frame_buffer: list[dict] = []
+    if args.write_overlay and not defer_overlay_write:
         output_paths["overlay_path"].parent.mkdir(parents=True, exist_ok=True)
         writer = cv2.VideoWriter(
             str(output_paths["overlay_path"]),
@@ -275,6 +437,7 @@ def analyze_video(args) -> dict:
     max_missing_ball_frames = 12
     frame_detections = []
     ball_positions = []
+    raw_frame_ball_candidates: dict[int, list[dict]] = {}
     rows = []
     rejection_reasons = Counter()
 
@@ -418,6 +581,17 @@ def analyze_video(args) -> dict:
                         raw_ball_detections = ball_detections
                         local_recovery_frames += 1
 
+            if ball_detections:
+                raw_frame_ball_candidates[frame_index] = [
+                    {
+                        "center": detection["center"],
+                        "confidence": detection.get("confidence", 0.0),
+                        "box": detection.get("box"),
+                        "class_name": detection.get("class_name", "ball"),
+                    }
+                    for detection in ball_detections
+                ]
+
             stump_detections = apply_locked_stump(stump_detections, locked_stump)
             frame_detections.append(
                 {
@@ -505,16 +679,46 @@ def analyze_video(args) -> dict:
             total_raw_ball_candidates += len(ball_detections)
             total_raw_stump_candidates += len(raw_stump_detections)
 
-            if writer is not None:
+            if defer_overlay_write:
+                overlay_frame_buffer.append(
+                    {
+                        "frame": frame.copy(),
+                        "frame_index": frame_index,
+                        "ball_detections": ball_detections,
+                        "stump_detections": stump_detections,
+                        "diagnostics": diagnostics,
+                        "roi_box": roi_box,
+                        "search_roi": search_roi,
+                    }
+                )
+            elif writer is not None:
                 annotation_started = time.perf_counter()
+                fit_result = fit_delivery_trajectory(
+                    [
+                        {
+                            "frame_index": frame_no,
+                            "x": position[0],
+                            "y": position[1],
+                        }
+                        for frame_no, position in zip(
+                            selector._accepted_frame_indices,
+                            selector.accepted_positions,
+                        )
+                    ],
+                    frame_size=(width, height),
+                    fps=fps,
+                    calibration_context=calibration_context,
+                    delivery_track_terminated_frame=selector.selected_track_end_frame(),
+                )
                 overlay = draw_debug_overlay(
                     frame,
                     ball_detections,
                     stump_detections,
                     diagnostics,
                     selector.accepted_positions,
-                    roi_box,
-                    search_roi,
+                    fit_result=fit_result,
+                    roi_box=roi_box,
+                    search_roi=search_roi,
                     label_rejections=args.label_rejections,
                 )
                 writer.write(ensure_frame_writer_size(overlay, width, height))
@@ -530,6 +734,21 @@ def analyze_video(args) -> dict:
             writer.release()
 
     timing["total_time_sec"] = time.perf_counter() - started_at
+
+    best_tracklet_info = apply_best_tracklet_post_pass(
+        selector=selector,
+        raw_frame_ball_candidates=raw_frame_ball_candidates,
+        width=width,
+        height=height,
+        fps=fps,
+        speed_mode=speed_settings.get("mode", args.speed_mode),
+        ball_positions=ball_positions,
+        calibration_context=calibration_context,
+    )
+    if best_tracklet_info.get("best_tracklet_applied"):
+        ball_positions = best_tracklet_info["ball_positions"]
+        selected_ball_points = best_tracklet_info["selected_ball_points"]
+
     final_quality = calculate_tracking_quality(ball_positions, processed_frames)
     final_tracking_quality, _ = resolve_delivery_tracking_quality(
         selector,
@@ -540,12 +759,145 @@ def analyze_video(args) -> dict:
         final_tracking_quality,
         fps=fps,
     )
+    if best_tracklet_info.get("fit_result") is not None:
+        fit_result = best_tracklet_info["fit_result"]
+    else:
+        fit_result = fit_delivery_trajectory(
+            [
+                {
+                    "frame_index": frame_no,
+                    "x": position[0],
+                    "y": position[1],
+                }
+                for frame_no, position in zip(
+                    selector._accepted_frame_indices,
+                    selector.accepted_positions,
+                )
+            ],
+            frame_size=(width, height),
+            fps=fps,
+            calibration_context=calibration_context,
+            delivery_track_terminated_frame=selector.selected_track_end_frame(),
+        )
+    if best_tracklet_info.get("best_tracklet_applied"):
+        selector_debug.update(
+            {
+                "best_segment_start_frame": best_tracklet_info.get(
+                    "best_segment_start_frame"
+                ),
+                "best_segment_end_frame": best_tracklet_info.get(
+                    "best_segment_end_frame"
+                ),
+                "best_segment_point_count": best_tracklet_info.get(
+                    "best_segment_point_count",
+                    0,
+                ),
+                "best_segment_duration_sec": best_tracklet_info.get(
+                    "best_segment_duration_sec"
+                ),
+                "selected_segment_score": best_tracklet_info.get(
+                    "best_segment_score"
+                ),
+                "selected_segment_reason": best_tracklet_info.get(
+                    "best_segment_reason"
+                ),
+            }
+        )
+    fit_debug_fields = {
+            "trajectory_fit_quality": fit_result.get("trajectory_fit_quality"),
+            "fitted_trajectory_point_count": len(
+                fit_result.get("fitted_trajectory_points", [])
+            ),
+            "observed_track_point_count": fit_result.get(
+                "observed_point_count",
+                0,
+            ),
+            "trajectory_fit_reason": fit_result.get("trajectory_fit_reason"),
+            "trajectory_visualization_mode": fit_result.get(
+                "trajectory_visualization_mode",
+                "hidden",
+            ),
+    }
+    if not best_tracklet_info.get("best_tracklet_applied"):
+        fit_debug_fields.update(
+            {
+                "best_segment_start_frame": fit_result.get(
+                    "best_segment_start_frame"
+                ),
+                "best_segment_end_frame": fit_result.get(
+                    "best_segment_end_frame"
+                ),
+                "best_segment_point_count": fit_result.get(
+                    "best_segment_point_count",
+                    0,
+                ),
+                "best_segment_duration_sec": fit_result.get(
+                    "best_segment_duration_sec"
+                ),
+                "selected_segment_score": fit_result.get(
+                    "selected_segment_score",
+                    0.0,
+                ),
+                "selected_segment_reason": fit_result.get(
+                    "selected_segment_reason",
+                    "",
+                ),
+            }
+        )
+    selector_debug.update(fit_debug_fields)
     final_calibration_context = build_calibration_context(
         calibration_context,
         frame_detections=frame_detections,
         frame_width=width,
         frame_height=height,
     )
+    overlay_status = build_debug_overlay_status(
+        final_tracking_quality=final_tracking_quality,
+        fit_result=fit_result,
+        best_tracklet_info=best_tracklet_info,
+        calibration_context=final_calibration_context,
+        selector_debug_summary=selector_debug,
+    )
+    ranked_frame_points = {}
+    if best_tracklet_info.get("best_tracklet_applied"):
+        ranked_frame_points = {
+            int(frame_no): (int(position[0]), int(position[1]))
+            for frame_no, position in zip(
+                selector._accepted_frame_indices,
+                selector.accepted_positions,
+            )
+        }
+    if defer_overlay_write and overlay_frame_buffer:
+        output_paths["overlay_path"].parent.mkdir(parents=True, exist_ok=True)
+        writer = cv2.VideoWriter(
+            str(output_paths["overlay_path"]),
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            fps,
+            (width, height),
+        )
+        if not writer.isOpened():
+            raise RuntimeError("Could not create debug overlay writer.")
+        annotation_started = time.perf_counter()
+        for item in overlay_frame_buffer:
+            overlay = draw_debug_overlay(
+                item["frame"],
+                item["ball_detections"],
+                item["stump_detections"],
+                item["diagnostics"],
+                selector.accepted_positions,
+                fit_result=fit_result,
+                roi_box=item["roi_box"],
+                search_roi=item["search_roi"],
+                frame_index=item["frame_index"],
+                label_rejections=args.label_rejections,
+                overlay_status=overlay_status,
+                ranked_frame_points=ranked_frame_points,
+            )
+            writer.write(ensure_frame_writer_size(overlay, width, height))
+        writer.release()
+        timing["annotation_write_time_sec"] += (
+            time.perf_counter() - annotation_started
+        )
     summary = build_summary(
         video_path=video_path,
         model_path=model_path_label,
@@ -572,6 +924,8 @@ def analyze_video(args) -> dict:
         image_size=inference_imgsz,
         full_frame_roi_mode=full_frame_roi_mode,
         every_nth_frame=every_nth_frame,
+        best_tracklet_info=best_tracklet_info,
+        overlay_status=overlay_status,
     )
 
     write_csv(output_paths["csv_path"], rows)
@@ -856,7 +1210,11 @@ def build_summary(
     image_size,
     full_frame_roi_mode,
     every_nth_frame,
+    best_tracklet_info=None,
+    overlay_status=None,
 ):
+    best_tracklet_info = best_tracklet_info or {}
+    overlay_status = overlay_status or {}
     return {
         "video_path": str(video_path),
         "model_path_used": model_path,
@@ -877,6 +1235,101 @@ def build_summary(
         "calibration_confidence": calibration_context.get("calibration_score"),
         "calibration_context": calibration_context,
         "final_tracking_quality": final_tracking_quality,
+        "trajectory_fit_quality": selector_debug_summary.get(
+            "trajectory_fit_quality"
+        ),
+        "trajectory_visualization_mode": selector_debug_summary.get(
+            "trajectory_visualization_mode",
+            "hidden",
+        ),
+        "fitted_trajectory_point_count": selector_debug_summary.get(
+            "fitted_trajectory_point_count",
+            0,
+        ),
+        "observed_track_point_count": selector_debug_summary.get(
+            "observed_track_point_count",
+            0,
+        ),
+        "best_segment_start_frame": selector_debug_summary.get(
+            "best_segment_start_frame"
+        ),
+        "best_segment_end_frame": selector_debug_summary.get(
+            "best_segment_end_frame"
+        ),
+        "best_segment_point_count": selector_debug_summary.get(
+            "best_segment_point_count",
+            0,
+        ),
+        "best_segment_duration_sec": selector_debug_summary.get(
+            "best_segment_duration_sec"
+        ),
+        "selected_segment_score": selector_debug_summary.get(
+            "selected_segment_score",
+            0.0,
+        ),
+        "selected_segment_reason": selector_debug_summary.get(
+            "selected_segment_reason",
+            "",
+        ),
+        "online_best_tracklet_enabled": best_tracklet_info.get(
+            "online_best_tracklet_enabled",
+            False,
+        ),
+        "best_tracklet_applied": best_tracklet_info.get("best_tracklet_applied", False),
+        "best_tracklet_fallback_reason": best_tracklet_info.get("fallback_reason"),
+        "best_segment_score": best_tracklet_info.get("best_segment_score"),
+        "best_segment_reason": best_tracklet_info.get("best_segment_reason"),
+        "candidate_segment_count": best_tracklet_info.get("candidate_segment_count", 0),
+        "rejected_static_segment_count": best_tracklet_info.get(
+            "rejected_static_segment_count",
+            0,
+        ),
+        "online_selector_original_start_frame": best_tracklet_info.get(
+            "online_selector_original_start_frame"
+        ),
+        "online_selector_original_end_frame": best_tracklet_info.get(
+            "online_selector_original_end_frame"
+        ),
+        "online_selector_after_track_terminated_count": best_tracklet_info.get(
+            "online_selector_after_track_terminated_count",
+            0,
+        ),
+        "extension_enabled": best_tracklet_info.get("extension_enabled", False),
+        "extension_applied": best_tracklet_info.get("extension_applied", False),
+        "backward_extension_points": best_tracklet_info.get(
+            "backward_extension_points",
+            0,
+        ),
+        "forward_extension_points": best_tracklet_info.get(
+            "forward_extension_points",
+            0,
+        ),
+        "extended_segment_start_frame": best_tracklet_info.get(
+            "extended_segment_start_frame"
+        ),
+        "extended_segment_end_frame": best_tracklet_info.get(
+            "extended_segment_end_frame"
+        ),
+        "extended_segment_point_count": best_tracklet_info.get(
+            "extended_segment_point_count",
+            0,
+        ),
+        "extension_rejection_reasons": best_tracklet_info.get(
+            "extension_rejection_reasons",
+            {},
+        ),
+        "extension_fallback_reason": best_tracklet_info.get(
+            "extension_fallback_reason"
+        ),
+        "extension_preserved_original_segment": best_tracklet_info.get(
+            "extension_preserved_original_segment",
+            not best_tracklet_info.get("extension_applied", False),
+        ),
+        "extension_fit_delta": best_tracklet_info.get("extension_fit_delta", 0),
+        "trajectory_fit_quality_after_extension": best_tracklet_info.get(
+            "trajectory_fit_quality_after_extension"
+        ),
+        "overlay_status": overlay_status,
         "selector_debug_summary": selector_debug_summary,
         "roi_detected_frames": roi_detected_frames,
         "local_recovery_frames": local_recovery_frames,
@@ -889,18 +1342,125 @@ def build_summary(
     }
 
 
+def build_debug_overlay_status(
+    *,
+    final_tracking_quality: str,
+    fit_result: dict,
+    best_tracklet_info: dict | None = None,
+    calibration_context: dict | None = None,
+    selector_debug_summary: dict | None = None,
+) -> dict:
+    """Build final overlay/report labels from ranked fit, not stale online state."""
+    best_tracklet_info = best_tracklet_info or {}
+    selector_debug_summary = selector_debug_summary or {}
+    fit_quality = fit_result.get("trajectory_fit_quality") or "Poor"
+    tracking_quality = final_tracking_quality or "Poor"
+
+    if best_tracklet_info.get("extension_applied"):
+        segment_start = best_tracklet_info.get("extended_segment_start_frame")
+        segment_end = best_tracklet_info.get("extended_segment_end_frame")
+    elif best_tracklet_info.get("best_tracklet_applied"):
+        segment_start = best_tracklet_info.get("best_segment_start_frame")
+        segment_end = best_tracklet_info.get("best_segment_end_frame")
+    else:
+        segment_start = fit_result.get("best_segment_start_frame")
+        segment_end = fit_result.get("best_segment_end_frame")
+
+    segment_text = None
+    if segment_start is not None and segment_end is not None:
+        segment_text = f"{int(segment_start)}-{int(segment_end)}"
+
+    calibration_quality = (calibration_context or {}).get("calibration_quality")
+    calibration_disabled = calibration_quality in {None, "", "Disabled"}
+    line = "Unknown" if calibration_disabled else fit_result.get("estimated_line") or "Unknown"
+    length = "Unknown" if calibration_disabled else fit_result.get("estimated_length") or "Unknown"
+    bounce = "Unknown" if calibration_disabled else fit_result.get("estimated_bounce") or "Unknown"
+
+    return {
+        "tracking_quality": tracking_quality,
+        "trajectory_fit_quality": fit_quality,
+        "segment_start_frame": segment_start,
+        "segment_end_frame": segment_end,
+        "segment_text": segment_text,
+        "track_label": f"Track: {tracking_quality}",
+        "fit_label": f"Fit: {fit_quality}",
+        "segment_label": (
+            f"Segment: {segment_text}" if segment_text is not None else None
+        ),
+        "line": line,
+        "length": length,
+        "bounce": bounce,
+        "calibration_context": calibration_context,
+        "online_selector_tracking_quality": selector_debug_summary.get(
+            "tracking_quality"
+        ),
+        "best_tracklet_applied": bool(
+            best_tracklet_info.get("best_tracklet_applied")
+        ),
+    }
+
+
+def draw_debug_status_labels(frame, overlay_status: dict | None) -> None:
+    """Draw ranked debug status lines below the metric cards."""
+    overlay_status = overlay_status or {}
+    labels = [
+        overlay_status.get("track_label"),
+        overlay_status.get("fit_label"),
+        overlay_status.get("segment_label"),
+    ]
+    y = 112
+    for label in labels:
+        if not label:
+            continue
+        draw_label(frame, label, 16, y, (30, 30, 30))
+        y += 28
+
+
+def draw_ranked_tracklet_point(frame, point) -> None:
+    x, y = int(point[0]), int(point[1])
+    cv2.circle(frame, (x, y), 6, (40, 220, 40), -1)
+    cv2.circle(frame, (x, y), 10, (255, 255, 255), 2)
+
+
+def draw_rejected_candidate_debug(
+    frame,
+    detection,
+    diagnostic,
+    *,
+    frame_height: int,
+) -> None:
+    """Draw dim rejection markers below the main trajectory layer."""
+    x1, y1, x2, y2 = detection["box"]
+    center_x, center_y = detection["center"]
+    color = (90, 90, 200)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1)
+    cv2.circle(frame, (center_x, center_y), 2, color, -1)
+    label = str(diagnostic.get("rejection_reason") or "rejected")[:24]
+    label_y = min(max(y2 + 18, 30), max(frame_height - 8, 30))
+    draw_label(frame, label, x1, label_y, color)
+
+
 def draw_debug_overlay(
     frame,
     ball_detections,
     stump_detections,
     diagnostics,
     accepted_positions,
+    fit_result,
     roi_box,
     search_roi,
     *,
+    frame_index=None,
     label_rejections=False,
+    overlay_status=None,
+    ranked_frame_points=None,
 ):
     overlay = frame.copy()
+    overlay_status = overlay_status or {}
+    ranked_frame_points = ranked_frame_points or {}
+    best_tracklet_applied = bool(overlay_status.get("best_tracklet_applied"))
+    tracking_quality = overlay_status.get("tracking_quality") or "Poor"
+    frame_height = overlay.shape[0]
     if roi_box is not None:
         draw_pitch_roi(overlay, roi_box)
     if search_roi is not None:
@@ -910,27 +1470,49 @@ def draw_debug_overlay(
         item.get("candidate_id"): item
         for item in diagnostics or []
     }
-    for index, detection in enumerate(ball_detections or []):
-        candidate_id = detection.get("_debug_candidate_id", index)
-        diagnostic = diagnostics_by_id.get(candidate_id, {})
-        x1, y1, x2, y2 = detection["box"]
-        center_x, center_y = detection["center"]
-        if diagnostic.get("selected"):
-            color = (40, 220, 40)
-            label = f"selected {detection.get('confidence', 0):.2f}"
-            thickness = 3
-        elif diagnostic.get("rejected"):
-            color = (40, 40, 230)
-            label = str(diagnostic.get("rejection_reason") or "rejected")
-            thickness = 2
-        else:
-            color = (0, 220, 255)
-            label = f"raw {detection.get('confidence', 0):.2f}"
-            thickness = 2
-        cv2.rectangle(overlay, (x1, y1), (x2, y2), color, thickness)
-        cv2.circle(overlay, (center_x, center_y), 4, color, -1)
-        if diagnostic.get("selected") or label_rejections:
-            draw_label(overlay, label[:32], x1, y1, color)
+
+    if best_tracklet_applied and label_rejections:
+        for index, detection in enumerate(ball_detections or []):
+            diagnostic = diagnostics_by_id.get(
+                detection.get("_debug_candidate_id", index),
+                {},
+            )
+            if diagnostic.get("rejected"):
+                draw_rejected_candidate_debug(
+                    overlay,
+                    detection,
+                    diagnostic,
+                    frame_height=frame_height,
+                )
+    elif not best_tracklet_applied:
+        for index, detection in enumerate(ball_detections or []):
+            candidate_id = detection.get("_debug_candidate_id", index)
+            diagnostic = diagnostics_by_id.get(candidate_id, {})
+            if diagnostic.get("rejected"):
+                if label_rejections:
+                    draw_rejected_candidate_debug(
+                        overlay,
+                        detection,
+                        diagnostic,
+                        frame_height=frame_height,
+                    )
+                continue
+            x1, y1, x2, y2 = detection["box"]
+            center_x, center_y = detection["center"]
+            if diagnostic.get("selected"):
+                color = (40, 220, 40)
+                label = f"selected {detection.get('confidence', 0):.2f}"
+                thickness = 3
+            else:
+                if not label_rejections:
+                    continue
+                color = (0, 220, 255)
+                label = f"raw {detection.get('confidence', 0):.2f}"
+                thickness = 2
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), color, thickness)
+            cv2.circle(overlay, (center_x, center_y), 4, color, -1)
+            if diagnostic.get("selected") or label_rejections:
+                draw_label(overlay, label[:32], x1, y1, color)
 
     for detection in stump_detections or []:
         box = detection.get("box") or detection.get("bbox")
@@ -949,6 +1531,22 @@ def draw_debug_overlay(
         color=(40, 220, 40),
         thickness=3,
     )
+    draw_fitted_trajectory_overlay(
+        overlay,
+        observed_points=fit_result.get("observed_trajectory_points", []),
+        fitted_points=fit_result.get("fitted_trajectory_points", []),
+        visualization_mode=fit_result.get("trajectory_visualization_mode", "hidden"),
+        trajectory_quality=tracking_quality,
+        tracking_quality=tracking_quality,
+        line=overlay_status.get("line"),
+        length=overlay_status.get("length"),
+        calibration_context=overlay_status.get("calibration_context"),
+    )
+    if best_tracklet_applied and frame_index is not None:
+        ranked_point = ranked_frame_points.get(int(frame_index))
+        if ranked_point is not None:
+            draw_ranked_tracklet_point(overlay, ranked_point)
+    draw_debug_status_labels(overlay, overlay_status)
     return overlay
 
 
