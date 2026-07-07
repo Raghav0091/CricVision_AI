@@ -20,6 +20,12 @@ BOOTSTRAP_MAX_DOMINANT_STEP_RATIO = 0.65
 BOOTSTRAP_PARTIAL_CHAIN_LIMIT = 50
 MIN_ACCEPTED_POINTS_FOR_RELIABILITY = 5
 MAX_CONSECUTIVE_REJECT_FRAMES = 4
+DELIVERY_MAX_FRAME_GAP = 8
+DELIVERY_MAX_CONSECUTIVE_MISSES = 5
+DELIVERY_NEAR_STATIC_STEP_PX = BOOTSTRAP_STATIC_MOVEMENT_PX
+DELIVERY_NEAR_STATIC_CONSECUTIVE = 4
+DELIVERY_MAX_FAR_FROM_PREDICTION_STREAK = 3
+DELIVERY_SEGMENT_JUMP_RATIO = 0.85
 
 
 def _distance(point_a, point_b) -> float:
@@ -49,6 +55,12 @@ class TrajectoryBallSelector:
         self.static_hits: Counter[tuple[int, int]] = Counter()
         self.consecutive_reject_frames = 0
         self._track_confirmed = False
+        self._active_delivery_track = False
+        self._track_terminated = False
+        self._last_accepted_frame_index = -1
+        self._select_call_index = -1
+        self._consecutive_near_static_acceptances = 0
+        self._consecutive_far_from_prediction_frames = 0
         self._bootstrap_window: list[list[dict]] = []
         self._bootstrap_provisional_point_count = 0
         self._rejected_bootstrap_cells: set[tuple[int, int]] = set()
@@ -124,11 +136,141 @@ class TrajectoryBallSelector:
         self._clear_bootstrap_window()
         self.rejection_reasons["static_bootstrap_rejected"] += 1
 
-    def _confirm_bootstrap_chain(self, chain) -> None:
+    def _confirm_bootstrap_chain(self, chain, current_frame: int | None = None) -> None:
         for _, detection in chain:
             self._accept(detection, rejected=0)
         self._track_confirmed = True
+        self._active_delivery_track = True
+        if current_frame is not None:
+            self._last_accepted_frame_index = current_frame
         self._clear_bootstrap_window()
+
+    def _resolve_frame_index(self, frame_index) -> int:
+        if frame_index is not None:
+            self._select_call_index = int(frame_index)
+        else:
+            self._select_call_index += 1
+        return self._select_call_index
+
+    def _terminate_delivery_track(self, reason: str = "delivery_track_lost") -> None:
+        if self._track_terminated:
+            return
+        self._track_terminated = True
+        self._active_delivery_track = False
+        self.rejection_reasons[reason] += 1
+
+    def _reject_after_termination(
+        self,
+        ball_detections,
+        *,
+        previous_center=None,
+        predicted_center=None,
+        diagnostics=None,
+    ):
+        for index, detection in enumerate(ball_detections):
+            self.rejected_candidate_count += 1
+            self.rejection_reasons["after_track_terminated"] += 1
+            self._record_diagnostic(
+                diagnostics,
+                detection,
+                candidate_index=index,
+                rejected=True,
+                reasons=["after_track_terminated"],
+                reference_center=previous_center,
+                predicted_center=predicted_center,
+            )
+
+    def _delivery_frame_gap_exceeded(self, current_frame: int) -> bool:
+        if self._last_accepted_frame_index < 0:
+            return False
+        return (
+            current_frame - self._last_accepted_frame_index
+            > DELIVERY_MAX_FRAME_GAP
+        )
+
+    def _near_static_acceptance_streak_after(self, center) -> int:
+        if not self.accepted_positions:
+            return 0
+        step = _distance(self.accepted_positions[-1], center)
+        if step < DELIVERY_NEAR_STATIC_STEP_PX:
+            return self._consecutive_near_static_acceptances + 1
+        return 0
+
+    def _should_terminate_delivery_track(
+        self,
+        current_frame: int,
+        *,
+        pending_center=None,
+        predicted_center=None,
+    ) -> str | None:
+        if not self._active_delivery_track or self._track_terminated:
+            return None
+
+        if self._delivery_frame_gap_exceeded(current_frame):
+            return "delivery_track_lost"
+
+        reliable = self.has_reliable_track()
+        if (
+            reliable
+            and self.consecutive_reject_frames >= DELIVERY_MAX_CONSECUTIVE_MISSES
+        ):
+            return "delivery_track_lost"
+
+        if pending_center is not None:
+            if (
+                self._near_static_acceptance_streak_after(pending_center)
+                >= DELIVERY_NEAR_STATIC_CONSECUTIVE
+            ):
+                return "delivery_track_lost"
+
+            if predicted_center is not None:
+                max_jump = self._max_jump_px()
+                if (
+                    _distance(pending_center, predicted_center)
+                    > max_jump * DELIVERY_SEGMENT_JUMP_RATIO
+                    and self.consecutive_reject_frames > 0
+                ):
+                    return "delivery_track_lost"
+
+        if (
+            self._consecutive_far_from_prediction_frames
+            >= DELIVERY_MAX_FAR_FROM_PREDICTION_STREAK
+        ):
+            return "delivery_track_lost"
+
+        return None
+
+    def _on_delivery_miss_frame(
+        self,
+        current_frame: int,
+        *,
+        predicted_center=None,
+    ) -> None:
+        self.consecutive_reject_frames += 1
+        if predicted_center is not None:
+            self._consecutive_far_from_prediction_frames += 1
+
+        reason = self._should_terminate_delivery_track(
+            current_frame,
+            predicted_center=predicted_center,
+        )
+        if reason:
+            self._terminate_delivery_track(reason)
+
+    def _on_delivery_accept_frame(self, detection, current_frame: int) -> None:
+        center = detection["center"]
+        self._accept(detection, rejected=0)
+        step = (
+            _distance(self.accepted_positions[-2], center)
+            if len(self.accepted_positions) >= 2
+            else float("inf")
+        )
+        if step < DELIVERY_NEAR_STATIC_STEP_PX:
+            self._consecutive_near_static_acceptances += 1
+        else:
+            self._consecutive_near_static_acceptances = 0
+        self._last_accepted_frame_index = current_frame
+        self._consecutive_far_from_prediction_frames = 0
 
     def _bootstrap_rejection_reasons(self, detection) -> list[str]:
         reasons = []
@@ -311,6 +453,7 @@ class TrajectoryBallSelector:
         ball_detections,
         previous_center=None,
         diagnostics=None,
+        current_frame=0,
     ):
         eligible, bootstrap_rejections = self._split_bootstrap_detections(
             ball_detections
@@ -345,6 +488,7 @@ class TrajectoryBallSelector:
                 ball_detections,
                 previous_center,
                 diagnostics,
+                current_frame=current_frame,
             )
         last_frame_index = len(self._bootstrap_window) - 1
         if (
@@ -374,7 +518,7 @@ class TrajectoryBallSelector:
                     reference_center=previous_center,
                     predicted_center=None,
                 )
-            self._confirm_bootstrap_chain(best_chain)
+            self._confirm_bootstrap_chain(best_chain, current_frame)
             return selected_detection
 
         pending_reason = "bootstrap_pending_no_valid_chain"
@@ -435,9 +579,30 @@ class TrajectoryBallSelector:
         previous_center=None,
         kalman_prediction=None,
         diagnostics=None,
+        frame_index=None,
     ):
         """Return the best trajectory-consistent detection, or None."""
+        current_frame = self._resolve_frame_index(frame_index)
+
+        if self._track_terminated:
+            if ball_detections:
+                reference_center = previous_center
+                if reference_center is None and self.accepted_positions:
+                    reference_center = self.accepted_positions[-1]
+                self._reject_after_termination(
+                    ball_detections,
+                    previous_center=reference_center,
+                    predicted_center=self.predict_next(kalman_prediction),
+                    diagnostics=diagnostics,
+                )
+            return None
+
         if not ball_detections:
+            if self._active_delivery_track:
+                self._on_delivery_miss_frame(
+                    current_frame,
+                    predicted_center=self.predict_next(kalman_prediction),
+                )
             return None
 
         self.raw_candidate_count += len(ball_detections)
@@ -448,6 +613,7 @@ class TrajectoryBallSelector:
                 ball_detections,
                 previous_center,
                 diagnostics,
+                current_frame=current_frame,
             )
 
         reference_center = previous_center
@@ -455,7 +621,20 @@ class TrajectoryBallSelector:
             reference_center = self.accepted_positions[-1]
         predicted_center = self.predict_next(kalman_prediction)
 
+        if self._active_delivery_track and self._delivery_frame_gap_exceeded(
+            current_frame
+        ):
+            self._terminate_delivery_track("delivery_track_lost")
+            self._reject_after_termination(
+                ball_detections,
+                previous_center=reference_center,
+                predicted_center=predicted_center,
+                diagnostics=diagnostics,
+            )
+            return None
+
         scored: list[tuple[float, dict]] = []
+        all_far_from_prediction = bool(ball_detections) and predicted_center is not None
         for index, detection in enumerate(ball_detections):
             score, rejections = self._score_candidate(
                 detection,
@@ -476,21 +655,69 @@ class TrajectoryBallSelector:
                     reference_center=reference_center,
                     predicted_center=predicted_center,
                 )
+                if not any(
+                    reason in ("far_from_track", "impossible_jump")
+                    for reason in rejections
+                ):
+                    all_far_from_prediction = False
                 continue
+            all_far_from_prediction = False
             scored.append((score, detection))
 
         if not scored:
-            self.consecutive_reject_frames += 1
-            self.rejection_reasons["no_acceptable_candidate"] += 1
+            if self._active_delivery_track:
+                if all_far_from_prediction and predicted_center is not None:
+                    self._consecutive_far_from_prediction_frames += 1
+                self._on_delivery_miss_frame(
+                    current_frame,
+                    predicted_center=predicted_center,
+                )
+                if self._track_terminated and ball_detections:
+                    self._reject_after_termination(
+                        ball_detections,
+                        previous_center=reference_center,
+                        predicted_center=predicted_center,
+                        diagnostics=diagnostics,
+                    )
+            else:
+                self.consecutive_reject_frames += 1
+                self.rejection_reasons["no_acceptable_candidate"] += 1
             return None
 
         scored.sort(key=lambda item: item[0], reverse=True)
         best_score, best = scored[0]
+
+        if self._active_delivery_track:
+            accept_reason = self._should_terminate_delivery_track(
+                current_frame,
+                pending_center=best["center"],
+                predicted_center=predicted_center,
+            )
+            if accept_reason:
+                self._terminate_delivery_track(accept_reason)
+
         alternate_rejections = len(scored) - 1
         for score, detection in scored[1:]:
             if best_score - score > 1.0:
                 alternate_rejections += 1
                 self.rejection_reasons["lower_trajectory_score"] += 1
+
+        if self._track_terminated:
+            self.rejected_candidate_count += len(ball_detections)
+            for index, detection in enumerate(ball_detections):
+                self.rejection_reasons["after_track_terminated"] += 1
+                self._record_diagnostic(
+                    diagnostics,
+                    detection,
+                    candidate_index=index,
+                    rejected=True,
+                    reasons=["after_track_terminated"],
+                    score=None,
+                    reference_center=reference_center,
+                    predicted_center=predicted_center,
+                )
+            return None
+
         for score, detection in scored:
             self._record_diagnostic(
                 diagnostics,
@@ -503,7 +730,12 @@ class TrajectoryBallSelector:
                 reference_center=reference_center,
                 predicted_center=predicted_center,
             )
-        self._accept(best, rejected=alternate_rejections)
+
+        if self._active_delivery_track:
+            self._on_delivery_accept_frame(best, current_frame)
+            self.rejected_candidate_count += max(alternate_rejections, 0)
+        else:
+            self._accept(best, rejected=alternate_rejections)
         return best
 
     def _accept(self, detection, rejected=0) -> None:
@@ -517,7 +749,11 @@ class TrajectoryBallSelector:
             return False
         if self.accepted_point_count < MIN_ACCEPTED_POINTS_FOR_RELIABILITY:
             return False
-        if self.consecutive_reject_frames >= MAX_CONSECUTIVE_REJECT_FRAMES:
+        if (
+            self._active_delivery_track
+            and not self._track_terminated
+            and self.consecutive_reject_frames >= MAX_CONSECUTIVE_REJECT_FRAMES
+        ):
             return False
         if len(self.accepted_positions) < 2:
             return False
@@ -545,6 +781,7 @@ class TrajectoryBallSelector:
             ),
             "tracking_quality": tracking_quality_label,
             "trajectory_reliable": trajectory_reliable,
+            "delivery_track_terminated": self._track_terminated,
         }
 
     def _bootstrap_can_reach_reliability(self) -> bool:

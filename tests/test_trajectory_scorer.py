@@ -12,15 +12,119 @@ def _ball(center, confidence=0.9):
     }
 
 
-def _bootstrap_moving_track(selector, start=(100, 100), step=(12, 2), count=3):
+def _bootstrap_moving_track(
+    selector,
+    start=(100, 100),
+    step=(12, 2),
+    count=3,
+    *,
+    start_frame=0,
+    frame_step=1,
+):
     previous = None
     chosen = None
     for index in range(count):
         center = (start[0] + step[0] * index, start[1] + step[1] * index)
-        chosen = selector.select([_ball(center, 0.8)], previous_center=previous)
+        chosen = selector.select(
+            [_ball(center, 0.8)],
+            previous_center=previous,
+            frame_index=start_frame + index * frame_step,
+        )
         if chosen is not None:
             previous = chosen["center"]
     return chosen
+
+
+def test_delivery_track_terminates_after_long_frame_gap():
+    selector = TrajectoryBallSelector(frame_width=640, frame_height=360)
+    _bootstrap_moving_track(selector, count=5, start_frame=0)
+
+    accepted_before = selector.accepted_point_count
+    assert accepted_before >= 5
+    assert selector.has_reliable_track() is True
+
+    selector.select([], frame_index=20)
+
+    assert selector._track_terminated is True
+    assert selector.accepted_point_count == accepted_before
+    assert selector.rejection_reasons["delivery_track_lost"] >= 1
+
+
+def test_static_cluster_after_termination_not_appended():
+    selector = TrajectoryBallSelector(frame_width=640, frame_height=360)
+    _bootstrap_moving_track(selector, count=5, start_frame=0)
+    selector.select([], frame_index=20)
+    static = (216, 183)
+
+    for frame in range(30, 36):
+        chosen = selector.select([_ball(static, 0.99)], frame_index=frame)
+        assert chosen is None
+
+    assert selector.accepted_point_count == 5
+    assert selector.rejection_reasons["after_track_terminated"] >= 6
+
+
+def test_far_cluster_after_termination_not_appended():
+    selector = TrajectoryBallSelector(frame_width=640, frame_height=360)
+    _bootstrap_moving_track(selector, count=5, start_frame=0)
+    selector.select([], frame_index=20)
+    far_centers = [(500, 300), (520, 310), (540, 320)]
+
+    for index, center in enumerate(far_centers):
+        chosen = selector.select(
+            [_ball(center, 0.99)],
+            frame_index=30 + index,
+        )
+        assert chosen is None
+
+    assert selector.accepted_point_count == 5
+    assert selector.rejection_reasons["after_track_terminated"] >= 3
+
+
+def test_clean_short_delivery_path_stays_reliable():
+    selector = TrajectoryBallSelector(frame_width=640, frame_height=360)
+    centers = [(100, 100), (115, 102), (130, 105), (145, 108), (160, 110)]
+
+    previous = None
+    for index, center in enumerate(centers):
+        chosen = selector.select(
+            [_ball(center, 0.8)],
+            previous_center=previous,
+            frame_index=index,
+        )
+        if chosen is not None:
+            previous = chosen["center"]
+
+    summary = selector.debug_summary("Medium")
+
+    assert selector.has_reliable_track() is True
+    assert summary["trajectory_reliable"] is True
+    assert summary["tracking_quality"] == "Medium"
+    assert summary["accepted_ball_point_count"] == len(centers)
+    assert selector._track_terminated is False
+
+
+def test_termination_rejection_reasons_in_diagnostics():
+    selector = TrajectoryBallSelector(frame_width=640, frame_height=360)
+    _bootstrap_moving_track(selector, count=5, start_frame=0)
+    selector.select([], frame_index=20)
+    diagnostics = []
+
+    selector.select(
+        [_ball((216, 183), 0.99)],
+        frame_index=30,
+        diagnostics=diagnostics,
+    )
+
+    assert selector._track_terminated is True
+    assert any(
+        "after_track_terminated" in item["rejection_reason"]
+        for item in diagnostics
+    )
+    assert (
+        selector.rejection_reasons["delivery_track_lost"] >= 1
+        or selector.rejection_reasons["after_track_terminated"] >= 1
+    )
 
 
 def test_reject_impossible_jump():
