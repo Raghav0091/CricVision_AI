@@ -18,6 +18,7 @@ from Backends.src.calibration.calibration_context import (
     build_calibration_context,
     normalize_calibration_context,
 )
+from Backends.src.engine.engine_options import resolve_ball_tracking_settings
 from Backends.src.config.paths import (
     REVIEW_FRAMES_DIR,
     VIDEO_ANALYSIS_OUTPUT_DIR,
@@ -90,6 +91,7 @@ def process_delivery_video(
     field_setup=None,
     bat_model_key=None,
     speed_mode="Smart Balanced",
+    ball_tracking_mode="Balanced",
     max_frames=None,
     generate_processed_video=True,
     calibration_context=None,
@@ -194,9 +196,28 @@ def process_delivery_video(
             "error": "Could not read video width/height.",
         }
 
+    calibration_context = normalize_calibration_context(calibration_context)
     speed_settings = get_analysis_mode_settings(speed_mode)
     speed_mode = speed_settings.get("mode", speed_mode)
-    inference_imgsz = int(speed_settings.get("yolo_imgsz", imgsz))
+    tracking_settings = resolve_ball_tracking_settings(
+        ball_tracking_mode,
+        calibration_context=calibration_context,
+        preset_confidence=confidence,
+        preset_image_size=imgsz,
+        speed_use_roi=speed_settings.get("use_roi", True),
+    )
+    ball_tracking_mode = tracking_settings["ball_tracking_mode"]
+    if ball_tracking_mode == "Accuracy / Small Ball":
+        confidence = tracking_settings["confidence_threshold"]
+        inference_imgsz = int(tracking_settings["image_size"])
+        detection_use_roi = tracking_settings["use_roi"]
+        full_frame_roi_mode = tracking_settings["full_frame_roi_mode"]
+    else:
+        inference_imgsz = int(speed_settings.get("yolo_imgsz", imgsz))
+        detection_use_roi = speed_settings.get("use_roi", True)
+        full_frame_roi_mode = (
+            "roi_enabled" if detection_use_roi else "full_frame_no_roi"
+        )
     resize_width = speed_settings.get("resize_width")
     light_annotation = bool(
         speed_settings.get("light_annotation", False)
@@ -294,7 +315,6 @@ def process_delivery_video(
         "Right-arm bowler",
     )
     camera_view = field_setup.get("camera_view", "Behind bowler")
-    calibration_context = normalize_calibration_context(calibration_context)
     if calibration_context.get("enabled"):
         if calibration_context.get("batter_handedness") != "unknown":
             batter_handedness = calibration_context["batter_handedness"]
@@ -305,7 +325,11 @@ def process_delivery_video(
 
     min_track_points_for_bounce = 8
     min_movement_distance = 40
-    min_ball_confidence_for_tracking = 0.35
+    min_ball_confidence_for_tracking = (
+        tracking_settings["ball_candidate_confidence"]
+        if tracking_settings["ball_candidate_confidence"] is not None
+        else 0.35
+    )
     locked_stump = None
     rough_impact_state = None
     rough_impact_frame = None
@@ -369,7 +393,7 @@ def process_delivery_video(
                     if locked_stump and not run_stump
                     else None
                 ),
-                use_roi=speed_settings.get("use_roi", True),
+                use_roi=detection_use_roi,
             )
             ball_detections = scale_detections_to_original(
                 detection_result["ball_detections"],
@@ -998,6 +1022,29 @@ def process_delivery_video(
         min_track_points_for_bounce=min_track_points_for_bounce,
         min_movement_distance=min_movement_distance,
     )
+    tracking_result_fields = {
+        "ball_tracking_mode": ball_tracking_mode,
+        "confidence_threshold_used": confidence,
+        "image_size_used": inference_imgsz,
+        "full_frame_roi_mode": full_frame_roi_mode,
+        "total_raw_ball_candidates": trajectory_selector.raw_candidate_count,
+        "selected_ball_points": trajectory_selector.accepted_point_count,
+        "delivery_track_found": ball_tracking_debug["delivery_track_found"],
+        "delivery_track_terminated": ball_tracking_debug[
+            "delivery_track_terminated"
+        ],
+        "selected_track_start_frame": ball_tracking_debug[
+            "selected_track_start_frame"
+        ],
+        "selected_track_end_frame": ball_tracking_debug[
+            "selected_track_end_frame"
+        ],
+        "selected_track_frame_count": ball_tracking_debug[
+            "selected_track_frame_count"
+        ],
+        "final_tracking_quality": overall_tracking_quality,
+        "short_track_reason": ball_tracking_debug.get("short_track_reason"),
+    }
     delivery_report = {
         "estimated_line": estimated_line,
         "estimated_length": estimated_length,
@@ -1165,6 +1212,7 @@ def process_delivery_video(
         "tracker_recoveries": tracker_recoveries,
         "overall_tracking_quality": overall_tracking_quality,
         "ball_tracking_debug": ball_tracking_debug,
+        **tracking_result_fields,
         "stump_detection_rate": stump_detection_rate,
         "average_ball_confidence": average_confidence,
         "full_frame_detection_time_ms": (

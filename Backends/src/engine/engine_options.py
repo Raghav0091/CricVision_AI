@@ -6,6 +6,63 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Mapping
 
+BALL_TRACKING_MODES = ("Balanced", "Accuracy / Small Ball")
+ACCURACY_BALL_CONFIDENCE = 0.01
+ACCURACY_BALL_IMGSZ = 1536
+
+
+def normalize_ball_tracking_mode(mode: str | None) -> str:
+    """Map UI labels to a supported ball-tracking mode."""
+    normalized = (mode or "Balanced").strip().lower()
+    if normalized in {
+        "accuracy",
+        "accuracy / small ball",
+        "accuracy/small ball",
+        "small ball",
+    }:
+        return "Accuracy / Small Ball"
+    return "Balanced"
+
+
+def resolve_ball_tracking_settings(
+    mode: str | None,
+    *,
+    calibration_context=None,
+    preset_confidence: float = 0.25,
+    preset_image_size: int = 640,
+    speed_use_roi: bool = True,
+) -> dict[str, Any]:
+    """Return detection overrides for Balanced vs Accuracy / Small Ball."""
+    ball_tracking_mode = normalize_ball_tracking_mode(mode)
+    if ball_tracking_mode == "Accuracy / Small Ball":
+        use_roi = bool(speed_use_roi)
+        full_frame_roi_mode = "roi_enabled" if use_roi else "full_frame_no_roi"
+        context = calibration_context if isinstance(calibration_context, dict) else {}
+        enabled = bool(context.get("enabled"))
+        quality = str(context.get("calibration_quality") or "").strip()
+        if not enabled or quality in {"Disabled", "Low"}:
+            use_roi = False
+            full_frame_roi_mode = "full_frame_no_roi"
+        return {
+            "ball_tracking_mode": ball_tracking_mode,
+            "confidence_threshold": ACCURACY_BALL_CONFIDENCE,
+            "image_size": ACCURACY_BALL_IMGSZ,
+            "ball_candidate_confidence": ACCURACY_BALL_CONFIDENCE,
+            "use_roi": use_roi,
+            "full_frame_roi_mode": full_frame_roi_mode,
+        }
+
+    return {
+        "ball_tracking_mode": ball_tracking_mode,
+        "confidence_threshold": preset_confidence,
+        "image_size": preset_image_size,
+        "ball_candidate_confidence": None,
+        "use_roi": bool(speed_use_roi),
+        "full_frame_roi_mode": (
+            "roi_enabled" if speed_use_roi else "full_frame_no_roi"
+        ),
+    }
+
 
 @dataclass(slots=True)
 class EngineOptions:
@@ -20,6 +77,7 @@ class EngineOptions:
     processed_video_enabled: bool = True
     overlay_detail: str = "Clean"
     confidence_threshold: float = 0.25
+    ball_tracking_mode: str = "Balanced"
 
     output_path: str | Path | None = None
     browser_output_path: str | Path | None = None
@@ -65,6 +123,9 @@ class EngineOptions:
         self.confidence_threshold = _bounded_float(
             self.confidence_threshold,
             default=0.25,
+        )
+        self.ball_tracking_mode = normalize_ball_tracking_mode(
+            self.ball_tracking_mode
         )
         self.image_size = _positive_int(self.image_size, default=640)
         self.max_frames = _optional_positive_int(self.max_frames)

@@ -68,6 +68,10 @@ def analyze_delivery_clip(video_path, calibration_context=None, options=None):
             engine_options.analysis_mode,
         )
         pipeline_result.setdefault(
+            "ball_tracking_mode",
+            engine_options.ball_tracking_mode,
+        )
+        pipeline_result.setdefault(
             "active_preset",
             engine_options.active_preset,
         )
@@ -166,6 +170,7 @@ def _run_processor(
         field_setup=options.field_setup,
         bat_model_key=bat_model_key,
         speed_mode=options.smart_mode,
+        ball_tracking_mode=options.ball_tracking_mode,
         max_frames=options.max_frames,
         generate_processed_video=options.processed_video_enabled,
         calibration_context=calibration_context,
