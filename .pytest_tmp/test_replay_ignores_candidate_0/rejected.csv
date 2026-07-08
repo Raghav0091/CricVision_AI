@@ -1,0 +1,4 @@
+frame_index,timestamp_sec,class_name,confidence,bbox_x1,bbox_y1,bbox_x2,bbox_y2,center_x,center_y,frame_width,frame_height,candidate_id,candidate_selected,candidate_rejected,rejection_reason,tracking_quality_so_far
+40,1.6,ball,0.8,195,295,205,305,200,300,640,480,40-200-300,False,True,static_false_positive,Poor
+41,1.64,ball,0.8,215,305,225,315,220,310,640,480,41-220-310,False,True,after_track_terminated,Poor
+42,1.68,ball,0.8,235,315,245,325,240,320,640,480,42-240-320,False,True,far_from_track,Poor

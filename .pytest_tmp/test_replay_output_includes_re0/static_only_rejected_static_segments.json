@@ -1,0 +1,481 @@
+[
+  {
+    "start_frame": 116,
+    "end_frame": 129,
+    "point_count": 14,
+    "frame_span": 14,
+    "duration_sec": 0.56,
+    "total_movement": 0.0,
+    "average_movement_per_frame": 0.0,
+    "unique_center_count": 1,
+    "spatial_spread_px": 0.0,
+    "static_penalty": 65.0,
+    "edge_penalty": 50.0,
+    "smoothness_score": 0.0,
+    "confidence_score": 9.6,
+    "final_segment_score": 65.12,
+    "tracklet_points": [
+      {
+        "frame_index": 116,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 117,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 118,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 119,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 120,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 121,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 122,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 123,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 124,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 125,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 126,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 127,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 128,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 129,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      }
+    ],
+    "rejection_reason": "insufficient_total_movement"
+  },
+  {
+    "start_frame": 116,
+    "end_frame": 128,
+    "point_count": 13,
+    "frame_span": 13,
+    "duration_sec": 0.52,
+    "total_movement": 0.0,
+    "average_movement_per_frame": 0.0,
+    "unique_center_count": 1,
+    "spatial_spread_px": 0.0,
+    "static_penalty": 65.0,
+    "edge_penalty": 50.0,
+    "smoothness_score": 0.0,
+    "confidence_score": 9.6,
+    "final_segment_score": 52.94,
+    "tracklet_points": [
+      {
+        "frame_index": 116,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 117,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 118,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 119,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 120,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 121,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 122,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 123,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 124,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 125,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 126,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 127,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 128,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      }
+    ],
+    "rejection_reason": "insufficient_total_movement"
+  },
+  {
+    "start_frame": 117,
+    "end_frame": 129,
+    "point_count": 13,
+    "frame_span": 13,
+    "duration_sec": 0.52,
+    "total_movement": 0.0,
+    "average_movement_per_frame": 0.0,
+    "unique_center_count": 1,
+    "spatial_spread_px": 0.0,
+    "static_penalty": 65.0,
+    "edge_penalty": 50.0,
+    "smoothness_score": 0.0,
+    "confidence_score": 9.6,
+    "final_segment_score": 52.94,
+    "tracklet_points": [
+      {
+        "frame_index": 117,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 118,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 119,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 120,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 121,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 122,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 123,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 124,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 125,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 126,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 127,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 128,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 129,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      }
+    ],
+    "rejection_reason": "insufficient_total_movement"
+  },
+  {
+    "start_frame": 116,
+    "end_frame": 127,
+    "point_count": 12,
+    "frame_span": 12,
+    "duration_sec": 0.48,
+    "total_movement": 0.0,
+    "average_movement_per_frame": 0.0,
+    "unique_center_count": 1,
+    "spatial_spread_px": 0.0,
+    "static_penalty": 65.0,
+    "edge_penalty": 50.0,
+    "smoothness_score": 0.0,
+    "confidence_score": 9.6,
+    "final_segment_score": 40.76,
+    "tracklet_points": [
+      {
+        "frame_index": 116,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 117,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 118,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 119,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 120,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 121,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 122,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 123,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 124,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 125,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 126,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 127,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      }
+    ],
+    "rejection_reason": "insufficient_total_movement"
+  },
+  {
+    "start_frame": 117,
+    "end_frame": 128,
+    "point_count": 12,
+    "frame_span": 12,
+    "duration_sec": 0.48,
+    "total_movement": 0.0,
+    "average_movement_per_frame": 0.0,
+    "unique_center_count": 1,
+    "spatial_spread_px": 0.0,
+    "static_penalty": 65.0,
+    "edge_penalty": 50.0,
+    "smoothness_score": 0.0,
+    "confidence_score": 9.6,
+    "final_segment_score": 40.76,
+    "tracklet_points": [
+      {
+        "frame_index": 117,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 118,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 119,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 120,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 121,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 122,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 123,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 124,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 125,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 126,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 127,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 128,
+        "x": 348.0,
+        "y": 473.0,
+        "confidence": 0.8
+      }
+    ],
+    "rejection_reason": "insufficient_total_movement"
+  }
+]

@@ -1,0 +1,7 @@
+frame_index,timestamp_sec,class_name,confidence,bbox_x1,bbox_y1,bbox_x2,bbox_y2,center_x,center_y,frame_width,frame_height,candidate_id,candidate_selected,candidate_rejected,rejection_reason,tracking_quality_so_far
+0,0.0,ball,0.8,95,195,105,205,100,200,640,480,0-100-200,False,False,,Poor
+1,0.04,ball,0.8,115,205,125,215,120,210,640,480,1-120-210,False,False,,Poor
+2,0.08,ball,0.8,135,215,145,225,140,220,640,480,2-140-220,False,False,,Poor
+3,0.12,ball,0.8,155,225,165,235,160,230,640,480,3-160-230,False,False,,Poor
+4,0.16,ball,0.8,175,235,185,245,180,240,640,480,4-180-240,False,False,,Poor
+5,0.2,ball,0.8,195,245,205,255,200,250,640,480,5-200-250,False,False,,Poor

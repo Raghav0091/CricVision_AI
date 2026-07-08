@@ -1,0 +1,60 @@
+{
+  "csv_path": "C:\\CricVision_AI\\.pytest_tmp\\test_later_smooth_chain_ranked0\\moving.csv",
+  "frame_width": 640,
+  "frame_height": 480,
+  "fps": 25.0,
+  "min_conf": 0.01,
+  "total_csv_rows": 13,
+  "raw_candidate_count_used_for_replay": 13,
+  "filtered_out_by_confidence_count": 0,
+  "candidate_frames_used": 13,
+  "frame_index_min": 10,
+  "frame_index_max": 49,
+  "frames_40_76_candidate_count": 10,
+  "replay_config": {
+    "min_conf": 0.01,
+    "max_frame_gap": 5,
+    "max_link_distance_px": 57.6,
+    "min_tracklet_points": 3,
+    "min_total_movement_px": 12.0,
+    "min_average_movement_px": 0.5,
+    "top_k": 5
+  },
+  "ranking": {
+    "candidate_segment_count": 37,
+    "rejected_static_segment_count": 1,
+    "total_valid_tracklets": 36,
+    "top_segment_count": 5,
+    "winner_start_frame": 40,
+    "winner_end_frame": 49,
+    "winner_point_count": 10,
+    "winner_total_movement": 201.25,
+    "winner_final_segment_score": 225.936,
+    "winner_reason": "selected_winner;meaningful_movement",
+    "frames_40_76_in_any_ranked_segment": true,
+    "ranking_applies_after_track_terminated": false,
+    "why_no_segments": null,
+    "static_rejection_reason_counts": {
+      "insufficient_total_movement": 1
+    },
+    "nearest_failed_segment_count": 0
+  },
+  "online_selector": {
+    "selected_start_frame": 40,
+    "selected_end_frame": 49,
+    "selected_point_count": 10,
+    "track_terminated": false,
+    "termination_frame": null,
+    "after_track_terminated_count": 0,
+    "main_rejection_reasons": {
+      "bootstrap_pending_no_valid_chain": 4,
+      "static_bootstrap_rejected": 1,
+      "bootstrap_cell_previously_rejected": 1,
+      "no_acceptable_candidate": 1
+    }
+  },
+  "comparison": {
+    "offline_winner_differs_from_online": false,
+    "why_online_may_differ": "same_start_but_online_may_end_early;frames_40_76_present_in_offline_ranking"
+  }
+}

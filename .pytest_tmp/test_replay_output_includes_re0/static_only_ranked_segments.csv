@@ -1,0 +1,2 @@
+rank,start_frame,end_frame,point_count,frame_span,duration_sec,total_movement,average_movement_per_frame,static_penalty,edge_penalty,smoothness_score,confidence_score,final_segment_score,reason
+,128,129,2,,,,,,,,,,too_few_points

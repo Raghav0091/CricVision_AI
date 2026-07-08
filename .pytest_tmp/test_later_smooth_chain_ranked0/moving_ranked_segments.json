@@ -1,0 +1,366 @@
+[
+  {
+    "start_frame": 40,
+    "end_frame": 49,
+    "point_count": 10,
+    "frame_span": 10,
+    "duration_sec": 0.4,
+    "total_movement": 201.25,
+    "average_movement_per_frame": 22.36,
+    "unique_center_count": 10,
+    "spatial_spread_px": 201.25,
+    "static_penalty": 0.0,
+    "edge_penalty": 0.0,
+    "smoothness_score": 1.0,
+    "confidence_score": 9.6,
+    "final_segment_score": 225.936,
+    "tracklet_points": [
+      {
+        "frame_index": 40,
+        "x": 200.0,
+        "y": 300.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 41,
+        "x": 220.0,
+        "y": 310.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 42,
+        "x": 240.0,
+        "y": 320.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 43,
+        "x": 260.0,
+        "y": 330.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 44,
+        "x": 280.0,
+        "y": 340.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 45,
+        "x": 300.0,
+        "y": 350.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 46,
+        "x": 320.0,
+        "y": 360.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 47,
+        "x": 340.0,
+        "y": 370.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 48,
+        "x": 360.0,
+        "y": 380.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 49,
+        "x": 380.0,
+        "y": 390.0,
+        "confidence": 0.8
+      }
+    ],
+    "rank": 1,
+    "reason": "selected_winner;meaningful_movement"
+  },
+  {
+    "start_frame": 40,
+    "end_frame": 48,
+    "point_count": 9,
+    "frame_span": 9,
+    "duration_sec": 0.36,
+    "total_movement": 178.89,
+    "average_movement_per_frame": 22.36,
+    "unique_center_count": 9,
+    "spatial_spread_px": 178.89,
+    "static_penalty": 0.0,
+    "edge_penalty": 0.0,
+    "smoothness_score": 1.0,
+    "confidence_score": 9.6,
+    "final_segment_score": 204.141,
+    "tracklet_points": [
+      {
+        "frame_index": 40,
+        "x": 200.0,
+        "y": 300.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 41,
+        "x": 220.0,
+        "y": 310.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 42,
+        "x": 240.0,
+        "y": 320.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 43,
+        "x": 260.0,
+        "y": 330.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 44,
+        "x": 280.0,
+        "y": 340.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 45,
+        "x": 300.0,
+        "y": 350.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 46,
+        "x": 320.0,
+        "y": 360.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 47,
+        "x": 340.0,
+        "y": 370.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 48,
+        "x": 360.0,
+        "y": 380.0,
+        "confidence": 0.8
+      }
+    ],
+    "rank": 2,
+    "reason": "rejected_lower_score_than_winner"
+  },
+  {
+    "start_frame": 41,
+    "end_frame": 49,
+    "point_count": 9,
+    "frame_span": 9,
+    "duration_sec": 0.36,
+    "total_movement": 178.89,
+    "average_movement_per_frame": 22.36,
+    "unique_center_count": 9,
+    "spatial_spread_px": 178.89,
+    "static_penalty": 0.0,
+    "edge_penalty": 0.0,
+    "smoothness_score": 1.0,
+    "confidence_score": 9.6,
+    "final_segment_score": 204.141,
+    "tracklet_points": [
+      {
+        "frame_index": 41,
+        "x": 220.0,
+        "y": 310.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 42,
+        "x": 240.0,
+        "y": 320.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 43,
+        "x": 260.0,
+        "y": 330.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 44,
+        "x": 280.0,
+        "y": 340.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 45,
+        "x": 300.0,
+        "y": 350.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 46,
+        "x": 320.0,
+        "y": 360.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 47,
+        "x": 340.0,
+        "y": 370.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 48,
+        "x": 360.0,
+        "y": 380.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 49,
+        "x": 380.0,
+        "y": 390.0,
+        "confidence": 0.8
+      }
+    ],
+    "rank": 3,
+    "reason": "rejected_lower_score_than_winner"
+  },
+  {
+    "start_frame": 40,
+    "end_frame": 47,
+    "point_count": 8,
+    "frame_span": 8,
+    "duration_sec": 0.32,
+    "total_movement": 156.52,
+    "average_movement_per_frame": 22.36,
+    "unique_center_count": 8,
+    "spatial_spread_px": 156.52,
+    "static_penalty": 0.0,
+    "edge_penalty": 0.0,
+    "smoothness_score": 1.0,
+    "confidence_score": 9.6,
+    "final_segment_score": 182.346,
+    "tracklet_points": [
+      {
+        "frame_index": 40,
+        "x": 200.0,
+        "y": 300.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 41,
+        "x": 220.0,
+        "y": 310.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 42,
+        "x": 240.0,
+        "y": 320.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 43,
+        "x": 260.0,
+        "y": 330.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 44,
+        "x": 280.0,
+        "y": 340.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 45,
+        "x": 300.0,
+        "y": 350.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 46,
+        "x": 320.0,
+        "y": 360.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 47,
+        "x": 340.0,
+        "y": 370.0,
+        "confidence": 0.8
+      }
+    ],
+    "rank": 4,
+    "reason": "rejected_lower_score_than_winner"
+  },
+  {
+    "start_frame": 41,
+    "end_frame": 48,
+    "point_count": 8,
+    "frame_span": 8,
+    "duration_sec": 0.32,
+    "total_movement": 156.52,
+    "average_movement_per_frame": 22.36,
+    "unique_center_count": 8,
+    "spatial_spread_px": 156.52,
+    "static_penalty": 0.0,
+    "edge_penalty": 0.0,
+    "smoothness_score": 1.0,
+    "confidence_score": 9.6,
+    "final_segment_score": 182.346,
+    "tracklet_points": [
+      {
+        "frame_index": 41,
+        "x": 220.0,
+        "y": 310.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 42,
+        "x": 240.0,
+        "y": 320.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 43,
+        "x": 260.0,
+        "y": 330.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 44,
+        "x": 280.0,
+        "y": 340.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 45,
+        "x": 300.0,
+        "y": 350.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 46,
+        "x": 320.0,
+        "y": 360.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 47,
+        "x": 340.0,
+        "y": 370.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 48,
+        "x": 360.0,
+        "y": 380.0,
+        "confidence": 0.8
+      }
+    ],
+    "rank": 5,
+    "reason": "rejected_lower_score_than_winner"
+  }
+]

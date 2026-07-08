@@ -1,0 +1,5 @@
+frame_index,timestamp_sec,class_name,confidence,bbox_x1,bbox_y1,bbox_x2,bbox_y2,center_x,center_y,frame_width,frame_height,candidate_id,candidate_selected,candidate_rejected,rejection_reason,tracking_quality_so_far
+0,0.0,ball,0.8,95,195,105,205,100,200,640,480,0-100-200,False,False,,Poor
+1,0.04,ball,0.8,100,200,110,210,105,205,640,480,1-105-205,False,False,,Poor
+2,0.08,person,,,,,,1,1,,,,,,,
+2,0.08,ball,0.8,105,205,115,215,110,210,640,480,2-110-210,False,False,,Poor

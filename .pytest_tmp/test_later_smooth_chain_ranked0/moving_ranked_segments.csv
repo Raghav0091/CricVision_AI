@@ -1,0 +1,6 @@
+rank,start_frame,end_frame,point_count,frame_span,duration_sec,total_movement,average_movement_per_frame,static_penalty,edge_penalty,smoothness_score,confidence_score,final_segment_score,reason
+1,40,49,10,10,0.4,201.25,22.36,0.0,0.0,1.0,9.6,225.936,selected_winner;meaningful_movement
+2,40,48,9,9,0.36,178.89,22.36,0.0,0.0,1.0,9.6,204.141,rejected_lower_score_than_winner
+3,41,49,9,9,0.36,178.89,22.36,0.0,0.0,1.0,9.6,204.141,rejected_lower_score_than_winner
+4,40,47,8,8,0.32,156.52,22.36,0.0,0.0,1.0,9.6,182.346,rejected_lower_score_than_winner
+5,41,48,8,8,0.32,156.52,22.36,0.0,0.0,1.0,9.6,182.346,rejected_lower_score_than_winner

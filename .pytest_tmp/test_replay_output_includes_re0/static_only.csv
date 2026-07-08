@@ -1,0 +1,15 @@
+frame_index,timestamp_sec,class_name,confidence,bbox_x1,bbox_y1,bbox_x2,bbox_y2,center_x,center_y,frame_width,frame_height,candidate_id,candidate_selected,candidate_rejected,rejection_reason,tracking_quality_so_far
+116,4.64,ball,0.8,343,468,353,478,348,473,640,480,116-348-473,False,False,,Poor
+117,4.68,ball,0.8,343,468,353,478,348,473,640,480,117-348-473,False,False,,Poor
+118,4.72,ball,0.8,343,468,353,478,348,473,640,480,118-348-473,False,False,,Poor
+119,4.76,ball,0.8,343,468,353,478,348,473,640,480,119-348-473,False,False,,Poor
+120,4.8,ball,0.8,343,468,353,478,348,473,640,480,120-348-473,False,False,,Poor
+121,4.84,ball,0.8,343,468,353,478,348,473,640,480,121-348-473,False,False,,Poor
+122,4.88,ball,0.8,343,468,353,478,348,473,640,480,122-348-473,False,False,,Poor
+123,4.92,ball,0.8,343,468,353,478,348,473,640,480,123-348-473,False,False,,Poor
+124,4.96,ball,0.8,343,468,353,478,348,473,640,480,124-348-473,False,False,,Poor
+125,5.0,ball,0.8,343,468,353,478,348,473,640,480,125-348-473,False,False,,Poor
+126,5.04,ball,0.8,343,468,353,478,348,473,640,480,126-348-473,False,False,,Poor
+127,5.08,ball,0.8,343,468,353,478,348,473,640,480,127-348-473,False,False,,Poor
+128,5.12,ball,0.8,343,468,353,478,348,473,640,480,128-348-473,False,False,,Poor
+129,5.16,ball,0.8,343,468,353,478,348,473,640,480,129-348-473,False,False,,Poor

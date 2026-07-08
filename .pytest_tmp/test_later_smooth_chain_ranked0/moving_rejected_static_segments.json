@@ -1,0 +1,39 @@
+[
+  {
+    "start_frame": 10,
+    "end_frame": 12,
+    "point_count": 3,
+    "frame_span": 3,
+    "duration_sec": 0.12,
+    "total_movement": 3.61,
+    "average_movement_per_frame": 1.83,
+    "unique_center_count": 1,
+    "spatial_spread_px": 3.61,
+    "static_penalty": 65.0,
+    "edge_penalty": 0.0,
+    "smoothness_score": 0.0,
+    "confidence_score": 9.6,
+    "final_segment_score": -17.306,
+    "tracklet_points": [
+      {
+        "frame_index": 10,
+        "x": 200.0,
+        "y": 200.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 11,
+        "x": 202.0,
+        "y": 201.0,
+        "confidence": 0.8
+      },
+      {
+        "frame_index": 12,
+        "x": 203.0,
+        "y": 202.0,
+        "confidence": 0.8
+      }
+    ],
+    "rejection_reason": "insufficient_total_movement"
+  }
+]
