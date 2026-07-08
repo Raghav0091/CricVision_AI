@@ -85,9 +85,68 @@ def draw_clean_stump_markers(frame, stump_detections):
 
 
 def draw_trajectory_lines(frame, trajectory_points, *, color=(0, 255, 255), thickness=3):
+    """Draw contiguous polyline segments (no validation). Prefer draw_safe_trajectory_lines."""
     points = [point for point in (trajectory_points or []) if point is not None]
     for index in range(1, len(points)):
         cv2.line(frame, points[index - 1], points[index], color, thickness)
+
+
+def draw_safe_trajectory_lines(
+    frame,
+    trajectory_points,
+    *,
+    frame_size=None,
+    pitch_roi=None,
+    stump_context=None,
+    impact_info=None,
+    color=(0, 255, 255),
+    projected_color=(0, 165, 255),
+    thickness=3,
+    show_uncertain_label=True,
+    prepared=None,
+):
+    """Validate cricket path, then draw only safe pre-contact (+ optional projection) segments.
+
+    Ball markers / analysis results are unchanged — this protects drawing only.
+    """
+    from Backends.src.cricket_path_validity import prepare_safe_trajectory_for_draw
+
+    if prepared is None:
+        if frame_size is None and frame is not None and hasattr(frame, "shape"):
+            height, width = frame.shape[:2]
+            frame_size = {"width": int(width), "height": int(height)}
+        prepared = prepare_safe_trajectory_for_draw(
+            trajectory_points,
+            frame_size=frame_size,
+            pitch_roi=pitch_roi,
+            stump_context=stump_context,
+            impact_info=impact_info,
+        )
+
+    if prepared.get("draw_allowed"):
+        for segment in prepared.get("draw_segments") or []:
+            draw_trajectory_lines(frame, segment, color=color, thickness=thickness)
+        for segment in prepared.get("projected_draw_segments") or []:
+            # Orange dashed-style projection vs cyan observed pre-contact path.
+            draw_trajectory_lines(
+                frame,
+                segment,
+                color=projected_color,
+                thickness=max(2, thickness - 1),
+            )
+        if prepared.get("projection_used"):
+            draw_label(frame, "Projected continuation (no bat contact)", 12, 28, (0, 120, 200))
+        elif prepared.get("impact_frame") is not None:
+            draw_label(frame, "Pre-contact delivery path", 12, 28, (0, 160, 160))
+    elif show_uncertain_label and frame is not None:
+        # Only label when there were enough raw points but validity failed.
+        raw_count = len([p for p in (trajectory_points or []) if p is not None])
+        quality = (prepared.get("quality") or "").lower()
+        if raw_count >= 5 and quality in {"poor", "unavailable"}:
+            # ponytail: small corner label is enough when path fails validity.
+            draw_label(frame, "Trajectory uncertain", 12, 28, (40, 40, 180))
+
+    return prepared
 
 
 def ensure_frame_writer_size(frame, width, height):

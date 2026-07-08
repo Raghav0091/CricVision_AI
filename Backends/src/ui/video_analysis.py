@@ -57,6 +57,11 @@ from Backends.src.video_pipeline.performance_timer import (
     finish_performance_profile,
 )
 from Backends.src.video_pipeline.report_pipeline import timed_video_reports
+from Backends.src.cricket_delivery_observer import (
+    extract_ball_candidates_from_frame_detections,
+    fit_observer_path,
+    select_best_cricket_path,
+)
 from Backends.src.video_pipeline.video_reader import (
     extract_first_video_frame as read_first_video_frame,
 )
@@ -93,6 +98,7 @@ _draw_ball_detections = shared_annotations.draw_ball_detections
 draw_clean_ball_markers = shared_annotations.draw_clean_ball_markers
 draw_clean_stump_markers = shared_annotations.draw_clean_stump_markers
 draw_trajectory_lines = shared_annotations.draw_trajectory_lines
+draw_safe_trajectory_lines = shared_annotations.draw_safe_trajectory_lines
 ensure_frame_writer_size = shared_annotations.ensure_frame_writer_size
 extract_first_video_frame = read_first_video_frame
 
@@ -329,11 +335,10 @@ def process_batting_video(
             draw_clean_ball_markers(annotated_frame, ball_detections)
 
         if debug_overlay:
-            for index in range(1, len(trajectory[-35:])):
-                recent = trajectory[-35:]
-                draw_trajectory_lines(annotated_frame, recent)
+            recent = trajectory[-35:]
+            draw_safe_trajectory_lines(annotated_frame, recent)
         elif len(trajectory) >= 2:
-            draw_trajectory_lines(annotated_frame, trajectory[-2:])
+            draw_safe_trajectory_lines(annotated_frame, trajectory[-2:])
 
         if writer is not None:
             annotation_started = time.perf_counter()
@@ -1128,7 +1133,8 @@ def process_video(
 
                 trajectory_points = list(reversed(display_trajectory_points))[-max_trajectory_points:]
 
-        draw_trajectory_lines(annotated_frame, trajectory_points)
+        # ponytail: protect yellow path drawing only; tracker/report results stay unchanged.
+        draw_safe_trajectory_lines(annotated_frame, trajectory_points)
 
         if debug_overlay and estimated_bounce_point is not None:
             bx, by = estimated_bounce_point
@@ -1497,15 +1503,645 @@ def process_video(
     }
 
 
+def _coerce_trajectory_point(value):
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        if "x" in value and "y" in value:
+            try:
+                return int(value["x"]), int(value["y"])
+            except (TypeError, ValueError):
+                return None
+        return _coerce_trajectory_point(value.get("center"))
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        try:
+            return int(value[0]), int(value[1])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def extract_trajectory_points_from_result(result):
+    """Defensively pull image-space trajectory points from an analysis result.
+
+    Prefers points that retain frame_index so pre-impact truncation can work.
+    """
+    result = result or {}
+    from Backends.src.analysis.frame_detection_utils import (
+        best_detection_center,
+        normalize_frame_detections,
+    )
+
+    frames = normalize_frame_detections(
+        result.get("frame_detections") or result.get("impact_frame_detections")
+    )
+    framed_points = []
+    for frame in frames:
+        center = best_detection_center(frame.get("ball_detections"))
+        coerced = _coerce_trajectory_point(center)
+        if coerced is None:
+            continue
+        framed_points.append(
+            {
+                "x": coerced[0],
+                "y": coerced[1],
+                "frame_index": frame.get("frame_index"),
+                "source": "observed",
+            }
+        )
+    if len(framed_points) >= 3:
+        return framed_points
+
+    for key in ("trajectory_points", "smoothed_trajectory", "display_trajectory_points"):
+        raw = result.get(key)
+        if not isinstance(raw, (list, tuple)):
+            continue
+        points = []
+        for item in raw:
+            if isinstance(item, dict) and ("x" in item or "center" in item):
+                point = _coerce_trajectory_point(item)
+                if point is None:
+                    continue
+                payload = {"x": point[0], "y": point[1], "source": "observed"}
+                if item.get("frame_index") is not None:
+                    payload["frame_index"] = item.get("frame_index")
+                points.append(payload)
+            else:
+                point = _coerce_trajectory_point(item)
+                if point is not None:
+                    points.append({"x": point[0], "y": point[1], "source": "observed"})
+        if len(points) >= 3:
+            return points
+
+    ball_positions = result.get("ball_positions")
+    if isinstance(ball_positions, (list, tuple)) and ball_positions:
+        smoothed_positions = smooth_trajectory(ball_positions)
+        display_trajectory_points = []
+        for point in reversed(smoothed_positions):
+            if point is None:
+                if display_trajectory_points:
+                    break
+                continue
+            coerced = _coerce_trajectory_point(point)
+            if coerced is not None:
+                display_trajectory_points.append(coerced)
+        points = list(reversed(display_trajectory_points))[-35:]
+        if len(points) >= 3:
+            return [{"x": x, "y": y, "source": "observed"} for x, y in points]
+
+    return framed_points
+
+
+def extract_bounce_point_from_result(result):
+    result = result or {}
+    for key in ("estimated_bounce_point", "bounce_point"):
+        point = _coerce_trajectory_point(result.get(key))
+        if point is not None:
+            return point
+    return None
+
+
+def render_trajectory_replay_section(result, path_validity=None):
+    try:
+        from Backends.src.detection_health import build_detection_health
+        from Backends.src.trajectory_replay import build_trajectory_replay_image
+    except ImportError as exc:
+        st.warning(f"Trajectory replay unavailable: {exc}")
+        return
+
+    if path_validity is None:
+        path_validity = prepare_result_path_validity(result)
+    trajectory_points = list(path_validity.get("valid_xy") or [])
+    if len(trajectory_points) < 3:
+        trajectory_points = _observer_points_to_xy(extract_trajectory_points_from_result(result))
+    if len(trajectory_points) < 3:
+        st.subheader("CricVision Trajectory Replay")
+        st.info("Trajectory replay unavailable: not enough tracked ball points.")
+        return
+
+    settings = st.session_state.get("video_analysis_settings", {})
+    preset_name = settings.get("preset_name") or result.get("active_preset") or "Balanced Mode"
+    preset = DETECTION_PRESETS.get(preset_name, {})
+    health = build_detection_health(
+        result,
+        model_name=settings.get("selected_model_name") or result.get("active_model"),
+        detection_preset=preset_name,
+        speed_mode=settings.get("speed_mode") or result.get("speed_mode"),
+        confidence_threshold=preset.get("confidence"),
+        imgsz=preset.get("imgsz"),
+    )
+
+    replay_image = build_trajectory_replay_image(
+        trajectory_points,
+        bounce_point=extract_bounce_point_from_result(result),
+        health=health,
+    )
+    if replay_image is None:
+        st.subheader("CricVision Trajectory Replay")
+        st.info("Trajectory replay unavailable: not enough tracked ball points.")
+        return
+
+    st.subheader("CricVision Trajectory Replay")
+    labels = path_validity.get("labels") or []
+    if labels:
+        st.caption(" · ".join(labels))
+    st.image(
+        cv2.cvtColor(replay_image, cv2.COLOR_BGR2RGB),
+        caption=(
+            "Approximate trajectory replay from tracked image-space ball points. "
+            "Pitch geometry and speed/swing/spin are not calibrated in v1."
+        ),
+        use_container_width=True,
+    )
+
+
+def extract_frame_size_from_result(result):
+    """Defensively read frame dimensions from an analysis result."""
+    result = result or {}
+    calibration = result.get("calibration_context") or {}
+    width = calibration.get("frame_width")
+    height = calibration.get("frame_height")
+    if width and height:
+        return int(width), int(height)
+    for key in ("frame_width", "width"):
+        if result.get(key):
+            width = result.get(key)
+            break
+    for key in ("frame_height", "height"):
+        if result.get(key):
+            height = result.get(key)
+            break
+    if width and height:
+        try:
+            return int(width), int(height)
+        except (TypeError, ValueError):
+            pass
+    return 1280, 720
+
+
+def extract_stump_detections_from_result(result):
+    """Collect stump detections already produced by analysis."""
+    result = result or {}
+    from Backends.src.analysis.frame_detection_utils import normalize_frame_detections
+
+    collected = []
+    frames = normalize_frame_detections(
+        result.get("frame_detections") or result.get("impact_frame_detections")
+    )
+    for frame in frames:
+        collected.extend(frame.get("stump_detections") or [])
+
+    calibration = result.get("calibration_context") or {}
+    stumps = calibration.get("stumps") or {}
+    batter_end = stumps.get("batter_end")
+    if isinstance(batter_end, dict) and batter_end.get("center"):
+        collected.append(batter_end)
+    return collected
+
+
+def extract_pitch_roi_from_result(result):
+    """Read pitch corridor / ROI geometry from analysis outputs."""
+    result = result or {}
+    calibration = result.get("calibration_context") or {}
+    corridor = calibration.get("pitch_corridor")
+    if isinstance(corridor, dict) and (corridor.get("bbox") or corridor.get("polygon")):
+        return corridor
+    if result.get("last_roi_size"):
+        try:
+            x1, y1, x2, y2 = result["last_roi_size"]
+            return {"bbox": [x1, y1, x2, y2], "source": "analysis_roi"}
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def prepare_result_path_validity(result, trajectory_points=None):
+    """Compute cricket-path validity once for UI drawing / 3D / metrics."""
+    from Backends.src.cricket_path_validity import prepare_safe_trajectory_for_draw
+
+    result = result or {}
+    points = trajectory_points
+    if points is None:
+        points = extract_trajectory_points_from_result(result)
+    frame_width, frame_height = extract_frame_size_from_result(result)
+    return prepare_safe_trajectory_for_draw(
+        points,
+        frame_size={"width": frame_width, "height": frame_height},
+        pitch_roi=extract_pitch_roi_from_result(result),
+        stump_context=result.get("calibration_context") or {},
+        impact_info=result.get("impact_info"),
+    )
+
+
+def render_trajectory_validity_section(result, prepared=None):
+    """Show path-validity metrics after Detection Health."""
+    if prepared is None:
+        prepared = prepare_result_path_validity(result)
+
+    validity = prepared.get("validity") or {}
+    summary = prepared.get("ui_summary") or {}
+    st.subheader("Trajectory Validity")
+    metric_cols = st.columns(5)
+    metric_cols[0].metric("Path Validity", summary.get("path_validity") or validity.get("quality") or "Unavailable")
+    metric_cols[1].metric("Valid Points", summary.get("valid_points", 0))
+    metric_cols[2].metric("Rejected Points", summary.get("rejected_points", 0))
+    metric_cols[3].metric("Draw Allowed", "Yes" if summary.get("draw_allowed") else "No")
+    metric_cols[4].metric(
+        "Main Reason",
+        summary.get("main_rejection_reason") or validity.get("main_rejection_reason") or "None",
+    )
+    labels = summary.get("labels") or prepared.get("labels") or []
+    if labels:
+        st.caption(" · ".join(labels))
+    path_mode = summary.get("path_mode") or "full_path"
+    if path_mode == "pre_contact_plus_projection":
+        st.caption(
+            f"Impact frame {summary.get('impact_frame')}: drawing pre-contact path plus "
+            f"{summary.get('projected_points', 0)} projected no-contact points."
+        )
+    elif path_mode == "pre_contact":
+        st.caption(
+            f"Impact frame {summary.get('impact_frame')}: post-impact detections excluded from path."
+        )
+    reasons = summary.get("reason_summary") or validity.get("reason_summary") or {}
+    if reasons:
+        st.caption("Main reasons: " + ", ".join(f"{key}={count}" for key, count in reasons.items()))
+    with st.expander("Trajectory Validity Details", expanded=False):
+        st.json(
+            {
+                "validity": validity,
+                "ui_summary": summary,
+                "projection_used": prepared.get("projection_used"),
+                "projected_points": prepared.get("projected_points") or [],
+                "impact_frame": prepared.get("impact_frame"),
+            }
+        )
+    return prepared
+
+
+def extract_impact_point_from_result(result):
+    """Pull image-space impact coordinates when available."""
+    result = result or {}
+    impact = result.get("impact_info") or {}
+    point = _coerce_trajectory_point(impact.get("ball_center"))
+    if point is not None:
+        return point
+    return None
+
+
+def _observer_points_to_xy(points):
+    extracted = []
+    for item in points or []:
+        if isinstance(item, dict):
+            point = _coerce_trajectory_point(item)
+            if point is not None:
+                extracted.append(point)
+        else:
+            point = _coerce_trajectory_point(item)
+            if point is not None:
+                extracted.append(point)
+    return extracted
+
+
+def _simple_path_score(points):
+    points = _observer_points_to_xy(points)
+    if len(points) < 5:
+        return 0.0
+    penalties = 0.0
+    for idx in range(1, len(points)):
+        dx = points[idx][0] - points[idx - 1][0]
+        dy = points[idx][1] - points[idx - 1][1]
+        if dy < -1:
+            penalties += 0.25
+        if abs(dx) > abs(dy) * 1.6 and abs(dx) > 4:
+            penalties += 0.2
+    normalized_penalty = min(1.0, penalties / max(1, len(points) - 1))
+    return max(0.0, 1.0 - normalized_penalty)
+
+
+def build_delivery_observer_payload(result):
+    result = result or {}
+    frame_detections = (
+        result.get("raw_frame_detections")
+        or result.get("frame_detections")
+        or result.get("impact_frame_detections")
+        or []
+    )
+    raw_candidates = extract_ball_candidates_from_frame_detections(frame_detections)
+    frame_width, frame_height = extract_frame_size_from_result(result)
+    selected = select_best_cricket_path(
+        raw_candidates,
+        frame_size={"width": frame_width, "height": frame_height},
+        pitch_roi=extract_pitch_roi_from_result(result),
+        stump_context=result.get("calibration_context") or {},
+    )
+    fitted = fit_observer_path(
+        selected.get("observer_path"),
+        frame_size={"width": frame_width, "height": frame_height},
+    )
+    tracker_points = extract_trajectory_points_from_result(result)
+    tracker_score = _simple_path_score(tracker_points)
+    observer_score = float(selected.get("path_score") or 0.0)
+    comparison = "same"
+    if observer_score > tracker_score + 0.05:
+        comparison = "better"
+    elif observer_score + 0.05 < tracker_score:
+        comparison = "worse"
+    return {
+        "raw_candidates": raw_candidates,
+        "selection": selected,
+        "fit": fitted,
+        "tracker_points": tracker_points,
+        "tracker_score": round(float(tracker_score), 4),
+        "observer_score": round(float(observer_score), 4),
+        "comparison": comparison,
+    }
+
+
+def render_cricket_delivery_observer_section(result):
+    payload = build_delivery_observer_payload(result)
+    selection = payload["selection"]
+    fit = payload["fit"]
+    observer_path = selection.get("observer_path") or []
+    fitted_path = fit.get("fitted_path") or []
+    rejected = selection.get("rejected_candidates") or []
+    reason_summary = selection.get("reason_summary") or {}
+
+    st.subheader("Cricket Delivery Observer")
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("Raw candidates considered", len(payload["raw_candidates"]))
+    metric_cols[1].metric("Observer path points", len(observer_path))
+    metric_cols[2].metric("Rejected candidates", len(rejected))
+    metric_cols[3].metric("Current tracker selected points", len(payload["tracker_points"]))
+
+    quality_cols = st.columns(3)
+    quality_cols[0].metric("Observer path quality", selection.get("path_quality", "Unavailable"))
+    quality_cols[1].metric("Fit quality", fit.get("fit_quality", "Unavailable"))
+    quality_cols[2].metric("Observer vs tracker", payload["comparison"])
+
+    st.caption(
+        f"Observer score: {payload['observer_score']:.3f} | "
+        f"Tracker score: {payload['tracker_score']:.3f}"
+    )
+    st.write("Reason summary:", reason_summary if reason_summary else {"none": 0})
+
+    with st.expander("Observer Details", expanded=False):
+        rejection_counts = {}
+        for item in rejected:
+            reason = item.get("reason", "unknown")
+            rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+        st.json(
+            {
+                "raw_candidates_count": len(payload["raw_candidates"]),
+                "observer_path_count": len(observer_path),
+                "fitted_path_count": len(fitted_path),
+                "rejected_candidates_count": len(rejected),
+                "rejection_counts_by_reason": rejection_counts,
+                "path_quality": selection.get("path_quality"),
+                "fit_quality": fit.get("fit_quality"),
+                "comparison": payload["comparison"],
+                "observer_score": payload["observer_score"],
+                "tracker_score": payload["tracker_score"],
+                "reason_summary": reason_summary,
+                "notes": {
+                    "selection_notes": selection.get("notes") or [],
+                    "fit_notes": fit.get("notes") or [],
+                },
+                "observer_path": observer_path,
+                "fitted_path": fitted_path,
+            }
+        )
+    return payload
+
+
+def render_3d_replay_section(result, observer_payload=None, path_validity=None):
+    try:
+        from Backends.src.replay3d.replay_renderer import build_3d_replay_figure
+        from Backends.src.replay3d.stump_calibration import build_stump_calibration_context
+        from Backends.src.replay3d.trajectory_3d import build_estimated_3d_trajectory
+    except ImportError as exc:
+        st.warning(f"3D trajectory replay unavailable: {exc}")
+        return
+
+    st.subheader("CricVision 3D Trajectory Replay")
+
+    tracker_points = extract_trajectory_points_from_result(result)
+    if path_validity is None:
+        path_validity = prepare_result_path_validity(result, trajectory_points=tracker_points)
+
+    validity = path_validity.get("validity") or {}
+    path_quality = validity.get("quality") or path_validity.get("quality") or "Unavailable"
+    rejected_count = path_validity.get("rejected_count", len(validity.get("rejected_points") or []))
+    main_reason = path_validity.get("main_rejection_reason") or validity.get("main_rejection_reason")
+
+    validity_cols = st.columns(3)
+    validity_cols[0].metric("Path Validity", path_quality)
+    validity_cols[1].metric("Rejected Points", rejected_count)
+    validity_cols[2].metric("Main Rejection Reason", main_reason or "None")
+
+    if path_quality in {"Unavailable", "Poor"}:
+        st.info(
+            "3D replay unavailable: trajectory failed cricket-validity checks"
+        )
+        with st.expander("Path validity notes", expanded=False):
+            st.write("\n".join(validity.get("notes") or []))
+            st.json(validity)
+        return
+
+    # Prefer validated tracker points; optional observer path still filtered through validity.
+    trajectory_points = list(path_validity.get("valid_xy") or [])
+    source_text = "Validated tracker path"
+    if observer_payload:
+        selection = observer_payload.get("selection") or {}
+        fit = observer_payload.get("fit") or {}
+        fitted_points = _observer_points_to_xy(fit.get("fitted_path"))
+        if (
+            selection.get("path_quality") in {"Good", "Partial"}
+            and len(fitted_points) >= 5
+            and float(selection.get("path_score") or 0.0)
+            > float(observer_payload.get("tracker_score") or 0.0) + 0.05
+        ):
+            observer_prepared = prepare_result_path_validity(result, trajectory_points=fitted_points)
+            observer_quality = observer_prepared.get("quality") or "Unavailable"
+            if observer_quality in {"Good", "Partial"} and observer_prepared.get("valid_xy"):
+                trajectory_points = list(observer_prepared.get("valid_xy") or [])
+                source_text = "Validated observer fitted path"
+                path_validity = observer_prepared
+                validity = observer_prepared.get("validity") or validity
+                path_quality = observer_quality
+
+    st.caption(f"3D Replay path source: {source_text}")
+    labels = path_validity.get("labels") or []
+    if labels:
+        st.caption(" · ".join(labels))
+    if path_validity.get("projection_used"):
+        st.caption(
+            "Projected continuation (no bat contact) appended after impact; "
+            "post-impact real detections are excluded."
+        )
+    if path_quality == "Partial":
+        st.caption("Partial / estimated — using cricket-validity filtered points only.")
+
+    if len(trajectory_points) < 5:
+        st.info(
+            "3D replay unavailable: trajectory failed cricket-validity checks"
+        )
+        return
+
+    default_view = (result or {}).get("camera_view") or "unknown"
+    view_options = ["unknown", "umpire_end", "batter_view", "bowler_end", "side_view"]
+    if default_view not in view_options:
+        view_options.insert(0, default_view)
+
+    control_cols = st.columns(2)
+    with control_cols[0]:
+        camera_view = st.selectbox(
+            "Camera view (3D replay)",
+            options=view_options,
+            index=view_options.index(default_view) if default_view in view_options else 0,
+            key="replay3d_camera_view",
+        )
+    with control_cols[1]:
+        camera_height_ft = st.number_input(
+            "Estimated camera height (ft)",
+            min_value=4.0,
+            max_value=30.0,
+            value=8.0,
+            step=0.5,
+            key="replay3d_camera_height_ft",
+        )
+
+    try:
+        frame_width, frame_height = extract_frame_size_from_result(result)
+        calibration_context = build_stump_calibration_context(
+            frame_size={"width": frame_width, "height": frame_height},
+            stump_detections=extract_stump_detections_from_result(result),
+            pitch_roi=extract_pitch_roi_from_result(result),
+            camera_height_ft=camera_height_ft,
+            camera_view=camera_view,
+        )
+        trajectory_3d = build_estimated_3d_trajectory(
+            trajectory_points,
+            calibration_context,
+            bounce_point=extract_bounce_point_from_result(result),
+            impact_point=extract_impact_point_from_result(result),
+        )
+        render_payload = build_3d_replay_figure(trajectory_3d, calibration_context)
+    except Exception as exc:
+        st.warning(f"3D trajectory replay failed: {exc}")
+        return
+
+    if not trajectory_3d.get("available") or not render_payload.get("available"):
+        st.info(
+            "Estimated 3D replay unavailable for this clip. "
+            "Try a longer tracked delivery or clearer stump/pitch context."
+        )
+        with st.expander("3D replay notes", expanded=False):
+            st.write("\n".join(trajectory_3d.get("notes") or []))
+        return
+
+    metrics = trajectory_3d.get("metrics") or {}
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("Speed", metrics.get("speed_kmh", "Not calibrated"))
+    metric_cols[1].metric("Swing", metrics.get("swing", "Unknown"))
+    metric_cols[2].metric("Spin", metrics.get("spin", "Unknown"))
+    metric_cols[3].metric("LBW", metrics.get("lbw", "Not available"))
+
+    caption = render_payload.get("caption") or (
+        "Estimated 3D Replay — based on tracked video points and stump/pitch calibration."
+    )
+    if path_quality == "Partial":
+        caption = f"Partial / estimated — {caption}"
+    if render_payload.get("backend") == "plotly" and render_payload.get("figure") is not None:
+        st.plotly_chart(render_payload["figure"], use_container_width=True)
+    elif render_payload.get("image") is not None:
+        st.image(
+            cv2.cvtColor(render_payload["image"], cv2.COLOR_BGR2RGB),
+            caption=caption,
+            use_container_width=True,
+        )
+    else:
+        st.info("Estimated 3D replay unavailable: renderer returned no output.")
+        return
+
+    st.caption(caption)
+    st.caption(
+        f"Trajectory quality: {trajectory_3d.get('trajectory_quality', 'Unknown')} | "
+        f"Path validity: {path_quality} | "
+        f"Calibration: {calibration_context.get('calibration_quality', 'Unknown')}"
+    )
+    with st.expander("3D replay notes", expanded=False):
+        st.write("\n".join(trajectory_3d.get("notes") or []))
+
+
+def _format_health_rate(value):
+    if value is None:
+        return "Unknown"
+    try:
+        rate = float(value)
+    except (TypeError, ValueError):
+        return "Unknown"
+    if rate <= 1.0:
+        rate *= 100.0
+    return f"{rate:.1f}%"
+
+
+def render_detection_health_section(result):
+    try:
+        from Backends.src.config.constants import DETECTION_PRESETS
+        from Backends.src.detection_health import build_detection_health
+    except ImportError as exc:
+        st.warning(f"Detection health unavailable: {exc}")
+        return
+
+    settings = st.session_state.get("video_analysis_settings", {})
+    preset_name = settings.get("preset_name") or result.get("active_preset") or "Balanced Mode"
+    preset = DETECTION_PRESETS.get(preset_name, {})
+
+    health = build_detection_health(
+        result,
+        model_name=settings.get("selected_model_name") or result.get("active_model"),
+        detection_preset=preset_name,
+        speed_mode=settings.get("speed_mode") or result.get("speed_mode"),
+        confidence_threshold=preset.get("confidence"),
+        imgsz=preset.get("imgsz"),
+    )
+
+    st.subheader("Detection Health")
+    metric_cols = st.columns(6)
+    metric_cols[0].metric("Ball Detection Rate", _format_health_rate(health.get("ball_detection_rate")))
+    metric_cols[1].metric("Ball Tracking Rate", _format_health_rate(health.get("ball_tracking_rate")))
+    metric_cols[2].metric("Raw Ball Detections", health.get("raw_ball_detections", 0))
+    metric_cols[3].metric("Selected Ball Points", health.get("selected_ball_points", 0))
+    metric_cols[4].metric(
+        "Overall Tracking Quality",
+        health.get("overall_tracking_quality") or "Unknown",
+    )
+    metric_cols[5].metric("Failure Type", health.get("failure_type") or "unknown")
+
+    with st.expander("Detection Health Details", expanded=False):
+        st.json(health)
+
+
 def show_batting_analysis_results(result):
     from Backends.src.ui.components import render_video_analysis_results_layout
 
+    render_detection_health_section(result)
+    path_validity = render_trajectory_validity_section(result)
+    render_trajectory_replay_section(result, path_validity=path_validity)
+    observer_payload = render_cricket_delivery_observer_section(result)
+    render_3d_replay_section(result, observer_payload=observer_payload, path_validity=path_validity)
     render_video_analysis_results_layout(result, context_label="Video Analysis")
 
 
 def show_video_analysis_results(result, selected_model_name, preset_name, show_pitch_roi):
     from Backends.src.ui.components import render_video_analysis_results_layout
 
+    render_detection_health_section(result)
+    path_validity = render_trajectory_validity_section(result)
+    render_trajectory_replay_section(result, path_validity=path_validity)
+    observer_payload = render_cricket_delivery_observer_section(result)
+    render_3d_replay_section(result, observer_payload=observer_payload, path_validity=path_validity)
     render_video_analysis_results_layout(
         result,
         context_label="Video Analysis",
@@ -1650,6 +2286,17 @@ def show_video_analysis_page():
         key="video_analysis_overlay_detail",
         help="Clean keeps ball trail and key markers only. Debug shows ROI, bounce, and labels.",
     )
+
+    with st.expander("Raw Detection Preview", expanded=False):
+        st.caption(
+            "YOLO-only sampled frames before Kalman, interpolation, or Visual Observer repair. "
+            "This does not change Analyze Delivery results or processed video output."
+        )
+        run_raw_preview_clicked = st.button(
+            "Run Raw Detection Preview",
+            key="video_analysis_run_raw_preview",
+            disabled=uploaded_video is None,
+        )
 
     with st.expander("Advanced Settings", expanded=False):
         analysis_mode = st.selectbox(
@@ -1812,6 +2459,67 @@ def show_video_analysis_page():
         selected_bat_model_key = "cricshot_bat" if analysis_mode == "Full Delivery Analysis" else None
 
     manual_pitch_points = None
+
+    if run_raw_preview_clicked and uploaded_video is not None:
+        uploaded_video.seek(0)
+        preview_bytes = uploaded_video.read()
+        if not preview_bytes:
+            st.error("The uploaded video is empty. Choose a non-empty cricket clip.")
+        else:
+            upload_suffix = Path(uploaded_video.name or "").suffix.lower()
+            if upload_suffix not in {".mp4", ".mov", ".avi", ".mkv"}:
+                upload_suffix = ".mp4"
+            try:
+                from Backends.src.detection_health import run_raw_detection_preview
+            except ImportError as exc:
+                st.warning(f"Raw detection preview unavailable: {exc}")
+            else:
+                with TemporaryDirectory(prefix="cricvision_raw_preview_") as preview_temp_dir:
+                    preview_video_path = Path(preview_temp_dir) / f"preview_upload{upload_suffix}"
+                    preview_video_path.write_bytes(preview_bytes)
+                    with st.spinner("Running raw detection preview..."):
+                        preview_result = run_raw_detection_preview(
+                            preview_video_path,
+                            model_key=selected_model_key,
+                            model_path=selected_model_path,
+                            use_ensemble=use_ensemble,
+                            confidence=confidence,
+                            imgsz=image_size,
+                            speed_mode=speed_mode,
+                            detection_preset=preset_name,
+                        )
+
+                if not preview_result.get("success"):
+                    st.error(preview_result.get("error", "Raw detection preview failed."))
+                else:
+                    preview_cols = st.columns(4)
+                    preview_cols[0].metric("Sampled Frames", preview_result.get("sampled_frames", 0))
+                    preview_cols[1].metric("Frames With Ball", preview_result.get("frames_with_ball", 0))
+                    preview_cols[2].metric(
+                        "Raw Ball Detections",
+                        preview_result.get("raw_ball_detections", 0),
+                    )
+                    avg_conf = preview_result.get("average_confidence")
+                    preview_cols[3].metric(
+                        "Average Confidence",
+                        f"{avg_conf:.2f}" if avg_conf is not None else "Unknown",
+                    )
+                    st.caption(
+                        f"Model: {preview_result.get('model_path', 'Unknown')} | "
+                        f"Preset: {preview_result.get('detection_preset', 'Unknown')} | "
+                        f"Confidence: {preview_result.get('confidence_threshold', 'Unknown')} | "
+                        f"imgsz: {preview_result.get('imgsz', 'Unknown')}"
+                    )
+                    for frame_item in preview_result.get("frames", []):
+                        image_bgr = frame_item.get("image_bgr")
+                        if image_bgr is None:
+                            continue
+                        st.image(
+                            cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB),
+                            caption=f"Frame {frame_item.get('frame_index', '?')} — raw YOLO ball detections",
+                            use_container_width=True,
+                        )
+
     if analyze_clicked and uploaded_video is not None:
         if calibration_mode.startswith("Manual"):
             first_frame = extract_first_video_frame(uploaded_video)
