@@ -21,19 +21,27 @@ __pycache__/
 
 # Large outputs
 outputs/
+outputs/debug/
+outputs/review_frames/
 data/session_results.json
 data/clips/
 runs/
+.tmp/
 Models/CricShot10k/
 Models/cricshot10k/
 Models/remote/
 Models/cricket_objects/*Copy*.pt
+benchmarks/clips/*.mp4
+benchmarks/clips/*.mov
+benchmarks/clips/*.avi
+benchmarks/clips/*.mkv
 *.keras
 *.zip
 *.mp4
 *.avi
 *.mov
 *.mkv
+*.pt
 
 # System files
 .DS_Store
