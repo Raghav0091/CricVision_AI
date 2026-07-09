@@ -416,3 +416,168 @@ def build_live_calibration_report(
         "calibration": calibration,
         "notes": notes,
     }
+
+
+def _unavailable_alignment_layout(notes: list[str]) -> dict[str, Any]:
+    return {
+        "available": False,
+        "striker_stumps_box": None,
+        "non_striker_stumps_box": None,
+        "notes": notes,
+    }
+
+
+def _unavailable_alignment_calibration(notes: list[str]) -> dict[str, Any]:
+    return {
+        "available": False,
+        "quality": "Unavailable",
+        "striker_stumps_box": None,
+        "non_striker_stumps_box": None,
+        "stump_line": None,
+        "pitch_corridor": [],
+        "notes": notes,
+    }
+
+
+def build_fulltrack_style_box_layout(frame_size: Any) -> dict[str, Any]:
+    """Fixed FullTrack-style alignment boxes — move camera to fit stumps, no manual coords."""
+    notes: list[str] = []
+    size = _parse_frame_size(frame_size)
+    if size is None:
+        notes.append("Invalid frame_size; FullTrack-style boxes unavailable.")
+        return _unavailable_alignment_layout(notes)
+
+    width, height = size
+    # ponytail: percentage layout works for vertical phone and landscape webcam.
+    # Striker = upper/middle (far); non-striker = lower/middle and larger (near).
+    striker = _normalize_box(
+        {
+            "x1": width * 0.40,
+            "y1": height * 0.18,
+            "x2": width * 0.60,
+            "y2": height * 0.36,
+        },
+        frame_size=size,
+    )
+    non_striker = _normalize_box(
+        {
+            "x1": width * 0.34,
+            "y1": height * 0.68,
+            "x2": width * 0.66,
+            "y2": height * 0.92,
+        },
+        frame_size=size,
+    )
+    if striker is None or non_striker is None:
+        notes.append("Could not build FullTrack-style boxes for this frame size.")
+        return _unavailable_alignment_layout(notes)
+
+    striker_ints = _box_as_ints(striker)
+    non_striker_ints = _box_as_ints(non_striker)
+    if striker_ints is None or non_striker_ints is None:
+        notes.append("Could not convert alignment boxes to integer pixels.")
+        return _unavailable_alignment_layout(notes)
+
+    notes.append("FullTrack-style fixed boxes: move camera/tripod until stumps fit.")
+    notes.append("Estimated single-camera geometry only — not official LBW/DRS.")
+    return {
+        "available": True,
+        "striker_stumps_box": striker_ints,
+        "non_striker_stumps_box": non_striker_ints,
+        "notes": notes,
+    }
+
+
+def build_calibration_from_alignment_boxes(
+    box_layout: Any,
+    frame_size: Any = None,
+) -> dict[str, Any]:
+    """Build stump line + corridor from striker / non-striker alignment boxes."""
+    notes: list[str] = [
+        "Estimated single-camera geometry only — not official LBW or DRS.",
+    ]
+    if not isinstance(box_layout, dict):
+        notes.append("Alignment box layout missing or invalid.")
+        return _unavailable_alignment_calibration(notes)
+
+    size = _parse_frame_size(frame_size)
+    if size is None and box_layout.get("frame_size") is not None:
+        size = _parse_frame_size(box_layout.get("frame_size"))
+
+    striker = _normalize_box(box_layout.get("striker_stumps_box"), frame_size=size)
+    non_striker = _normalize_box(box_layout.get("non_striker_stumps_box"), frame_size=size)
+    if striker is None or non_striker is None:
+        notes.append("Striker and non-striker stump boxes are required and must be valid.")
+        return _unavailable_alignment_calibration(notes)
+
+    # Map alignment names → near/far Video Analysis geometry, then re-key for live UX.
+    base = build_calibration_from_boxes(
+        {"near_stumps_box": non_striker, "far_stumps_box": striker},
+        frame_size=size,
+    )
+    notes.extend(list(base.get("notes") or []))
+
+    striker_ints = _box_as_ints(striker)
+    non_striker_ints = _box_as_ints(non_striker)
+    stump_line = base.get("stump_line")
+    # Explicit blue-line direction: non-striker centre → striker centre.
+    if striker_ints is not None and non_striker_ints is not None:
+        stump_line = {
+            "start": _box_center(
+                {
+                    "x1": float(non_striker_ints["x1"]),
+                    "y1": float(non_striker_ints["y1"]),
+                    "x2": float(non_striker_ints["x2"]),
+                    "y2": float(non_striker_ints["y2"]),
+                }
+            ),
+            "end": _box_center(
+                {
+                    "x1": float(striker_ints["x1"]),
+                    "y1": float(striker_ints["y1"]),
+                    "x2": float(striker_ints["x2"]),
+                    "y2": float(striker_ints["y2"]),
+                }
+            ),
+        }
+
+    if not base.get("available"):
+        return {
+            "available": False,
+            "quality": base.get("quality", "Unavailable"),
+            "striker_stumps_box": striker_ints,
+            "non_striker_stumps_box": non_striker_ints,
+            "stump_line": stump_line,
+            "pitch_corridor": list(base.get("pitch_corridor") or []),
+            "notes": notes,
+        }
+
+    return {
+        "available": True,
+        "quality": base.get("quality", "Basic"),
+        "striker_stumps_box": striker_ints,
+        "non_striker_stumps_box": non_striker_ints,
+        "stump_line": stump_line,
+        "pitch_corridor": list(base.get("pitch_corridor") or []),
+        "notes": notes,
+    }
+
+
+def build_live_alignment_report(
+    box_layout: Any,
+    frame_size: Any = None,
+) -> dict[str, Any]:
+    """Compact live alignment calibration status for Streamlit Live Session."""
+    calibration = build_calibration_from_alignment_boxes(box_layout, frame_size=frame_size)
+    notes = list(calibration.get("notes") or [])
+    available = bool(calibration.get("available"))
+    stump_line = calibration.get("stump_line")
+    corridor = calibration.get("pitch_corridor") or []
+    return {
+        "available": available,
+        "quality": calibration.get("quality", "Unavailable"),
+        "stump_line_available": bool(stump_line),
+        "pitch_corridor_available": bool(corridor),
+        "calibration": calibration,
+        "notes": notes,
+    }
