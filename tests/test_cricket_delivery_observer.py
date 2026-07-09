@@ -54,19 +54,27 @@ def test_selector_prefers_smooth_forward_path():
 
 
 def test_selector_rejects_backward_and_huge_jump_candidates():
-    candidates = [
-        {"frame_index": 0, "x": 200, "y": 100, "confidence": 0.8},
-        {"frame_index": 1, "x": 202, "y": 112, "confidence": 0.8},
-        {"frame_index": 2, "x": 204, "y": 126, "confidence": 0.8},
-        {"frame_index": 3, "x": 206, "y": 141, "confidence": 0.8},
-        {"frame_index": 4, "x": 208, "y": 156, "confidence": 0.8},
-        {"frame_index": 5, "x": 210, "y": 130, "confidence": 0.8},  # backward
-        {"frame_index": 6, "x": 500, "y": 600, "confidence": 0.8},  # huge jump
+    # Soft DP penalties skip bad alternatives when a smooth forward path exists.
+    smooth = [
+        {"frame_index": i, "x": 200 + i * 2, "y": 100 + i * 14, "confidence": 0.75}
+        for i in range(8)
     ]
-    selected = select_best_cricket_path(candidates, frame_size={"width": 1280, "height": 720})
+    bad = [
+        {"frame_index": 3, "x": 180, "y": 40, "confidence": 0.99},  # backward
+        {"frame_index": 5, "x": 900, "y": 650, "confidence": 0.99},  # huge jump
+    ]
+    selected = select_best_cricket_path(
+        smooth + bad, frame_size={"width": 1280, "height": 720}
+    )
     assert len(selected["observer_path"]) >= 5
+    path_keys = {
+        (point["frame_index"], point["x"], point["y"])
+        for point in selected["observer_path"]
+    }
+    assert (3, 180.0, 40.0) not in path_keys
+    assert (5, 900.0, 650.0) not in path_keys
     rejected_reasons = {item["reason"] for item in selected["rejected_candidates"]}
-    assert rejected_reasons
+    assert "not_selected" in rejected_reasons
 
 
 def test_fit_observer_path_safe_output():

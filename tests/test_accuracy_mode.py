@@ -182,11 +182,15 @@ def test_accuracy_mode_enables_online_best_tracklet_ranking():
     )
 
 
-def test_video_analysis_passes_ball_tracking_mode_to_engine():
+def test_video_analysis_wires_preset_settings_into_process_video():
+    # ponytail: UI owns process_video directly; presets supply confidence/imgsz
+    # instead of EngineOptions(ball_tracking_mode=...).
     video_analysis = importlib.import_module("Backends.src.ui.video_analysis")
     source = inspect.getsource(video_analysis.show_video_analysis_page)
-    assert "ball_tracking_mode=ball_tracking_mode" in source
-    assert "EngineOptions(" in source
+    assert "result = process_video(" in source
+    assert "confidence=confidence" in source
+    assert "imgsz=image_size" in source
+    assert "DETECTION_PRESETS" in inspect.getsource(video_analysis)
 
 
 def test_delivery_result_tracking_fields_present():

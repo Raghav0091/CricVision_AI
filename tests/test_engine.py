@@ -148,12 +148,14 @@ def test_analyze_delivery_clip_dispatches_without_ui_or_models(
     assert result["impact_report"] == {"impact_detected": False}
 
 
-def test_video_analysis_ui_does_not_define_processors():
+def test_video_analysis_ui_owns_live_processors():
+    # ponytail: live Video Analysis runs process_video / process_batting_video
+    # in the UI module; analyze_delivery_clip remains the non-UI engine entry.
     video_analysis = importlib.import_module(
         "Backends.src.ui.video_analysis"
     )
     source = inspect.getsource(video_analysis)
 
-    assert "def process_video(" not in source
-    assert "def process_batting_video(" not in source
-    assert "analyze_delivery_clip(" in source
+    assert "def process_video(" in source
+    assert "def process_batting_video(" in source
+    assert "analyze_delivery_clip(" not in source
