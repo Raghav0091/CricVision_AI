@@ -218,6 +218,17 @@ def create_delivery_recorder_class(recording_state, live_bridge=None):
                     session_active = bridge.live_session_active
                     capture_state = bridge.capture_state
 
+                # ponytail: stage is the source of truth — flags alone can be stale across webrtc frames.
+                show_geometry = bool(show_geometry) and stage in {
+                    "calibrated_ready",
+                    "delivery_capture",
+                }
+                show_boxes = bool(show_boxes) or stage in {
+                    "camera_calibration",
+                    "calibrated_ready",
+                    "delivery_capture",
+                }
+
                 # ponytail: light motion capture only — no YOLO on every live frame.
                 if session_active and stage == "delivery_capture":
                     update = update_delivery_capture_state(
@@ -261,7 +272,7 @@ def create_delivery_recorder_class(recording_state, live_bridge=None):
                     _draw_live_alignment_overlay(
                         display,
                         box_layout=box_layout,
-                        calibration=calibration,
+                        calibration=calibration if show_geometry else None,
                         show_alignment_boxes=show_boxes,
                         show_calibrated_geometry=show_geometry,
                         stage=stage,
@@ -356,7 +367,13 @@ def _draw_live_alignment_overlay(
     except (TypeError, ValueError):
         pass
 
-    if show_calibrated_geometry and report.get("available"):
+    # ponytail: never draw blue stump line / corridor during camera_calibration alignment.
+    allow_geometry = (
+        show_calibrated_geometry
+        and stage in {"calibrated_ready", "delivery_capture"}
+        and report.get("available")
+    )
+    if allow_geometry:
         corridor = report.get("pitch_corridor") or []
         points = []
         for point in corridor:
@@ -560,6 +577,9 @@ def render_live_stage_calibrated_ready(live_bridge):
         st.rerun()
     if cols[1].button("Back to Calibration", use_container_width=True):
         st.session_state.live_auto_session_active = False
+        # Clear calibrated geometry so alignment stage shows red boxes only.
+        st.session_state.live_alignment_report = None
+        st.session_state.live_calibration_payload = None
         _set_live_session_stage("camera_calibration")
         st.rerun()
     return calibration
@@ -1782,7 +1802,7 @@ def show_live_session_page():
     frame_width, frame_height = int(frame_width), int(frame_height)
 
     box_layout = None
-    calibration_payload = st.session_state.get("live_calibration_payload")
+    calibration_payload = None
     show_alignment_boxes = False
     show_calibrated_geometry = False
     camera_needed = stage in {
@@ -1800,6 +1820,9 @@ def show_live_session_page():
             frame_height,
         )
         show_alignment_boxes = True
+        # Alignment-only: never feed stump-line calibration into the webrtc overlay.
+        calibration_payload = None
+        show_calibrated_geometry = False
     elif stage == "calibrated_ready":
         box_layout = _ensure_alignment_box_layout(frame_width, frame_height)
         calibration_payload = render_live_stage_calibrated_ready(live_bridge)
@@ -1808,6 +1831,7 @@ def show_live_session_page():
     elif stage == "delivery_capture":
         box_layout = _ensure_alignment_box_layout(frame_width, frame_height)
         render_live_stage_delivery_capture(live_bridge)
+        calibration_payload = st.session_state.get("live_calibration_payload")
         show_alignment_boxes = True
         show_calibrated_geometry = True
     elif stage == "session_results":
