@@ -259,6 +259,45 @@ def apply_global_theme():
             max-width: 720px;
         }
 
+        .cv-step-card {
+            background: rgba(14, 20, 28, 0.72);
+            border: 1px solid rgba(148, 163, 184, 0.14);
+            border-radius: 18px;
+            padding: 1.15rem 1.25rem 1.25rem 1.25rem;
+            margin-bottom: 1rem;
+            box-shadow: 0 14px 32px rgba(0, 0, 0, 0.18);
+        }
+
+        .cv-step-label {
+            color: #34d399;
+            font-size: 0.72rem;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            margin: 0 0 0.35rem 0;
+        }
+
+        .cv-step-title {
+            color: #f8fafc;
+            font-size: 1.12rem;
+            font-weight: 700;
+            margin: 0;
+        }
+
+        .cv-step-sub {
+            color: #94a3b8;
+            font-size: 0.88rem;
+            margin: 0.3rem 0 0.85rem 0;
+            line-height: 1.45;
+        }
+
+        .cv-status-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.45rem;
+            margin: 0.35rem 0 0.85rem 0;
+        }
+
         .stButton > button {
             background: linear-gradient(135deg, #059669, #047857) !important;
             color: #fff !important;
@@ -419,3 +458,26 @@ def render_status_pill(text, status="default"):
         "gold": "cv-pill-gold",
     }.get(status, "cv-pill-default")
     return f'<span class="cv-pill {css}">{text}</span>'
+
+
+def render_step_header(step_label, title, subtitle=None):
+    """Compact step heading used by guided Video Analysis / Live Session flows."""
+    subtitle_html = f'<p class="cv-step-sub">{subtitle}</p>' if subtitle else ""
+    st.markdown(
+        f"""
+        <div style="margin:1.15rem 0 0.55rem 0;padding:0.85rem 1rem;background:rgba(14,20,28,0.55);border:1px solid rgba(148,163,184,0.12);border-radius:14px;">
+            <p class="cv-step-label">{step_label}</p>
+            <p class="cv-step-title">{title}</p>
+            {subtitle_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_status_row(items):
+    """Render a compact row of status pills. items: list of (text, tone)."""
+    if not items:
+        return
+    pills = " ".join(render_status_pill(text, tone) for text, tone in items if text)
+    st.markdown(f'<div class="cv-status-row">{pills}</div>', unsafe_allow_html=True)

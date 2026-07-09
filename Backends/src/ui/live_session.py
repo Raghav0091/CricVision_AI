@@ -431,15 +431,13 @@ def _ensure_alignment_box_layout(frame_width, frame_height):
 
 
 def render_live_camera_setup_guidelines():
-    st.subheader("Camera Setup Guidelines")
     st.markdown(
         """
-- Use tripod
-- 6 stumps required
+- Use a tripod
+- Keep 6 stumps visible
 - Camera behind non-striker stumps
-- Camera not too far back
-- Higher camera is better
-- Do not block camera
+- Not too far back; higher is better
+- Do not block the camera
 - Bowl a few balls before checking analysis
 """
     )
@@ -451,7 +449,15 @@ def _set_live_session_stage(stage):
 
 def render_live_stage_setup(live_bridge):
     """Stage: setup — guidelines + start button (camera not required yet)."""
-    render_live_camera_setup_guidelines()
+    from Backends.src.ui.theme import render_step_header
+
+    render_step_header(
+        "Stage 1",
+        "Setup",
+        "Prepare the camera, then start live delivery analysis.",
+    )
+    with st.expander("Camera Setup Guidelines", expanded=True):
+        render_live_camera_setup_guidelines()
     st.info(
         "Press Start to open the camera with fixed stump boxes. "
         "Move the camera/tripod until both sets of stumps fit, then Continue."
@@ -473,8 +479,15 @@ def render_live_stage_setup(live_bridge):
 
 def render_live_stage_camera_calibration(live_bridge, frame_width, frame_height):
     """Stage: camera_calibration — align camera to fixed boxes."""
+    from Backends.src.ui.theme import render_step_header, render_status_row
+
     layout = _ensure_alignment_box_layout(frame_width, frame_height)
-    st.subheader("Camera Calibration")
+    render_step_header(
+        "Stage 2",
+        "Camera Calibration",
+        "Fit both stump sets inside the overlay boxes, then continue.",
+    )
+    render_status_row([("Calibrating", "warning"), ("Align stumps to boxes", "gold")])
     st.caption(
         "Fit the stumps completely in the boxes, then press Continue. "
         "Move the camera/tripod or adjust zoom if needed."
@@ -510,9 +523,21 @@ def render_live_stage_camera_calibration(live_bridge, frame_width, frame_height)
 
 def render_live_stage_calibrated_ready(live_bridge):
     """Stage: calibrated_ready — show stump line / corridor status, then start capture."""
+    from Backends.src.ui.theme import render_step_header, render_status_row
+
     report = st.session_state.get("live_alignment_report") or {}
     calibration = st.session_state.get("live_calibration_payload") or report.get("calibration") or {}
-    st.subheader("Calibration Ready")
+    render_step_header(
+        "Stage 3",
+        "Live Capture",
+        "Calibration is ready. Start capture when you are set to bowl.",
+    )
+    render_status_row(
+        [
+            ("Calibration: Ready", "success"),
+            (f"Quality: {report.get('quality', 'Unavailable')}", "gold"),
+        ]
+    )
     st.success("Estimated single-camera stump line created")
     metric_cols = st.columns(3)
     metric_cols[0].metric("Calibration Quality", report.get("quality", "Unavailable"))
@@ -542,16 +567,29 @@ def render_live_stage_calibrated_ready(live_bridge):
 
 def render_live_stage_delivery_capture(live_bridge):
     """Stage: delivery_capture — motion-based short clip capture."""
-    st.subheader("Delivery Capture")
+    from Backends.src.ui.theme import render_step_header, render_status_row
+
+    render_step_header(
+        "Stage 3",
+        "Live Capture",
+        "Bowl deliveries. Clips save automatically when motion is detected.",
+    )
     snap = live_bridge.snapshot()
     status = snap.get("status_message") or "Waiting for delivery..."
+    recording = bool(snap.get("recording"))
+    render_status_row(
+        [
+            ("Recording" if recording else "Waiting", "warning" if recording else "success"),
+            (f"Deliveries: {snap['delivery_count']}", "gold"),
+        ]
+    )
     st.info(status)
 
     status_cols = st.columns(3)
     status_cols[0].metric("Delivery count", snap["delivery_count"])
     status_cols[1].metric(
         "Recording status",
-        "Recording" if snap["recording"] else "Waiting",
+        "Recording" if recording else "Waiting",
     )
     last_path = snap["last_saved_path"] or st.session_state.get("live_last_saved_delivery")
     status_cols[2].metric(
@@ -600,9 +638,21 @@ def render_live_stage_delivery_capture(live_bridge):
 
 def render_live_stage_session_results(live_bridge):
     """Stage: session_results — minimal summary after stop."""
-    st.subheader("Session Results")
+    from Backends.src.ui.theme import render_step_header, render_status_row
+
+    render_step_header(
+        "Stage 4",
+        "Session Results",
+        "Recent deliveries and saved clips from this session.",
+    )
     snap = live_bridge.snapshot()
     last_path = snap["last_saved_path"] or st.session_state.get("live_last_saved_delivery")
+    render_status_row(
+        [
+            (f"Deliveries: {snap['delivery_count']}", "success"),
+            ("Replay: Available" if last_path else "Replay: None", "gold" if last_path else "default"),
+        ]
+    )
     st.metric("Deliveries captured", snap["delivery_count"])
     if last_path:
         st.caption(f"Last saved clip: `{last_path}`")
@@ -1611,7 +1661,7 @@ def initialize_live_session_state():
 
 def show_live_session_page():
     from Backends.src.ui.interactive_field_map import render_field_setup_card
-    from Backends.src.ui.theme import render_page_header, render_status_pill
+    from Backends.src.ui.theme import render_page_header, render_status_row
 
     initialize_live_session_state()
     recording_state = st.session_state.live_recording_state
@@ -1620,23 +1670,39 @@ def show_live_session_page():
 
     if recording_state.recording:
         status = "Recording"
+        status_tone = "warning"
     elif st.session_state.live_pending_analysis:
         status = "Analyzing"
+        status_tone = "gold"
     elif st.session_state.live_camera_session_ended and st.session_state.live_last_result:
         status = "Review Ready"
+        status_tone = "success"
     elif stage == "delivery_capture":
         status = "Capturing"
+        status_tone = "warning"
     elif stage == "camera_calibration":
         status = "Calibrating"
+        status_tone = "warning"
     elif stage == "calibrated_ready":
         status = "Calibrated"
+        status_tone = "success"
+    elif stage == "session_results":
+        status = "Results"
+        status_tone = "gold"
     else:
         status = "Setup"
+        status_tone = "default"
 
     render_page_header(
         "Live Bowling Session",
-        "Align the camera to fixed stump boxes, then capture deliveries live.",
+        "Align the camera to fixed stump boxes, capture deliveries live, then review results.",
         badge=status,
+    )
+    render_status_row(
+        [
+            (f"Stage: {status}", status_tone),
+            ("Live preview stays clean until analysis", "gold"),
+        ]
     )
 
     model_options = get_live_model_options()
@@ -1704,11 +1770,6 @@ def show_live_session_page():
         show_analysis_output(st.session_state.live_last_result)
         return
 
-    st.markdown(
-        f'<div style="margin-bottom:1rem;">{render_status_pill("Live preview stays clean until analysis", "gold")}</div>',
-        unsafe_allow_html=True,
-    )
-
     if st.session_state.live_status_message:
         st.info(st.session_state.live_status_message)
         st.session_state.live_status_message = None
@@ -1751,38 +1812,57 @@ def show_live_session_page():
         show_calibrated_geometry = True
     elif stage == "session_results":
         render_live_stage_session_results(live_bridge)
+        with st.expander("Recent Delivery Summary", expanded=True):
+            show_analysis_output(st.session_state.live_last_result)
+        with st.expander("Developer / Advanced", expanded=False):
+            st.caption("Session debug snapshot")
+            st.json(
+                {
+                    "stage": stage,
+                    "delivery_count": bridge_snap.get("delivery_count"),
+                    "last_saved_path": bridge_snap.get("last_saved_path")
+                    or st.session_state.get("live_last_saved_delivery"),
+                }
+            )
     else:
         _set_live_session_stage("setup")
         st.rerun()
 
     if camera_needed:
-        field_setup = render_field_setup_card(
-            key_prefix="live_session_field",
-            compact=True,
-            default_preset="Balanced",
-        )
+        # Defaults when Field Setup expander is collapsed / not shown this stage
+        field_setup = st.session_state.get("current_field_setup")
 
-        with st.expander("Advanced Settings", expanded=False):
-            st.selectbox(
-                "Detection model",
-                list(model_options.keys()),
-                key="live_session_model",
-            )
-            selected_model_name = st.session_state["live_session_model"]
-            selected_model = model_options[selected_model_name]
-            selected_model_path = selected_model["path"]
-            selected_model_key = selected_model.get("model_key")
-            status_path = get_model_path(selected_model_key) if selected_model_key else selected_model_path
-            if not selected_model.get("ensemble", False) and status_path is not None and not status_path.exists():
-                st.warning(f"Model not found: {status_path}")
+        # Keep calibration stage focused: only Continue / Cancel + camera feed.
+        show_setup_panels = stage in {"calibrated_ready", "delivery_capture"}
+        if show_setup_panels:
+            with st.expander("Field Setup", expanded=False):
+                field_setup = render_field_setup_card(
+                    key_prefix="live_session_field",
+                    compact=True,
+                    default_preset="Balanced",
+                )
 
-            st.selectbox(
-                "Detection preset",
-                list(DETECTION_PRESETS.keys()),
-                index=1,
-                key="live_session_preset",
-            )
-            st.checkbox("Show pitch ROI overlay", value=False, key="live_session_show_roi")
+            with st.expander("Advanced Settings", expanded=False):
+                st.selectbox(
+                    "Detection model",
+                    list(model_options.keys()),
+                    key="live_session_model",
+                )
+                selected_model_name = st.session_state["live_session_model"]
+                selected_model = model_options[selected_model_name]
+                selected_model_path = selected_model["path"]
+                selected_model_key = selected_model.get("model_key")
+                status_path = get_model_path(selected_model_key) if selected_model_key else selected_model_path
+                if not selected_model.get("ensemble", False) and status_path is not None and not status_path.exists():
+                    st.warning(f"Model not found: {status_path}")
+
+                st.selectbox(
+                    "Detection preset",
+                    list(DETECTION_PRESETS.keys()),
+                    index=1,
+                    key="live_session_preset",
+                )
+                st.checkbox("Show pitch ROI overlay", value=False, key="live_session_show_roi")
 
         selected_model_name = st.session_state.get(
             "live_session_model",
@@ -1843,77 +1923,75 @@ def show_live_session_page():
             recorder = webrtc_context.video_processor
 
         # Manual single-delivery recording kept as secondary workflow.
-        st.markdown("---")
-        st.caption("Manual single-delivery recording (optional)")
+        if show_setup_panels:
+            with st.expander("Manual single-delivery recording (optional)", expanded=False):
+                if not recording_state.recording:
+                    start_clicked = st.button(
+                        "Start Delivery Recording",
+                        use_container_width=True,
+                        disabled=recorder is None,
+                    )
+                else:
+                    start_clicked = False
+                    done_clicked = st.button(
+                        "Analyze Delivery",
+                        type="primary",
+                        use_container_width=True,
+                    )
+                    clear_clicked = st.button("Clear Delivery", use_container_width=True)
 
-        if not recording_state.recording:
-            start_clicked = st.button(
-                "Start Delivery Recording",
-                use_container_width=True,
-                disabled=recorder is None,
-            )
-        else:
-            start_clicked = False
-            done_clicked = st.button(
-                "Analyze Delivery",
-                type="primary",
-                use_container_width=True,
-            )
-            clear_clicked = st.button("Clear Delivery", use_container_width=True)
+                if not recording_state.recording:
+                    done_clicked = False
+                    clear_clicked = False
+                    if recorder is None:
+                        st.caption("Allow camera access to begin your live session.")
+                    else:
+                        st.caption("Optional: record one clip manually, then analyze.")
+                else:
+                    st.info(f"Recording... {recording_state.get_frame_count()} frames captured.")
 
-        if not recording_state.recording:
-            done_clicked = False
-            clear_clicked = False
-            if recorder is None:
-                st.caption("Allow camera access to begin your live session.")
-            else:
-                st.caption("Optional: record one clip manually, then analyze.")
-        else:
-            st.info(f"Recording... {recording_state.get_frame_count()} frames captured.")
+                if start_clicked:
+                    recording_state.start_recording()
+                    st.session_state.live_delivery_recording = True
+                    st.session_state.live_recorded_frames = []
+                    st.session_state.live_last_result = None
+                    st.session_state.live_status_message = (
+                        "Recording started. Bowl one delivery, then click Done / Analyze Delivery."
+                    )
+                    st.rerun()
 
-        if start_clicked:
-            recording_state.start_recording()
-            st.session_state.live_delivery_recording = True
-            st.session_state.live_recorded_frames = []
-            st.session_state.live_last_result = None
-            st.session_state.live_status_message = (
-                "Recording started. Bowl one delivery, then click Done / Analyze Delivery."
-            )
-            st.rerun()
+                if done_clicked:
+                    recorded_frames = recording_state.stop_recording()
+                    st.session_state.live_delivery_recording = False
+                    st.session_state.live_recorded_frames = recorded_frames
+                    st.session_state.live_camera_active = False
+                    st.session_state.live_camera_session_ended = True
+                    stop_webrtc_context_if_possible(webrtc_context)
+                    st.session_state.live_pending_analysis = True
+                    st.session_state.live_pending_analysis_settings = {
+                        "confidence": confidence,
+                        "image_size": image_size,
+                        "model_path": str(selected_model_path),
+                        "model_key": selected_model_key,
+                        "use_ensemble": use_ensemble,
+                        "show_pitch_roi": show_pitch_roi,
+                        "model_name": selected_model_name,
+                        "preset_name": preset_name,
+                        "field_setup": field_setup,
+                    }
+                    st.session_state.live_status_message = (
+                        "Delivery captured. Camera session ended. Refresh or click Start New Delivery to record again."
+                    )
+                    st.rerun()
 
-        if done_clicked:
-            recorded_frames = recording_state.stop_recording()
-            st.session_state.live_delivery_recording = False
-            st.session_state.live_recorded_frames = recorded_frames
-            st.session_state.live_camera_active = False
-            st.session_state.live_camera_session_ended = True
-            stop_webrtc_context_if_possible(webrtc_context)
-            st.session_state.live_pending_analysis = True
-            st.session_state.live_pending_analysis_settings = {
-                "confidence": confidence,
-                "image_size": image_size,
-                "model_path": str(selected_model_path),
-                "model_key": selected_model_key,
-                "use_ensemble": use_ensemble,
-                "show_pitch_roi": show_pitch_roi,
-                "model_name": selected_model_name,
-                "preset_name": preset_name,
-                "field_setup": field_setup,
-            }
-            st.session_state.live_status_message = (
-                "Delivery captured. Camera session ended. Refresh or click Start New Delivery to record again."
-            )
-            st.rerun()
+                if clear_clicked:
+                    reset_live_delivery_state()
+                    st.session_state.live_status_message = "Recorded delivery cleared."
+                    st.rerun()
 
-        if clear_clicked:
-            reset_live_delivery_state()
-            st.session_state.live_status_message = "Recorded delivery cleared."
-            st.rerun()
-
-        from Backends.src.ui.theme import render_section_title
-
-        render_section_title("Recent Delivery Summary")
-        show_analysis_output(st.session_state.live_last_result)
+        if stage == "delivery_capture" and st.session_state.live_last_result:
+            with st.expander("Recent Delivery Summary", expanded=False):
+                show_analysis_output(st.session_state.live_last_result)
     else:
         live_bridge.configure(
             stage=stage,

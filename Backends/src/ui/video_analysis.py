@@ -2703,75 +2703,175 @@ def render_detection_health_section(result):
 
 
 def show_batting_analysis_results(result):
-    from Backends.src.ui.components import render_video_analysis_results_layout
-
-    render_detection_health_section(result)
-    path_validity = render_trajectory_validity_section(result)
-    render_session_calibration_result_section(result)
-    render_manual_pitch_calibration_section(result)
-    render_replay_calibration_result_section(result)
-    reliable_track = build_reliable_track_from_result(result)
-    physics_report = build_physics_trajectory_report_from_result(result, reliable_track=reliable_track)
-    render_ball_candidate_reliability_section(
-        result,
-        reliable_track=reliable_track,
-        physics_report=physics_report,
-        path_validity=path_validity,
-    )
-    render_physics_trajectory_section(
-        result,
-        path_validity=path_validity,
-        physics_report=physics_report,
-        reliable_track=reliable_track,
-    )
-    render_trajectory_replay_section(result, path_validity=path_validity)
-    observer_payload = render_cricket_delivery_observer_section(result)
-    render_3d_replay_section(
-        result,
-        observer_payload=observer_payload,
-        path_validity=path_validity,
-        physics_report=physics_report,
-        reliable_track=reliable_track,
-    )
-    render_video_analysis_results_layout(result, context_label="Video Analysis")
+    _render_analysis_results_tabs(result, batting=True)
 
 
 def show_video_analysis_results(result, selected_model_name, preset_name, show_pitch_roi):
-    from Backends.src.ui.components import render_video_analysis_results_layout
-
-    render_detection_health_section(result)
-    path_validity = render_trajectory_validity_section(result)
-    render_session_calibration_result_section(result)
-    render_manual_pitch_calibration_section(result)
-    render_replay_calibration_result_section(result)
-    reliable_track = build_reliable_track_from_result(result)
-    physics_report = build_physics_trajectory_report_from_result(result, reliable_track=reliable_track)
-    render_ball_candidate_reliability_section(
+    _render_analysis_results_tabs(
         result,
-        reliable_track=reliable_track,
-        physics_report=physics_report,
-        path_validity=path_validity,
-    )
-    render_physics_trajectory_section(
-        result,
-        path_validity=path_validity,
-        physics_report=physics_report,
-        reliable_track=reliable_track,
-    )
-    render_trajectory_replay_section(result, path_validity=path_validity)
-    observer_payload = render_cricket_delivery_observer_section(result)
-    render_3d_replay_section(
-        result,
-        observer_payload=observer_payload,
-        path_validity=path_validity,
-        physics_report=physics_report,
-        reliable_track=reliable_track,
-    )
-    render_video_analysis_results_layout(
-        result,
-        context_label="Video Analysis",
+        batting=False,
         show_status_banner=True,
     )
+
+
+def _result_status_items(result):
+    """Compact status pills for the results header."""
+    result = result or {}
+    items = []
+    cal = result.get("calibration_context") or {}
+    if isinstance(cal, dict) and cal.get("enabled"):
+        items.append(("Calibration: Ready", "success"))
+    elif result.get("session_calibration", {}).get("available"):
+        items.append(("Calibration: Ready", "success"))
+    else:
+        items.append(("Calibration: Off", "default"))
+
+    track_q = result.get("tracking_quality_label") or result.get("ball_tracking_quality")
+    if track_q:
+        tone = "success" if str(track_q).lower() in {"good", "excellent", "high"} else "warning"
+        items.append((f"Track Quality: {track_q}", tone))
+
+    physics = result.get("physics_trajectory") or {}
+    phys_q = physics.get("quality") or physics.get("physics_quality")
+    if phys_q:
+        tone = "success" if str(phys_q).lower() in {"good", "excellent", "high"} else "warning"
+        items.append((f"Physics Quality: {phys_q}", tone))
+
+    if result.get("processed_video_generated") or result.get("output_path"):
+        items.append(("Replay: Available", "success"))
+    else:
+        items.append(("Replay: Unavailable", "default"))
+
+    if cal.get("enabled") or (result.get("session_calibration") or {}).get("pitch_corridor"):
+        items.append(("Pitch Context: Enabled", "gold"))
+    return items
+
+
+def _render_analysis_results_tabs(result, *, batting=False, show_status_banner=False):
+    """Tabbed results layout — preserves all existing section renderers."""
+    from Backends.src.ui.components import (
+        render_analysis_summary_card,
+        render_ball_tracking_details_card,
+        render_calibration_context_card,
+        render_delivery_report,
+        render_impact_and_shot_section,
+        render_observer_timeline_report,
+        render_performance_details,
+        render_processed_video_preview,
+        render_save_status,
+        render_vision_agent_report,
+        render_visual_observer_repair_card,
+        video_preview_card,
+    )
+    from Backends.src.ui.theme import render_section_title, render_status_row
+
+    render_section_title("Results", "Delivery summary, trajectory diagnostics, replay, and debug.")
+    render_status_row(_result_status_items(result))
+    _ = show_status_banner
+
+    # Prep shared trajectory payloads once (logic unchanged; UI only reorganized).
+    path_validity = prepare_result_path_validity(result)
+    reliable_track = build_reliable_track_from_result(result)
+    physics_report = build_physics_trajectory_report_from_result(
+        result, reliable_track=reliable_track
+    )
+    observer_payload = build_delivery_observer_payload(result)
+
+    tab_overview, tab_trajectory, tab_replay, tab_debug = st.tabs(
+        ["Overview", "Trajectory", "Replay", "Debug"]
+    )
+
+    with tab_overview:
+        render_analysis_summary_card(result)
+        render_delivery_report(result)
+        render_save_status(result, "Video Analysis")
+        with st.expander("Impact & Shot", expanded=False):
+            render_impact_and_shot_section(result)
+        with st.expander("Calibration Context", expanded=False):
+            render_calibration_context_card(result)
+
+    with tab_trajectory:
+        render_detection_health_section(result)
+        render_trajectory_validity_section(result, prepared=path_validity)
+        render_session_calibration_result_section(result)
+        render_manual_pitch_calibration_section(result)
+        render_ball_candidate_reliability_section(
+            result,
+            reliable_track=reliable_track,
+            physics_report=physics_report,
+            path_validity=path_validity,
+        )
+        render_physics_trajectory_section(
+            result,
+            path_validity=path_validity,
+            physics_report=physics_report,
+            reliable_track=reliable_track,
+        )
+        render_cricket_delivery_observer_section(result)
+        st.caption(
+            f"Bounce / impact / path source: {physics_path_source(physics_report, path_validity, reliable_track)}"
+        )
+
+    with tab_replay:
+        video_preview_card("Processed Video Preview")
+        render_processed_video_preview(
+            result,
+            download_key="download_video_analysis",
+        )
+        render_replay_calibration_result_section(result)
+        st.caption(
+            f"Path source: {physics_path_source(physics_report, path_validity, reliable_track)}"
+        )
+        render_trajectory_replay_section(result, path_validity=path_validity)
+        render_3d_replay_section(
+            result,
+            observer_payload=observer_payload,
+            path_validity=path_validity,
+            physics_report=physics_report,
+            reliable_track=reliable_track,
+        )
+
+    with tab_debug:
+        st.caption("Advanced diagnostics. Safe to ignore for normal coaching use.")
+        st.info(
+            "Raw Detection Preview lives under Step 3 → Raw Detection Preview "
+            "(runs YOLO-only samples without changing Analyze Delivery)."
+        )
+        with st.expander("Tracking Quality Details", expanded=False):
+            render_ball_tracking_details_card(result)
+            render_visual_observer_repair_card(result)
+            render_observer_timeline_report(result)
+            render_vision_agent_report(result)
+        with st.expander("Performance Details", expanded=False):
+            render_performance_details(result)
+            if result.get("report_path"):
+                st.caption(f"Report JSON: {result['report_path']}")
+            if result.get("output_path"):
+                st.caption(f"Processed video: {result['output_path']}")
+            elif result.get("raw_output_path"):
+                st.caption(f"Raw processed video: {result['raw_output_path']}")
+        with st.expander("Raw result summary JSON", expanded=False):
+            # ponytail: compact keys only; full result can be huge
+            safe = {
+                k: result.get(k)
+                for k in (
+                    "success",
+                    "analysis_mode",
+                    "active_model",
+                    "active_preset",
+                    "speed_mode",
+                    "tracking_quality_label",
+                    "ball_tracking_mode",
+                    "processed_video_generated",
+                    "output_path",
+                    "raw_output_path",
+                    "report_path",
+                )
+                if k in (result or {})
+            }
+            st.json(safe)
+
+    _ = batting
 
 
 def show_video_analysis_page():
@@ -2779,11 +2879,23 @@ def show_video_analysis_page():
         clean_upload_box,
         render_calibration_context_card,
     )
-    from Backends.src.ui.theme import render_empty_state, render_page_header
+    from Backends.src.ui.theme import (
+        render_empty_state,
+        render_page_header,
+        render_step_header,
+        render_status_row,
+    )
 
     render_page_header(
-        "Analyze",
-        "Upload a delivery clip. CricVision uses smart defaults and generates a processed video plus professional report.",
+        "Video Analysis",
+        "Upload a delivery clip, set up the field if needed, then analyze. "
+        "Smart defaults keep the first pass simple.",
+    )
+    render_status_row(
+        [
+            ("Guided workflow", "gold"),
+            ("Processed video + report", "default"),
+        ]
     )
 
     if "video_analysis_result" not in st.session_state:
@@ -2793,74 +2905,124 @@ def show_video_analysis_page():
 
     model_options = get_model_options()
 
+    # --- Step 1: Upload ---
+    render_step_header(
+        "Step 1",
+        "Upload Video",
+        "Choose a cricket delivery clip. MP4, MOV, AVI, and MKV are supported.",
+    )
+    clean_upload_box("Upload cricket video")
+    uploaded_video = st.file_uploader(
+        "Upload delivery video",
+        type=["mp4", "mov", "avi", "mkv"],
+        key="video_analysis_upload",
+        label_visibility="collapsed",
+    )
+    if uploaded_video is not None:
+        st.video(uploaded_video)
+
+    # --- Step 2: Setup (collapsed groups) ---
+    render_step_header(
+        "Step 2",
+        "Setup",
+        "Field, practice environment, and optional calibration. Collapse what you do not need.",
+    )
+
     from Backends.src.ui.interactive_field_map import render_field_setup_card
 
-    field_setup = render_field_setup_card(key_prefix="video_analysis_field", compact=True, default_preset="Balanced")
+    field_setup = st.session_state.get("current_field_setup")
+    with st.expander("Field Setup", expanded=False):
+        field_setup = render_field_setup_card(
+            key_prefix="video_analysis_field",
+            compact=True,
+            default_preset="Balanced",
+        )
 
-    st.subheader("Practice Environment Calibration")
-    calibration_enabled = st.checkbox(
-        "Enable practice environment calibration",
-        value=True,
-        key="practice_calibration_enabled",
-        help="Adds approximate 2D stump, crease, pitch-corridor, and line references.",
-    )
-    calibration_cols = st.columns(2)
-    camera_view_labels = {
-        "Umpire End": "umpire_end",
-        "Batter View": "batter_view",
-        "Bowler End": "bowler_end",
-        "Side View": "side_view",
-        "Unknown": "unknown",
-    }
-    handedness_labels = {
-        "Right-handed": "right",
-        "Left-handed": "left",
-        "Unknown": "unknown",
-    }
-    with calibration_cols[0]:
-        calibration_camera_label = st.selectbox(
-            "Camera view",
-            list(camera_view_labels),
-            index=0,
-            key="practice_calibration_camera_view",
+    with st.expander("Practice Environment Calibration", expanded=False):
+        calibration_enabled = st.checkbox(
+            "Enable practice environment calibration",
+            value=True,
+            key="practice_calibration_enabled",
+            help="Adds approximate 2D stump, crease, pitch-corridor, and line references.",
+        )
+        calibration_cols = st.columns(2)
+        camera_view_labels = {
+            "Umpire End": "umpire_end",
+            "Batter View": "batter_view",
+            "Bowler End": "bowler_end",
+            "Side View": "side_view",
+            "Unknown": "unknown",
+        }
+        handedness_labels = {
+            "Right-handed": "right",
+            "Left-handed": "left",
+            "Unknown": "unknown",
+        }
+        with calibration_cols[0]:
+            calibration_camera_label = st.selectbox(
+                "Camera view",
+                list(camera_view_labels),
+                index=0,
+                key="practice_calibration_camera_view",
+                disabled=not calibration_enabled,
+            )
+        with calibration_cols[1]:
+            calibration_handedness_label = st.selectbox(
+                "Batter handedness",
+                list(handedness_labels),
+                index=0,
+                key="practice_calibration_handedness",
+                disabled=not calibration_enabled,
+            )
+        calibration_auto_estimate = st.checkbox(
+            "Auto-estimate stumps and pitch corridor from analysis detections",
+            value=True,
+            key="practice_calibration_auto_estimate",
+            disabled=not calibration_enabled,
+            help="Uses stump detections already produced after Analyze is clicked; it does not run another model.",
+        )
+        calibration_confirmed = st.checkbox(
+            "Confirm calibration for analysis",
+            value=True,
+            key="practice_calibration_confirmed",
             disabled=not calibration_enabled,
         )
-    with calibration_cols[1]:
-        calibration_handedness_label = st.selectbox(
-            "Batter handedness",
-            list(handedness_labels),
-            index=0,
-            key="practice_calibration_handedness",
-            disabled=not calibration_enabled,
-        )
-    calibration_auto_estimate = st.checkbox(
-        "Auto-estimate stumps and pitch corridor from analysis detections",
-        value=True,
-        key="practice_calibration_auto_estimate",
-        disabled=not calibration_enabled,
-        help="Uses stump detections already produced after Analyze is clicked; it does not run another model.",
-    )
-    calibration_confirmed = st.checkbox(
-        "Confirm calibration for analysis",
-        value=True,
-        key="practice_calibration_confirmed",
-        disabled=not calibration_enabled,
-    )
+
     practice_calibration_context = build_calibration_context(
         {
-            "enabled": calibration_enabled and calibration_confirmed,
-            "confirmed": calibration_confirmed,
-            "auto_estimate": calibration_auto_estimate,
-            "camera_view": camera_view_labels[calibration_camera_label],
-            "batter_handedness": handedness_labels[
-                calibration_handedness_label
-            ],
+            "enabled": (
+                st.session_state.get("practice_calibration_enabled", True)
+                and st.session_state.get("practice_calibration_confirmed", True)
+            ),
+            "confirmed": st.session_state.get("practice_calibration_confirmed", True),
+            "auto_estimate": st.session_state.get("practice_calibration_auto_estimate", True),
+            "camera_view": {
+                "Umpire End": "umpire_end",
+                "Batter View": "batter_view",
+                "Bowler End": "bowler_end",
+                "Side View": "side_view",
+                "Unknown": "unknown",
+            }.get(
+                st.session_state.get("practice_calibration_camera_view", "Umpire End"),
+                "umpire_end",
+            ),
+            "batter_handedness": {
+                "Right-handed": "right",
+                "Left-handed": "left",
+                "Unknown": "unknown",
+            }.get(
+                st.session_state.get("practice_calibration_handedness", "Right-handed"),
+                "right",
+            ),
             "notes": (
                 [
                     "Provisional geometry will be refined from existing stump "
                     "detections during analysis."
                 ]
-                if calibration_enabled and calibration_confirmed
+                if (
+                    st.session_state.get("practice_calibration_enabled", True)
+                    and st.session_state.get("practice_calibration_confirmed", True)
+                )
                 else []
             ),
         }
@@ -2870,16 +3032,18 @@ def show_video_analysis_page():
         compact=True,
     )
 
-    clean_upload_box("Upload cricket video")
-    uploaded_video = st.file_uploader(
-        "Upload delivery video",
-        type=["mp4", "mov", "avi", "mkv"],
-        key="video_analysis_upload",
-        label_visibility="collapsed",
-    )
+    with st.expander("Replay Calibration", expanded=False):
+        replay_calibration_report = render_replay_calibration_input_section(uploaded_video)
 
-    if uploaded_video is not None:
-        st.video(uploaded_video)
+    with st.expander("Session Calibration", expanded=False):
+        session_calibration_report = render_session_calibration_input_section(uploaded_video)
+
+    # --- Step 3: Analyze ---
+    render_step_header(
+        "Step 3",
+        "Analyze",
+        "Run analysis with smart defaults. Open Advanced Settings only when you need them.",
+    )
 
     analyze_clicked = st.button(
         "Analyze Delivery",
@@ -2889,13 +3053,23 @@ def show_video_analysis_page():
         key="analyze_video_button",
     )
 
-    speed_mode = st.selectbox(
-        "Analysis Mode",
-        ["Smart Balanced", "Smart Accurate", "Debug Full Frame"],
-        index=0,
-        key="video_analysis_speed_mode",
-        help="Smart Balanced keeps ball detection on every frame but reduces wasted work from other models.",
-    )
+    action_cols = st.columns(2)
+    with action_cols[0]:
+        speed_mode = st.selectbox(
+            "Analysis Mode",
+            ["Smart Balanced", "Smart Accurate", "Debug Full Frame"],
+            index=0,
+            key="video_analysis_speed_mode",
+            help="Smart Balanced keeps ball detection on every frame but reduces wasted work from other models.",
+        )
+    with action_cols[1]:
+        overlay_detail = st.selectbox(
+            "Delivery detail",
+            ["Clean", "Debug"],
+            index=0,
+            key="video_analysis_overlay_detail",
+            help="Clean keeps ball trail and key markers only. Debug shows ROI, bounce, and labels.",
+        )
 
     generate_processed_video = st.checkbox(
         "Generate processed video preview",
@@ -2903,17 +3077,6 @@ def show_video_analysis_page():
         key="video_analysis_generate_processed_video",
         help="Disable to run analysis and reports only without writing an annotated video.",
     )
-
-    overlay_detail = st.selectbox(
-        "Overlay detail",
-        ["Clean", "Debug"],
-        index=0,
-        key="video_analysis_overlay_detail",
-        help="Clean keeps ball trail and key markers only. Debug shows ROI, bounce, and labels.",
-    )
-
-    replay_calibration_report = render_replay_calibration_input_section(uploaded_video)
-    session_calibration_report = render_session_calibration_input_section(uploaded_video)
 
     with st.expander("Raw Detection Preview", expanded=False):
         st.caption(
@@ -3065,6 +3228,7 @@ def show_video_analysis_page():
         "video_analysis_session_calibration",
         session_calibration_report,
     )
+    field_setup = st.session_state.get("current_field_setup") or field_setup
 
     if analysis_mode == "Batting Analysis":
         batting_ball_options = {
@@ -3310,8 +3474,15 @@ def show_video_analysis_page():
                 st.error(f"Could not save analysis results: {error}")
                 st.session_state.video_analysis_result = None
 
+    # --- Step 4: Results ---
     result = st.session_state.video_analysis_result
     settings = st.session_state.video_analysis_settings
+
+    render_step_header(
+        "Step 4",
+        "Results",
+        "Appears after a successful analysis run.",
+    )
 
     if result is None or not result.get("success"):
         render_empty_state(
