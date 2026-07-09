@@ -1428,7 +1428,7 @@ def process_video(
             )
             review_frame_count += 1
 
-    return {
+    result_payload = {
         "success": True,
         "output_path": str(output_path) if generate_processed_video else None,
         "processed_video_generated": generate_processed_video,
@@ -1501,6 +1501,15 @@ def process_video(
         ),
         **enrichment,
     }
+
+    # ponytail: compute physics fit once here so UI/3D/overlay all agree on one report.
+    result_payload["physics_trajectory"] = build_physics_trajectory_report_from_result(result_payload)
+    if generate_processed_video and not speed_settings.get("skip_impact_video_rewrite"):
+        shared_annotations.add_physics_trajectory_overlay_to_video(
+            output_path,
+            result_payload["physics_trajectory"],
+        )
+    return result_payload
 
 
 def _coerce_trajectory_point(value):
@@ -1779,6 +1788,63 @@ def render_trajectory_validity_section(result, prepared=None):
     return prepared
 
 
+def build_physics_trajectory_report_from_result(result):
+    """Compute (or reuse) the physics-assisted trajectory report for a result payload."""
+    result = result or {}
+    cached = result.get("physics_trajectory")
+    if isinstance(cached, dict) and cached.get("physics_quality"):
+        return cached
+
+    from Backends.src.physics_trajectory import build_physics_trajectory_report
+
+    frame_width, frame_height = extract_frame_size_from_result(result)
+    impact_info = result.get("impact_info") or {}
+    return build_physics_trajectory_report(
+        extract_trajectory_points_from_result(result),
+        impact_frame=impact_info,
+        impact_point=impact_info.get("ball_center"),
+        frame_size={"width": frame_width, "height": frame_height},
+        pitch_roi=extract_pitch_roi_from_result(result),
+    )
+
+
+def physics_path_source(physics_report, path_validity):
+    """Decide whether 3D replay should trust the physics fitted path over the tracker."""
+    physics_report = physics_report or {}
+    fitted = physics_report.get("fitted_delivery_path") or []
+    validity_quality = (path_validity or {}).get("quality") or "Unavailable"
+    if (
+        physics_report.get("physics_quality") in {"Good", "Partial"}
+        and len(fitted) >= 5
+        and validity_quality not in {"Poor", "Unavailable"}
+    ):
+        return "Physics fitted delivery path"
+    return "Current validated tracker path"
+
+
+def render_physics_trajectory_section(result, path_validity=None):
+    """Show physics-assisted trajectory fitter metrics after Trajectory Validity."""
+    if path_validity is None:
+        path_validity = prepare_result_path_validity(result)
+    physics_report = build_physics_trajectory_report_from_result(result)
+    bounce = physics_report.get("bounce") or {}
+    impact = physics_report.get("impact") or {}
+
+    st.subheader("Physics Trajectory")
+    metric_cols = st.columns(7)
+    metric_cols[0].metric("Physics Quality", physics_report.get("physics_quality") or "Unavailable")
+    metric_cols[1].metric("Pre-impact Points", len(physics_report.get("pre_impact_path") or []))
+    metric_cols[2].metric("Fitted Path Points", len(physics_report.get("fitted_delivery_path") or []))
+    metric_cols[3].metric("Bounce Detected", "Yes" if bounce.get("bounce_detected") else "No")
+    metric_cols[4].metric("Projection Quality", physics_report.get("projection_quality") or "Unavailable")
+    metric_cols[5].metric("Impact Detected", "Yes" if impact.get("impact_detected") else "No")
+    metric_cols[6].metric("Path Source", physics_path_source(physics_report, path_validity))
+
+    with st.expander("Physics Trajectory Details", expanded=False):
+        st.json(physics_report)
+    return physics_report
+
+
 def extract_impact_point_from_result(result):
     """Pull image-space impact coordinates when available."""
     result = result or {}
@@ -1914,7 +1980,7 @@ def render_cricket_delivery_observer_section(result):
     return payload
 
 
-def render_3d_replay_section(result, observer_payload=None, path_validity=None):
+def render_3d_replay_section(result, observer_payload=None, path_validity=None, physics_report=None):
     try:
         from Backends.src.replay3d.replay_renderer import build_3d_replay_figure
         from Backends.src.replay3d.stump_calibration import build_stump_calibration_context
@@ -1948,10 +2014,17 @@ def render_3d_replay_section(result, observer_payload=None, path_validity=None):
             st.json(validity)
         return
 
-    # Prefer validated tracker points; optional observer path still filtered through validity.
+    # Prefer physics fitted path when trusted, then validated tracker/observer points.
     trajectory_points = list(path_validity.get("valid_xy") or [])
-    source_text = "Validated tracker path"
-    if observer_payload:
+    source_text = "Current validated tracker path"
+    if physics_report is None:
+        physics_report = build_physics_trajectory_report_from_result(result)
+    if physics_path_source(physics_report, path_validity) == "Physics fitted delivery path":
+        physics_points = _observer_points_to_xy(physics_report.get("fitted_delivery_path"))
+        if len(physics_points) >= 5:
+            trajectory_points = physics_points
+            source_text = "Physics fitted delivery path"
+    if source_text == "Current validated tracker path" and observer_payload:
         selection = observer_payload.get("selection") or {}
         fit = observer_payload.get("fit") or {}
         fitted_points = _observer_points_to_xy(fit.get("fitted_path"))
@@ -2128,9 +2201,15 @@ def show_batting_analysis_results(result):
 
     render_detection_health_section(result)
     path_validity = render_trajectory_validity_section(result)
+    physics_report = render_physics_trajectory_section(result, path_validity=path_validity)
     render_trajectory_replay_section(result, path_validity=path_validity)
     observer_payload = render_cricket_delivery_observer_section(result)
-    render_3d_replay_section(result, observer_payload=observer_payload, path_validity=path_validity)
+    render_3d_replay_section(
+        result,
+        observer_payload=observer_payload,
+        path_validity=path_validity,
+        physics_report=physics_report,
+    )
     render_video_analysis_results_layout(result, context_label="Video Analysis")
 
 
@@ -2139,9 +2218,15 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
 
     render_detection_health_section(result)
     path_validity = render_trajectory_validity_section(result)
+    physics_report = render_physics_trajectory_section(result, path_validity=path_validity)
     render_trajectory_replay_section(result, path_validity=path_validity)
     observer_payload = render_cricket_delivery_observer_section(result)
-    render_3d_replay_section(result, observer_payload=observer_payload, path_validity=path_validity)
+    render_3d_replay_section(
+        result,
+        observer_payload=observer_payload,
+        path_validity=path_validity,
+        physics_report=physics_report,
+    )
     render_video_analysis_results_layout(
         result,
         context_label="Video Analysis",

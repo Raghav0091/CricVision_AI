@@ -149,6 +149,112 @@ def draw_safe_trajectory_lines(
     return prepared
 
 
+def _draw_dashed_line(frame, start, end, color, thickness=2, dash_px=8, gap_px=6):
+    x1, y1 = start
+    x2, y2 = end
+    length = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+    if length < 1:
+        return
+    step = dash_px + gap_px
+    for offset in range(0, int(length), step):
+        t0 = offset / length
+        t1 = min((offset + dash_px) / length, 1.0)
+        p0 = (int(x1 + (x2 - x1) * t0), int(y1 + (y2 - y1) * t0))
+        p1 = (int(x1 + (x2 - x1) * t1), int(y1 + (y2 - y1) * t1))
+        cv2.line(frame, p0, p1, color, thickness)
+
+
+def _physics_points_to_xy(points):
+    result = []
+    for point in points or []:
+        try:
+            result.append((int(round(float(point["x"]))), int(round(float(point["y"])))))
+        except (TypeError, ValueError, KeyError):
+            continue
+    return result
+
+
+def draw_physics_trajectory_overlay(
+    frame,
+    physics_report,
+    *,
+    color=(0, 255, 255),
+    projected_color=(0, 165, 255),
+    thickness=3,
+):
+    """Draw the physics-assisted delivery layer: solid pre-impact fit, dashed projection.
+
+    Returns True when a trusted physics path was drawn.
+    """
+    from Backends.src.physics_trajectory import PROJECTED_PATH_NOTE
+
+    report = physics_report or {}
+    quality = report.get("physics_quality") or "Unavailable"
+    fitted = _physics_points_to_xy(report.get("fitted_delivery_path"))
+
+    if quality not in {"Good", "Partial"} or len(fitted) < 2:
+        if len(report.get("pre_impact_path") or []) >= 5:
+            draw_label(frame, "Trajectory uncertain", 12, 28, (40, 40, 180))
+        return False
+
+    draw_trajectory_lines(frame, fitted, color=color, thickness=thickness)
+
+    projected = _physics_points_to_xy(report.get("projected_path"))
+    if len(projected) >= 2:
+        # Dashed + connected to the last fitted point so the estimate reads as separate.
+        for prev, nxt in zip([fitted[-1]] + projected[:-1], projected):
+            _draw_dashed_line(frame, prev, nxt, projected_color, max(2, thickness - 1))
+        draw_label(frame, PROJECTED_PATH_NOTE, 12, 56, (0, 120, 200))
+
+    impact = report.get("impact") or {}
+    impact_point = impact.get("impact_point")
+    if isinstance(impact_point, dict) and impact.get("impact_detected"):
+        _draw_event_marker(frame, (impact_point.get("x"), impact_point.get("y")), "Impact", (0, 220, 255))
+    return True
+
+
+def add_physics_trajectory_overlay_to_video(video_path, physics_report):
+    """Rewrite a processed delivery video with the physics-assisted trajectory layer.
+
+    No-op unless the physics fit is Good/Partial — never draws a misleading path.
+    """
+    report = physics_report or {}
+    if report.get("physics_quality") not in {"Good", "Partial"}:
+        return Path(video_path)
+    if len(report.get("fitted_delivery_path") or []) < 2:
+        return Path(video_path)
+
+    video_path = Path(video_path)
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        return video_path
+
+    fps = capture.get(cv2.CAP_PROP_FPS) or 25
+    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    temp_path = video_path.with_name(f"{video_path.stem}_physics{video_path.suffix}")
+    writer = cv2.VideoWriter(
+        str(temp_path),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps,
+        (width, height),
+    )
+    if not writer.isOpened():
+        capture.release()
+        return video_path
+
+    while True:
+        success, frame = capture.read()
+        if not success:
+            break
+        draw_physics_trajectory_overlay(frame, report)
+        writer.write(ensure_frame_writer_size(frame, width, height))
+    capture.release()
+    writer.release()
+    temp_path.replace(video_path)
+    return video_path
+
+
 def delivery_overlay_metrics(
     calibration_context,
     *,
