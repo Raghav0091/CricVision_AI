@@ -209,7 +209,9 @@ def create_delivery_recorder_class(recording_state, live_bridge=None):
             bridge = self.live_bridge
             if bridge is not None:
                 with bridge.lock:
-                    bridge.frame_size = (int(image.shape[1]), int(image.shape[0]))
+                    frame_w = int(image.shape[1])
+                    frame_h = int(image.shape[0])
+                    bridge.frame_size = (frame_w, frame_h)
                     stage = bridge.stage
                     box_layout = bridge.box_layout
                     calibration = bridge.calibration
@@ -228,6 +230,14 @@ def create_delivery_recorder_class(recording_state, live_bridge=None):
                     "calibrated_ready",
                     "delivery_capture",
                 }
+
+                # Rebuild boxes for the real camera size only while aligning.
+                if stage == "camera_calibration" and show_boxes:
+                    live_layout = build_fulltrack_style_box_layout((frame_w, frame_h))
+                    if live_layout.get("available"):
+                        box_layout = live_layout
+                        with bridge.lock:
+                            bridge.box_layout = live_layout
 
                 # ponytail: light motion capture only — no YOLO on every live frame.
                 if session_active and stage == "delivery_capture":
@@ -267,15 +277,18 @@ def create_delivery_recorder_class(recording_state, live_bridge=None):
                             else:
                                 bridge.status_message = "Continue bowling"
 
-                if show_boxes or show_geometry:
+                # ponytail: stage picks the drawer — never calibrated overlay before Continue.
+                if stage == "camera_calibration" and show_boxes:
                     display = image.copy()
-                    _draw_live_alignment_overlay(
+                    draw_alignment_overlay(display, box_layout)
+                elif stage in {"calibrated_ready", "delivery_capture"} and (
+                    show_boxes or show_geometry
+                ):
+                    display = image.copy()
+                    draw_calibrated_overlay(
                         display,
+                        calibration if show_geometry else None,
                         box_layout=box_layout,
-                        calibration=calibration if show_geometry else None,
-                        show_alignment_boxes=show_boxes,
-                        show_calibrated_geometry=show_geometry,
-                        stage=stage,
                     )
 
             return av.VideoFrame.from_ndarray(display, format="bgr24")
@@ -283,149 +296,158 @@ def create_delivery_recorder_class(recording_state, live_bridge=None):
     return DeliveryRecorder
 
 
+def _frame_line_thickness(frame, base=2):
+    height, width = frame.shape[:2]
+    return max(base, min(4, int(round(min(width, height) / 360))))
+
+
+def _draw_dashed_rect(frame, x1, y1, x2, y2, color, thickness=2, dash=12, gap=8):
+    """Dashed rectangle; falls back cleanly if segment math fails."""
+    try:
+        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+        segments = [
+            ((x1, y1), (x2, y1)),
+            ((x2, y1), (x2, y2)),
+            ((x2, y2), (x1, y2)),
+            ((x1, y2), (x1, y1)),
+        ]
+        for (sx, sy), (ex, ey) in segments:
+            length = ((ex - sx) ** 2 + (ey - sy) ** 2) ** 0.5
+            if length < 1:
+                continue
+            dx = (ex - sx) / length
+            dy = (ey - sy) / length
+            pos = 0.0
+            draw = True
+            while pos < length:
+                step = dash if draw else gap
+                next_pos = min(pos + step, length)
+                if draw:
+                    p1 = (int(sx + dx * pos), int(sy + dy * pos))
+                    p2 = (int(sx + dx * next_pos), int(sy + dy * next_pos))
+                    cv2.line(frame, p1, p2, color, thickness, cv2.LINE_AA)
+                pos = next_pos
+                draw = not draw
+    except (TypeError, ValueError):
+        cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, thickness)
+
+
 def _draw_white_black_label(frame, text, x, y):
-    """White label background + black text (FullTrack-style box labels)."""
-    y = max(int(y), 22)
-    x = int(x)
-    label_width = max(80, len(text) * 9 + 12)
-    cv2.rectangle(frame, (x, y - 22), (x + label_width, y + 2), (255, 255, 255), -1)
+    """Small white-bg / black-text label that stays inside the frame."""
+    height, width = frame.shape[:2]
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = max(0.35, min(0.52, width / 1600.0))
+    thickness = 1
+    (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+    pad_x, pad_y = 5, 3
+    box_w = text_w + pad_x * 2
+    box_h = text_h + baseline + pad_y * 2
+
+    lx = max(2, min(int(x), width - box_w - 2))
+    # Prefer above the box corner; if clipped, place just inside the top edge.
+    ly = int(y) - box_h - 2
+    if ly < 2:
+        ly = max(2, min(int(y) + 2, height - box_h - 2))
+
+    cv2.rectangle(frame, (lx, ly), (lx + box_w, ly + box_h), (255, 255, 255), -1)
     cv2.putText(
         frame,
         text,
-        (x + 6, y - 5),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.5,
+        (lx + pad_x, ly + box_h - pad_y - baseline),
+        font,
+        font_scale,
         (0, 0, 0),
-        1,
+        thickness,
         cv2.LINE_AA,
     )
 
 
-def _draw_instruction_banner(frame, lines):
-    """Top instruction banner drawn on the live frame."""
-    if not lines:
-        return
-    height, width = frame.shape[:2]
-    banner_h = 28 + 22 * len(lines)
-    overlay = frame.copy()
-    cv2.rectangle(overlay, (0, 0), (width, banner_h), (0, 0, 0), -1)
-    cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
-    for index, text in enumerate(lines):
-        cv2.putText(
-            frame,
-            text,
-            (12, 24 + index * 22),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            (255, 255, 255),
-            1,
-            cv2.LINE_AA,
-        )
-
-
-def _draw_live_alignment_overlay(
-    frame,
-    *,
-    box_layout=None,
-    calibration=None,
-    show_alignment_boxes=True,
-    show_calibrated_geometry=False,
-    stage="camera_calibration",
-):
-    """Draw FullTrack-style red stump boxes + optional blue stump line / corridor."""
-    drawn = False
+def _draw_stump_boxes(frame, box_layout=None, calibration=None):
+    """Draw red dashed stump boxes + small labels only."""
     layout = box_layout if isinstance(box_layout, dict) else {}
     report = calibration if isinstance(calibration, dict) else {}
-
     striker = layout.get("striker_stumps_box") or report.get("striker_stumps_box") or {}
     non_striker = (
         layout.get("non_striker_stumps_box") or report.get("non_striker_stumps_box") or {}
     )
+    thickness = _frame_line_thickness(frame, base=2)
+    drawn = False
 
     try:
-        if show_alignment_boxes and all(k in striker for k in ("x1", "y1", "x2", "y2")):
+        if all(k in striker for k in ("x1", "y1", "x2", "y2")):
             x1, y1, x2, y2 = (
                 int(striker["x1"]),
                 int(striker["y1"]),
                 int(striker["x2"]),
                 int(striker["y2"]),
             )
-            # ponytail: solid red is fine for v1; dashed is harder in OpenCV.
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+            _draw_dashed_rect(frame, x1, y1, x2, y2, (0, 0, 255), thickness)
             _draw_white_black_label(frame, "Striker Stumps", x1, y1)
             drawn = True
-        if show_alignment_boxes and all(k in non_striker for k in ("x1", "y1", "x2", "y2")):
+        if all(k in non_striker for k in ("x1", "y1", "x2", "y2")):
             x1, y1, x2, y2 = (
                 int(non_striker["x1"]),
                 int(non_striker["y1"]),
                 int(non_striker["x2"]),
                 int(non_striker["y2"]),
             )
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+            _draw_dashed_rect(frame, x1, y1, x2, y2, (0, 0, 255), thickness)
             _draw_white_black_label(frame, "Non-Striker Stumps", x1, y1)
             drawn = True
     except (TypeError, ValueError):
         pass
+    return drawn
 
-    # ponytail: never draw blue stump line / corridor during camera_calibration alignment.
-    allow_geometry = (
-        show_calibrated_geometry
-        and stage in {"calibrated_ready", "delivery_capture"}
-        and report.get("available")
-    )
-    if allow_geometry:
-        corridor = report.get("pitch_corridor") or []
-        points = []
-        for point in corridor:
-            if isinstance(point, dict) and "x" in point and "y" in point:
-                try:
-                    points.append((int(point["x"]), int(point["y"])))
-                except (TypeError, ValueError):
-                    continue
-            elif isinstance(point, (list, tuple)) and len(point) >= 2:
-                try:
-                    points.append((int(point[0]), int(point[1])))
-                except (TypeError, ValueError):
-                    continue
-        if len(points) >= 3:
-            for index, point in enumerate(points):
-                cv2.line(frame, point, points[(index + 1) % len(points)], (255, 180, 80), 2)
+
+def draw_alignment_overlay(frame, box_layout):
+    """Alignment stage: red boxes + small labels only. No blue line / in-frame text."""
+    return _draw_stump_boxes(frame, box_layout=box_layout)
+
+
+def draw_calibrated_overlay(frame, calibration, box_layout=None):
+    """After Continue: red boxes + blue stump line / optional corridor. No giant labels."""
+    drawn = _draw_stump_boxes(frame, box_layout=box_layout, calibration=calibration)
+    report = calibration if isinstance(calibration, dict) else {}
+    if not report.get("available"):
+        return drawn
+
+    thickness = _frame_line_thickness(frame, base=2)
+    corridor = report.get("pitch_corridor") or []
+    points = []
+    for point in corridor:
+        if isinstance(point, dict) and "x" in point and "y" in point:
+            try:
+                points.append((int(point["x"]), int(point["y"])))
+            except (TypeError, ValueError):
+                continue
+        elif isinstance(point, (list, tuple)) and len(point) >= 2:
+            try:
+                points.append((int(point[0]), int(point[1])))
+            except (TypeError, ValueError):
+                continue
+    if len(points) >= 3:
+        for index, point in enumerate(points):
+            cv2.line(
+                frame,
+                point,
+                points[(index + 1) % len(points)],
+                (255, 180, 80),
+                max(1, thickness - 1),
+                cv2.LINE_AA,
+            )
+        drawn = True
+
+    stump_line = report.get("stump_line") or {}
+    start = stump_line.get("start") or {}
+    end = stump_line.get("end") or {}
+    try:
+        if "x" in start and "y" in start and "x" in end and "y" in end:
+            p1 = (int(start["x"]), int(start["y"]))
+            p2 = (int(end["x"]), int(end["y"]))
+            cv2.line(frame, p1, p2, (255, 0, 0), thickness + 1, cv2.LINE_AA)
             drawn = True
-
-        stump_line = report.get("stump_line") or {}
-        start = stump_line.get("start") or {}
-        end = stump_line.get("end") or {}
-        try:
-            if "x" in start and "y" in start and "x" in end and "y" in end:
-                p1 = (int(start["x"]), int(start["y"]))
-                p2 = (int(end["x"]), int(end["y"]))
-                cv2.line(frame, p1, p2, (255, 0, 0), 3)
-                drawn = True
-        except (TypeError, ValueError):
-            pass
-
-        draw_label(
-            frame,
-            "Live calibration: estimated single-camera geometry",
-            12,
-            max(frame.shape[0] - 18, 28),
-            (180, 80, 0),
-        )
-
-    if stage == "camera_calibration":
-        _draw_instruction_banner(
-            frame,
-            [
-                "Fit the stumps completely in the boxes, then press Continue.",
-                "Move the camera/tripod or adjust zoom if needed.",
-            ],
-        )
-    elif stage in {"calibrated_ready", "delivery_capture"} and drawn:
-        _draw_instruction_banner(
-            frame,
-            ["Live calibration active — estimated single-camera geometry only."],
-        )
-
+    except (TypeError, ValueError):
+        pass
     return drawn
 
 
@@ -455,7 +477,6 @@ def render_live_camera_setup_guidelines():
 - Camera behind non-striker stumps
 - Not too far back; higher is better
 - Do not block the camera
-- Bowl a few balls before checking analysis
 """
     )
 
@@ -465,20 +486,12 @@ def _set_live_session_stage(stage):
 
 
 def render_live_stage_setup(live_bridge):
-    """Stage: setup — guidelines + start button (camera not required yet)."""
-    from Backends.src.ui.theme import render_step_header
-
-    render_step_header(
-        "Stage 1",
-        "Setup",
-        "Prepare the camera, then start live delivery analysis.",
+    """Stage: setup — short guide + one start button (camera not required yet)."""
+    st.caption(
+        "Set up your camera behind the non-striker stumps, then start live delivery analysis."
     )
-    with st.expander("Camera Setup Guidelines", expanded=True):
+    with st.expander("Setup guide", expanded=True):
         render_live_camera_setup_guidelines()
-    st.info(
-        "Press Start to open the camera with fixed stump boxes. "
-        "Move the camera/tripod until both sets of stumps fit, then Continue."
-    )
     if st.button("Start Live Delivery Analysis", type="primary", use_container_width=True):
         live_bridge.reset_capture()
         st.session_state.live_camera_active = True
@@ -488,44 +501,46 @@ def render_live_stage_setup(live_bridge):
         st.session_state.live_calibration_payload = None
         st.session_state.live_auto_session_active = False
         _set_live_session_stage("camera_calibration")
-        st.session_state.live_status_message = (
-            "Align the stumps inside the red boxes, then press Continue."
-        )
         st.rerun()
+    with st.expander("Advanced settings", expanded=False):
+        st.caption("Detection model and presets are available after calibration.")
 
 
-def render_live_stage_camera_calibration(live_bridge, frame_width, frame_height):
-    """Stage: camera_calibration — align camera to fixed boxes."""
-    from Backends.src.ui.theme import render_step_header, render_status_row
-
-    layout = _ensure_alignment_box_layout(frame_width, frame_height)
-    render_step_header(
-        "Stage 2",
-        "Camera Calibration",
-        "Fit both stump sets inside the overlay boxes, then continue.",
-    )
-    render_status_row([("Calibrating", "warning"), ("Align stumps to boxes", "gold")])
-    st.caption(
-        "Fit the stumps completely in the boxes, then press Continue. "
+def render_live_calibration_instructions():
+    """Streamlit instruction card above the camera (not drawn inside the video)."""
+    st.info(
+        "**Fit both stump sets inside the boxes, then press Continue.**  \n"
         "Move the camera/tripod or adjust zoom if needed."
     )
-    if not layout.get("available"):
-        st.warning("Could not build alignment boxes for this frame size.")
 
+
+def render_live_stage_camera_calibration_actions(live_bridge, frame_width, frame_height, layout):
+    """Continue / Cancel below the camera during alignment."""
     cols = st.columns(2)
     if cols[0].button("Continue", type="primary", use_container_width=True):
+        snap = live_bridge.snapshot()
+        live_w, live_h = snap.get("frame_size") or (frame_width, frame_height)
+        live_w, live_h = int(live_w), int(live_h)
+        # Prefer the webrtc-synced layout so Continue matches what the user saw.
+        with live_bridge.lock:
+            live_layout = live_bridge.box_layout
+        if not isinstance(live_layout, dict) or not live_layout.get("available"):
+            live_layout = build_fulltrack_style_box_layout((live_w, live_h))
+        if not live_layout.get("available"):
+            live_layout = layout
+        st.session_state.live_alignment_box_layout = live_layout
+        st.session_state.live_alignment_frame_size = (live_w, live_h)
         report = build_live_alignment_report(
-            layout,
-            frame_size=(frame_width, frame_height),
+            live_layout,
+            frame_size=(live_w, live_h),
         )
         calibration = report.get("calibration") or build_calibration_from_alignment_boxes(
-            layout,
-            frame_size=(frame_width, frame_height),
+            live_layout,
+            frame_size=(live_w, live_h),
         )
         st.session_state.live_alignment_report = report
         st.session_state.live_calibration_payload = calibration
         _set_live_session_stage("calibrated_ready")
-        st.session_state.live_status_message = "Calibration Ready"
         st.rerun()
     if cols[1].button("Cancel / Back", use_container_width=True):
         live_bridge.reset_capture()
@@ -533,41 +548,15 @@ def render_live_stage_camera_calibration(live_bridge, frame_width, frame_height)
         st.session_state.live_alignment_report = None
         st.session_state.live_calibration_payload = None
         _set_live_session_stage("setup")
-        st.session_state.live_status_message = "Returned to setup."
         st.rerun()
-    return layout
 
 
-def render_live_stage_calibrated_ready(live_bridge):
-    """Stage: calibrated_ready — show stump line / corridor status, then start capture."""
-    from Backends.src.ui.theme import render_step_header, render_status_row
-
+def render_live_stage_calibrated_ready_panel(live_bridge):
+    """Streamlit status below camera after Continue — no giant in-frame labels."""
     report = st.session_state.get("live_alignment_report") or {}
     calibration = st.session_state.get("live_calibration_payload") or report.get("calibration") or {}
-    render_step_header(
-        "Stage 3",
-        "Live Capture",
-        "Calibration is ready. Start capture when you are set to bowl.",
-    )
-    render_status_row(
-        [
-            ("Calibration: Ready", "success"),
-            (f"Quality: {report.get('quality', 'Unavailable')}", "gold"),
-        ]
-    )
-    st.success("Estimated single-camera stump line created")
-    metric_cols = st.columns(3)
-    metric_cols[0].metric("Calibration Quality", report.get("quality", "Unavailable"))
-    metric_cols[1].metric(
-        "Stump Line Available",
-        "Yes" if report.get("stump_line_available") else "No",
-    )
-    metric_cols[2].metric(
-        "Pitch Corridor Available",
-        "Yes" if report.get("pitch_corridor_available") else "No",
-    )
-    st.caption("Estimated single-camera geometry only — not official LBW/DRS.")
-
+    st.success("**Calibration Ready**")
+    st.caption("Estimated single-camera stump line created.")
     cols = st.columns(2)
     if cols[0].button("Start Bowling / Start Capture", type="primary", use_container_width=True):
         live_bridge.reset_capture()
@@ -577,7 +566,6 @@ def render_live_stage_calibrated_ready(live_bridge):
         st.rerun()
     if cols[1].button("Back to Calibration", use_container_width=True):
         st.session_state.live_auto_session_active = False
-        # Clear calibrated geometry so alignment stage shows red boxes only.
         st.session_state.live_alignment_report = None
         st.session_state.live_calibration_payload = None
         _set_live_session_stage("camera_calibration")
@@ -1713,17 +1701,25 @@ def show_live_session_page():
         status = "Setup"
         status_tone = "default"
 
-    render_page_header(
-        "Live Bowling Session",
-        "Align the camera to fixed stump boxes, capture deliveries live, then review results.",
-        badge=status,
-    )
-    render_status_row(
-        [
-            (f"Stage: {status}", status_tone),
-            ("Live preview stays clean until analysis", "gold"),
-        ]
-    )
+    # ponytail: calibration stages stay compact — skip the heavy page chrome.
+    if stage == "setup":
+        render_page_header(
+            "Live Bowling Session",
+            "Set up the camera, align stump boxes, then capture deliveries.",
+            badge=status,
+        )
+    elif stage not in {"camera_calibration", "calibrated_ready"}:
+        render_page_header(
+            "Live Bowling Session",
+            "Align the camera to fixed stump boxes, capture deliveries live, then review results.",
+            badge=status,
+        )
+        render_status_row(
+            [
+                (f"Stage: {status}", status_tone),
+                ("Live preview stays clean until analysis", "gold"),
+            ]
+        )
 
     model_options = get_live_model_options()
     analysis_complete = (
@@ -1814,18 +1810,21 @@ def show_live_session_page():
     if stage == "setup":
         render_live_stage_setup(live_bridge)
     elif stage == "camera_calibration":
-        box_layout = render_live_stage_camera_calibration(
-            live_bridge,
-            frame_width,
-            frame_height,
-        )
+        st.markdown("### Live Bowling Session")
+        box_layout = _ensure_alignment_box_layout(frame_width, frame_height)
         show_alignment_boxes = True
-        # Alignment-only: never feed stump-line calibration into the webrtc overlay.
         calibration_payload = None
         show_calibrated_geometry = False
+        if not box_layout.get("available"):
+            st.warning("Could not build alignment boxes for this frame size.")
+        render_live_calibration_instructions()
     elif stage == "calibrated_ready":
+        st.markdown("### Live Bowling Session")
         box_layout = _ensure_alignment_box_layout(frame_width, frame_height)
-        calibration_payload = render_live_stage_calibrated_ready(live_bridge)
+        calibration_payload = (
+            st.session_state.get("live_calibration_payload")
+            or (st.session_state.get("live_alignment_report") or {}).get("calibration")
+        )
         show_alignment_boxes = True
         show_calibrated_geometry = True
     elif stage == "delivery_capture":
@@ -1853,40 +1852,9 @@ def show_live_session_page():
         st.rerun()
 
     if camera_needed:
-        # Defaults when Field Setup expander is collapsed / not shown this stage
         field_setup = st.session_state.get("current_field_setup")
-
-        # Keep calibration stage focused: only Continue / Cancel + camera feed.
-        show_setup_panels = stage in {"calibrated_ready", "delivery_capture"}
-        if show_setup_panels:
-            with st.expander("Field Setup", expanded=False):
-                field_setup = render_field_setup_card(
-                    key_prefix="live_session_field",
-                    compact=True,
-                    default_preset="Balanced",
-                )
-
-            with st.expander("Advanced Settings", expanded=False):
-                st.selectbox(
-                    "Detection model",
-                    list(model_options.keys()),
-                    key="live_session_model",
-                )
-                selected_model_name = st.session_state["live_session_model"]
-                selected_model = model_options[selected_model_name]
-                selected_model_path = selected_model["path"]
-                selected_model_key = selected_model.get("model_key")
-                status_path = get_model_path(selected_model_key) if selected_model_key else selected_model_path
-                if not selected_model.get("ensemble", False) and status_path is not None and not status_path.exists():
-                    st.warning(f"Model not found: {status_path}")
-
-                st.selectbox(
-                    "Detection preset",
-                    list(DETECTION_PRESETS.keys()),
-                    index=1,
-                    key="live_session_preset",
-                )
-                st.checkbox("Show pitch ROI overlay", value=False, key="live_session_show_roi")
+        # ponytail: hide field/advanced/manual capture during alignment — camera only.
+        show_setup_panels = stage == "delivery_capture"
 
         selected_model_name = st.session_state.get(
             "live_session_model",
@@ -1946,8 +1914,55 @@ def show_live_session_page():
         if webrtc_context is not None:
             recorder = webrtc_context.video_processor
 
-        # Manual single-delivery recording kept as secondary workflow.
+        # Actions / status sit under the camera for mobile-friendly calibration.
+        if stage == "camera_calibration":
+            render_live_stage_camera_calibration_actions(
+                live_bridge,
+                frame_width,
+                frame_height,
+                box_layout,
+            )
+        elif stage == "calibrated_ready":
+            calibration_payload = render_live_stage_calibrated_ready_panel(live_bridge)
+            live_bridge.configure(
+                stage=stage,
+                box_layout=box_layout,
+                calibration=calibration_payload,
+                show_alignment_boxes=True,
+                show_calibrated_geometry=True,
+                live_session_active=False,
+            )
+
         if show_setup_panels:
+            with st.expander("Field Setup", expanded=False):
+                field_setup = render_field_setup_card(
+                    key_prefix="live_session_field",
+                    compact=True,
+                    default_preset="Balanced",
+                )
+
+            with st.expander("Advanced Settings", expanded=False):
+                st.selectbox(
+                    "Detection model",
+                    list(model_options.keys()),
+                    key="live_session_model",
+                )
+                selected_model_name = st.session_state["live_session_model"]
+                selected_model = model_options[selected_model_name]
+                selected_model_path = selected_model["path"]
+                selected_model_key = selected_model.get("model_key")
+                status_path = get_model_path(selected_model_key) if selected_model_key else selected_model_path
+                if not selected_model.get("ensemble", False) and status_path is not None and not status_path.exists():
+                    st.warning(f"Model not found: {status_path}")
+
+                st.selectbox(
+                    "Detection preset",
+                    list(DETECTION_PRESETS.keys()),
+                    index=1,
+                    key="live_session_preset",
+                )
+                st.checkbox("Show pitch ROI overlay", value=False, key="live_session_show_roi")
+
             with st.expander("Manual single-delivery recording (optional)", expanded=False):
                 if not recording_state.recording:
                     start_clicked = st.button(
@@ -2013,9 +2028,9 @@ def show_live_session_page():
                     st.session_state.live_status_message = "Recorded delivery cleared."
                     st.rerun()
 
-        if stage == "delivery_capture" and st.session_state.live_last_result:
-            with st.expander("Recent Delivery Summary", expanded=False):
-                show_analysis_output(st.session_state.live_last_result)
+            if st.session_state.live_last_result:
+                with st.expander("Recent Delivery Summary", expanded=False):
+                    show_analysis_output(st.session_state.live_last_result)
     else:
         live_bridge.configure(
             stage=stage,

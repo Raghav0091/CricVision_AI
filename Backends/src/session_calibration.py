@@ -448,26 +448,32 @@ def build_fulltrack_style_box_layout(frame_size: Any) -> dict[str, Any]:
         return _unavailable_alignment_layout(notes)
 
     width, height = size
-    # ponytail: percentage layout works for vertical phone and landscape webcam.
-    # Striker = upper/middle (far); non-striker = lower/middle and larger (near).
-    striker = _normalize_box(
-        {
-            "x1": width * 0.40,
-            "y1": height * 0.18,
-            "x2": width * 0.60,
-            "y2": height * 0.36,
-        },
-        frame_size=size,
-    )
-    non_striker = _normalize_box(
-        {
-            "x1": width * 0.34,
-            "y1": height * 0.68,
-            "x2": width * 0.66,
-            "y2": height * 0.92,
-        },
-        frame_size=size,
-    )
+    portrait = height > width
+    # ponytail: phone portrait vs landscape webcam — keep boxes centred, never full-frame.
+    if portrait:
+        striker_w, striker_h, striker_cy = 0.32, 0.25, 0.30
+        non_w, non_h, non_cy = 0.62, 0.30, 0.72
+    else:
+        striker_w, striker_h, striker_cy = 0.22, 0.24, 0.28
+        non_w, non_h, non_cy = 0.36, 0.28, 0.74
+
+    def _centered_box(box_w_frac: float, box_h_frac: float, cy_frac: float) -> dict[str, float] | None:
+        box_w = width * box_w_frac
+        box_h = height * box_h_frac
+        cx = width * 0.5
+        cy = height * cy_frac
+        return _normalize_box(
+            {
+                "x1": cx - box_w / 2.0,
+                "y1": cy - box_h / 2.0,
+                "x2": cx + box_w / 2.0,
+                "y2": cy + box_h / 2.0,
+            },
+            frame_size=size,
+        )
+
+    striker = _centered_box(striker_w, striker_h, striker_cy)
+    non_striker = _centered_box(non_w, non_h, non_cy)
     if striker is None or non_striker is None:
         notes.append("Could not build FullTrack-style boxes for this frame size.")
         return _unavailable_alignment_layout(notes)
