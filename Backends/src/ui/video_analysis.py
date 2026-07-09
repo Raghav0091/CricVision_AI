@@ -1944,25 +1944,42 @@ def render_ball_candidate_reliability_section(
     debug_report = build_ball_candidate_debug_report(reliable_track)
 
     st.subheader("Ball Candidate Reliability")
-    metric_cols = st.columns(6)
+    metric_cols = st.columns(7)
     metric_cols[0].metric("Track Quality", debug_report["track_quality"])
     metric_cols[1].metric("Selected Ball Points", debug_report["selected_points"])
     metric_cols[2].metric("Rejected Candidates", debug_report["rejected_candidates"])
-    metric_cols[3].metric("Missing Frames", len(debug_report["missing_frames"]))
-    metric_cols[4].metric("Frames With Candidates", debug_report["frames_with_candidates"])
-    metric_cols[5].metric(
+    metric_cols[3].metric(
+        "Rejected Static", debug_report.get("rejected_static_candidates") or 0
+    )
+    metric_cols[4].metric("Missing Frames", len(debug_report["missing_frames"]))
+    metric_cols[5].metric("Frames With Candidates", debug_report["frames_with_candidates"])
+    metric_cols[6].metric(
         "Path Source", physics_path_source(physics_report, path_validity, reliable_track)
     )
     st.caption(
-        "Cleaner selected path for physics/3D only — raw detections stay visible in "
-        "Raw Detection Preview and Detection Health."
+        "Cleaner selected path for physics/3D only — prefers a moving delivery ball "
+        "over static ground balls; raw detections stay in Raw Detection Preview."
     )
+    if debug_report.get("notes"):
+        # ponytail: surface a few motion/static notes without redesigning the section.
+        highlight = [
+            note
+            for note in debug_report["notes"]
+            if note.startswith("Rejected candidate:")
+            or note.startswith("Selected candidate:")
+            or note.startswith("No moving")
+            or note.startswith("No reliable moving")
+        ][:4]
+        for note in highlight:
+            st.caption(note)
     with st.expander("Ball Candidate Debug Details", expanded=False):
         st.json(
             {
                 **debug_report,
                 "track_points": reliable_track.get("track_points") or [],
                 "rejected_candidate_details": reliable_track.get("rejected_candidates") or [],
+                "rejected_static_details": reliable_track.get("rejected_static_candidates") or [],
+                "static_ball_locations": reliable_track.get("static_ball_locations") or [],
             }
         )
     return reliable_track
