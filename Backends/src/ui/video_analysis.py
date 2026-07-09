@@ -1737,7 +1737,7 @@ def prepare_result_path_validity(result, trajectory_points=None):
     return prepare_safe_trajectory_for_draw(
         points,
         frame_size={"width": frame_width, "height": frame_height},
-        pitch_roi=extract_pitch_roi_from_result(result),
+        pitch_roi=resolve_pitch_roi_for_result(result),
         stump_context=result.get("calibration_context") or {},
         impact_info=result.get("impact_info"),
     )
@@ -1790,11 +1790,25 @@ def render_trajectory_validity_section(result, prepared=None):
 
 
 def resolve_pitch_roi_for_result(result):
-    """Prefer the manual pitch ROI stored on the result over auto-detected geometry."""
+    """Resolve pitch ROI with a clear priority chain.
+
+    Priority (first available wins):
+    1. Manual Pitch ROI (explicit rectangle)
+    2. Session Calibration corridor (FullTrack-style stump boxes)
+    3. Auto-detected pitch corridor / analysis ROI
+    """
     result = result or {}
     manual = result.get("manual_pitch_roi")
     if isinstance(manual, dict) and manual.get("available"):
         return manual
+    # ponytail: session corridor feeds ball tracker / physics when manual ROI is off.
+    session = result.get("session_calibration")
+    if isinstance(session, dict) and session.get("available"):
+        from Backends.src.session_calibration import session_calibration_as_pitch_roi
+
+        session_roi = session_calibration_as_pitch_roi(session)
+        if session_roi is not None:
+            return session_roi
     return extract_pitch_roi_from_result(result)
 
 
@@ -1831,9 +1845,16 @@ def build_physics_trajectory_report_from_result(result, reliable_track=None):
     result = result or {}
     manual_roi = result.get("manual_pitch_roi")
     manual_roi_active = isinstance(manual_roi, dict) and manual_roi.get("available")
+    session = result.get("session_calibration")
+    session_active = isinstance(session, dict) and session.get("available")
     cached = result.get("physics_trajectory")
-    # ponytail: cached report was computed without the manual ROI; recompute when it is on.
-    if not manual_roi_active and isinstance(cached, dict) and cached.get("physics_quality"):
+    # ponytail: cached report may predate manual/session ROI; recompute when either is on.
+    if (
+        not manual_roi_active
+        and not session_active
+        and isinstance(cached, dict)
+        and cached.get("physics_quality")
+    ):
         return cached
 
     from Backends.src.physics_trajectory import build_physics_trajectory_report
@@ -1921,11 +1942,202 @@ def render_manual_pitch_calibration_section(result):
     result["manual_pitch_roi"] = manual_roi
     if manual_roi is not None:
         st.caption("Pitch ROI available: Yes (manual rectangle).")
+    elif isinstance(result.get("session_calibration"), dict) and result["session_calibration"].get("available"):
+        st.caption("Pitch ROI available: Yes (session calibration corridor).")
     elif extract_pitch_roi_from_result(result) is not None:
         st.caption("Pitch ROI available: Yes (auto-detected pitch corridor).")
     else:
         st.caption("Pitch ROI available: No.")
     return manual_roi
+
+
+def _session_calibration_preview_frame(uploaded_video=None, result=None):
+    """Grab a light preview frame for session calibration boxes."""
+    if result is not None:
+        for key in ("preview_frame", "first_frame", "sample_frame"):
+            frame = result.get(key)
+            if frame is not None:
+                return frame
+    if uploaded_video is None:
+        return None
+    try:
+        uploaded_video.seek(0)
+        frame = extract_first_video_frame(uploaded_video)
+        uploaded_video.seek(0)
+        return frame
+    except Exception:
+        try:
+            uploaded_video.seek(0)
+        except Exception:
+            pass
+        return None
+
+
+def _draw_session_calibration_preview(frame, calibration):
+    """Draw stump boxes / stump line on a BGR preview copy for Streamlit."""
+    if frame is None:
+        return None
+    preview = frame.copy()
+    from Backends.src.video_pipeline.annotation_writer import draw_session_calibration_overlay
+
+    draw_session_calibration_overlay(preview, calibration)
+    return preview
+
+
+def render_session_calibration_input_section(uploaded_video):
+    """FullTrack-style session calibration: near/far stump boxes before analysis."""
+    from Backends.src.session_calibration import (
+        build_calibration_from_boxes,
+        build_default_stump_box_layout,
+    )
+
+    st.subheader("Session Calibration")
+    st.markdown(
+        """
+- Use tripod
+- Keep 6 stumps visible
+- Camera behind non-striker stumps
+- Camera not too far back
+- Camera higher is better
+- Do not block camera
+"""
+    )
+    enabled = st.checkbox(
+        "Enable Session Calibration",
+        value=False,
+        key="video_analysis_session_calibration_enabled",
+        help=(
+            "Place near/far stump boxes to estimate a pitch corridor for ball tracking. "
+            "Estimated single-camera geometry only — not official LBW/DRS."
+        ),
+    )
+    if not enabled:
+        report = {
+            "available": False,
+            "near_stumps_box": None,
+            "far_stumps_box": None,
+            "stump_line": None,
+            "pitch_corridor": [],
+            "quality": "Unavailable",
+            "notes": ["Session calibration disabled."],
+        }
+        st.session_state.video_analysis_session_calibration = report
+        return report
+
+    frame = _session_calibration_preview_frame(uploaded_video=uploaded_video)
+    frame_width, frame_height = 1280, 720
+    if frame is not None:
+        frame_height, frame_width = frame.shape[:2]
+
+    defaults = build_default_stump_box_layout((frame_width, frame_height))
+    near_default = defaults.get("near_stumps_box") or {
+        "x1": int(frame_width * 0.42),
+        "y1": int(frame_height * 0.72),
+        "x2": int(frame_width * 0.58),
+        "y2": int(frame_height * 0.92),
+    }
+    far_default = defaults.get("far_stumps_box") or {
+        "x1": int(frame_width * 0.45),
+        "y1": int(frame_height * 0.22),
+        "x2": int(frame_width * 0.55),
+        "y2": int(frame_height * 0.38),
+    }
+
+    st.caption(
+        f"Adjust boxes so near (non-striker) and far (striker) stumps sit inside them. "
+        f"Frame size: {frame_width} x {frame_height}."
+    )
+    st.markdown("**Near / non-striker stumps box**")
+    near_cols = st.columns(4)
+    near_box = {
+        "x1": near_cols[0].number_input(
+            "Near x1", min_value=0, max_value=frame_width, value=int(near_default["x1"]),
+            step=5, key="session_cal_near_x1",
+        ),
+        "y1": near_cols[1].number_input(
+            "Near y1", min_value=0, max_value=frame_height, value=int(near_default["y1"]),
+            step=5, key="session_cal_near_y1",
+        ),
+        "x2": near_cols[2].number_input(
+            "Near x2", min_value=0, max_value=frame_width, value=int(near_default["x2"]),
+            step=5, key="session_cal_near_x2",
+        ),
+        "y2": near_cols[3].number_input(
+            "Near y2", min_value=0, max_value=frame_height, value=int(near_default["y2"]),
+            step=5, key="session_cal_near_y2",
+        ),
+    }
+    st.markdown("**Far / striker stumps box**")
+    far_cols = st.columns(4)
+    far_box = {
+        "x1": far_cols[0].number_input(
+            "Far x1", min_value=0, max_value=frame_width, value=int(far_default["x1"]),
+            step=5, key="session_cal_far_x1",
+        ),
+        "y1": far_cols[1].number_input(
+            "Far y1", min_value=0, max_value=frame_height, value=int(far_default["y1"]),
+            step=5, key="session_cal_far_y1",
+        ),
+        "x2": far_cols[2].number_input(
+            "Far x2", min_value=0, max_value=frame_width, value=int(far_default["x2"]),
+            step=5, key="session_cal_far_x2",
+        ),
+        "y2": far_cols[3].number_input(
+            "Far y2", min_value=0, max_value=frame_height, value=int(far_default["y2"]),
+            step=5, key="session_cal_far_y2",
+        ),
+    }
+
+    report = build_calibration_from_boxes(
+        {"near_stumps_box": near_box, "far_stumps_box": far_box},
+        frame_size=(frame_width, frame_height),
+    )
+
+    if frame is not None:
+        preview = _draw_session_calibration_preview(frame, report)
+        if preview is not None:
+            st.image(
+                cv2.cvtColor(preview, cv2.COLOR_BGR2RGB),
+                caption="Session calibration preview (estimated geometry)",
+                use_container_width=True,
+            )
+    else:
+        st.caption("Upload a video to preview stump boxes on a frame.")
+
+    metric_cols = st.columns(3)
+    metric_cols[0].metric("Calibration Quality", report.get("quality", "Unavailable"))
+    metric_cols[1].metric(
+        "Stump Line Available", "Yes" if report.get("stump_line") else "No"
+    )
+    metric_cols[2].metric(
+        "Pitch Corridor Available",
+        "Yes" if report.get("pitch_corridor") else "No",
+    )
+    with st.expander("Session Calibration Details", expanded=False):
+        st.json(report)
+
+    st.session_state.video_analysis_session_calibration = report
+    return report
+
+
+def render_session_calibration_result_section(result):
+    """Show stored session calibration on an analysis result."""
+    st.subheader("Session Calibration")
+    report = (result or {}).get("session_calibration") or {
+        "available": False,
+        "quality": "Unavailable",
+        "notes": ["No session calibration stored for this analysis."],
+    }
+    metric_cols = st.columns(3)
+    metric_cols[0].metric("Calibration Quality", report.get("quality", "Unavailable"))
+    metric_cols[1].metric("Stump Line Available", "Yes" if report.get("stump_line") else "No")
+    metric_cols[2].metric(
+        "Pitch Corridor Available",
+        "Yes" if report.get("pitch_corridor") else "No",
+    )
+    with st.expander("Session Calibration Details", expanded=False):
+        st.json(report)
+    return report
 
 
 def _default_replay_point_values(frame_width, frame_height):
@@ -2173,7 +2385,7 @@ def build_delivery_observer_payload(result):
     selected = select_best_cricket_path(
         raw_candidates,
         frame_size={"width": frame_width, "height": frame_height},
-        pitch_roi=extract_pitch_roi_from_result(result),
+        pitch_roi=resolve_pitch_roi_for_result(result),
         stump_context=result.get("calibration_context") or {},
     )
     fitted = fit_observer_path(
@@ -2334,8 +2546,9 @@ def render_3d_replay_section(
                 path_quality = observer_quality
 
     st.caption(f"3D Replay path source: {source_text}")
+    session_calibration = (result or {}).get("session_calibration") or {}
     replay_calibration = (result or {}).get("replay_calibration") or {}
-    if replay_calibration.get("available"):
+    if session_calibration.get("available") or replay_calibration.get("available"):
         st.caption("3D Replay: estimated from calibrated stump line")
     else:
         st.caption("3D Replay: estimated from current validated tracker path")
@@ -2382,7 +2595,7 @@ def render_3d_replay_section(
         calibration_context = build_stump_calibration_context(
             frame_size={"width": frame_width, "height": frame_height},
             stump_detections=extract_stump_detections_from_result(result),
-            pitch_roi=extract_pitch_roi_from_result(result),
+            pitch_roi=resolve_pitch_roi_for_result(result),
             camera_height_ft=camera_height_ft,
             camera_view=camera_view,
         )
@@ -2494,6 +2707,7 @@ def show_batting_analysis_results(result):
 
     render_detection_health_section(result)
     path_validity = render_trajectory_validity_section(result)
+    render_session_calibration_result_section(result)
     render_manual_pitch_calibration_section(result)
     render_replay_calibration_result_section(result)
     reliable_track = build_reliable_track_from_result(result)
@@ -2527,6 +2741,7 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
 
     render_detection_health_section(result)
     path_validity = render_trajectory_validity_section(result)
+    render_session_calibration_result_section(result)
     render_manual_pitch_calibration_section(result)
     render_replay_calibration_result_section(result)
     reliable_track = build_reliable_track_from_result(result)
@@ -2698,6 +2913,7 @@ def show_video_analysis_page():
     )
 
     replay_calibration_report = render_replay_calibration_input_section(uploaded_video)
+    session_calibration_report = render_session_calibration_input_section(uploaded_video)
 
     with st.expander("Raw Detection Preview", expanded=False):
         st.caption(
@@ -2844,6 +3060,10 @@ def show_video_analysis_page():
     replay_calibration_report = st.session_state.get(
         "video_analysis_replay_calibration_report",
         replay_calibration_report,
+    )
+    session_calibration_report = st.session_state.get(
+        "video_analysis_session_calibration",
+        session_calibration_report,
     )
 
     if analysis_mode == "Batting Analysis":
@@ -3024,11 +3244,21 @@ def show_video_analysis_page():
             st.session_state.video_analysis_result = None
         else:
             result["replay_calibration"] = replay_calibration_report
+            result["session_calibration"] = session_calibration_report
             result["raw_output_path"] = (
                 str(raw_output_path)
                 if result.get("processed_video_generated") and raw_output_path.exists()
                 else None
             )
+            if (
+                result.get("processed_video_generated")
+                and raw_output_path.exists()
+                and session_calibration_report.get("available")
+            ):
+                shared_annotations.add_session_calibration_overlay_to_video(
+                    raw_output_path,
+                    session_calibration_report,
+                )
             if (
                 result.get("processed_video_generated")
                 and raw_output_path.exists()

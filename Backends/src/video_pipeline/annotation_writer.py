@@ -733,6 +733,117 @@ def add_delivery_trajectory_overlay_to_video(
     return video_path
 
 
+def draw_session_calibration_overlay(frame, calibration):
+    """Draw FullTrack-style session calibration boxes, stump line, and corridor.
+
+    Estimated single-camera geometry only — never official LBW/DRS.
+    """
+    report = calibration or {}
+    if not report.get("available"):
+        return False
+
+    drawn = False
+    near = report.get("near_stumps_box") or {}
+    far = report.get("far_stumps_box") or {}
+    try:
+        if all(k in near for k in ("x1", "y1", "x2", "y2")):
+            cv2.rectangle(
+                frame,
+                (int(near["x1"]), int(near["y1"])),
+                (int(near["x2"]), int(near["y2"])),
+                (80, 200, 255),
+                2,
+            )
+            draw_label(frame, "Near stumps", int(near["x1"]), int(near["y1"]), (40, 140, 200))
+            drawn = True
+        if all(k in far for k in ("x1", "y1", "x2", "y2")):
+            cv2.rectangle(
+                frame,
+                (int(far["x1"]), int(far["y1"])),
+                (int(far["x2"]), int(far["y2"])),
+                (80, 200, 255),
+                2,
+            )
+            draw_label(frame, "Far stumps", int(far["x1"]), int(far["y1"]), (40, 140, 200))
+            drawn = True
+    except (TypeError, ValueError):
+        pass
+
+    corridor = report.get("pitch_corridor") or []
+    corridor_points = [_calibration_point_to_xy(point) for point in corridor]
+    corridor_points = [point for point in corridor_points if point is not None]
+    if len(corridor_points) >= 3:
+        for index, point in enumerate(corridor_points):
+            cv2.line(
+                frame,
+                point,
+                corridor_points[(index + 1) % len(corridor_points)],
+                (255, 180, 80),
+                1,
+            )
+        drawn = True
+
+    stump_line = report.get("stump_line") or {}
+    # Blue stump line (BGR): near box center → far box center.
+    line_drawn = _draw_calibration_line(frame, stump_line, (255, 0, 0), 3)
+    if line_drawn:
+        start = _calibration_point_to_xy(stump_line.get("start")) or (12, 120)
+        draw_label(
+            frame,
+            "Calibrated stump line — estimated single-camera geometry",
+            start[0],
+            start[1],
+            (180, 80, 0),
+        )
+        drawn = True
+    elif drawn:
+        draw_label(
+            frame,
+            "Calibrated stump line — estimated single-camera geometry",
+            12,
+            120,
+            (180, 80, 0),
+        )
+    return drawn
+
+
+def add_session_calibration_overlay_to_video(video_path, calibration):
+    """Rewrite a processed video with session calibration geometry overlay."""
+    report = calibration or {}
+    if not report.get("available"):
+        return Path(video_path)
+
+    video_path = Path(video_path)
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        return video_path
+
+    fps = capture.get(cv2.CAP_PROP_FPS) or 25
+    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    temp_path = video_path.with_name(f"{video_path.stem}_session_calibration{video_path.suffix}")
+    writer = cv2.VideoWriter(
+        str(temp_path),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps,
+        (width, height),
+    )
+    if not writer.isOpened():
+        capture.release()
+        return video_path
+
+    while True:
+        success, frame = capture.read()
+        if not success:
+            break
+        draw_session_calibration_overlay(frame, report)
+        writer.write(ensure_frame_writer_size(frame, width, height))
+    capture.release()
+    writer.release()
+    temp_path.replace(video_path)
+    return video_path
+
+
 def add_replay_calibration_overlay_to_video(video_path, replay_calibration_report):
     """Rewrite a processed video with manual replay calibration geometry."""
     report = replay_calibration_report or {}
