@@ -321,3 +321,98 @@ def session_calibration_as_pitch_roi(calibration: Any) -> dict[str, Any] | None:
         return None
     roi["source"] = "session_calibration"
     return roi
+
+
+def _box_as_ints(box: Any) -> dict[str, int] | None:
+    """Convert a normalized stump box to integer pixel coords for live UI/overlays."""
+    normalized = _normalize_box(box)
+    if normalized is None:
+        return None
+    return {
+        "x1": int(round(normalized["x1"])),
+        "y1": int(round(normalized["y1"])),
+        "x2": int(round(normalized["x2"])),
+        "y2": int(round(normalized["y2"])),
+    }
+
+
+def build_default_live_stump_boxes(frame_size: Any) -> dict[str, Any]:
+    """Live-oriented default near/far stump boxes (wraps Video Analysis layout)."""
+    layout = build_default_stump_box_layout(frame_size)
+    notes = list(layout.get("notes") or [])
+    if not layout.get("available"):
+        return {
+            "available": False,
+            "near_stumps_box": None,
+            "far_stumps_box": None,
+            "notes": notes or ["Invalid frame_size; default live stump boxes unavailable."],
+        }
+
+    near = _box_as_ints(layout.get("near_stumps_box"))
+    far = _box_as_ints(layout.get("far_stumps_box"))
+    if near is None or far is None:
+        notes.append("Could not convert default stump boxes to integer live boxes.")
+        return {
+            "available": False,
+            "near_stumps_box": None,
+            "far_stumps_box": None,
+            "notes": notes,
+        }
+
+    notes.append("Live default stump boxes adapted from Video Analysis layout.")
+    return {
+        "available": True,
+        "near_stumps_box": near,
+        "far_stumps_box": far,
+        "notes": notes,
+    }
+
+
+def build_calibration_from_stump_boxes(
+    near_box: Any,
+    far_box: Any,
+    frame_size: Any = None,
+) -> dict[str, Any]:
+    """Build live calibration from near/far stump boxes (wraps build_calibration_from_boxes)."""
+    report = build_calibration_from_boxes(
+        {"near_stumps_box": near_box, "far_stumps_box": far_box},
+        frame_size=frame_size,
+    )
+    # Keep Video Analysis float geometry; expose int boxes for live UI convenience.
+    near_ints = _box_as_ints(report.get("near_stumps_box"))
+    far_ints = _box_as_ints(report.get("far_stumps_box"))
+    if near_ints is not None:
+        report["near_stumps_box"] = near_ints
+    if far_ints is not None:
+        report["far_stumps_box"] = far_ints
+    return report
+
+
+def point_inside_live_pitch_corridor(
+    point: Any,
+    calibration: Any,
+    margin: float = 40,
+) -> dict[str, Any]:
+    """Live alias for point_inside_calibrated_corridor."""
+    return point_inside_calibrated_corridor(point, calibration, margin=margin)
+
+
+def build_live_calibration_report(
+    near_box: Any,
+    far_box: Any,
+    frame_size: Any = None,
+) -> dict[str, Any]:
+    """Compact live calibration status wrapper for Streamlit Live Session."""
+    calibration = build_calibration_from_stump_boxes(near_box, far_box, frame_size=frame_size)
+    notes = list(calibration.get("notes") or [])
+    available = bool(calibration.get("available"))
+    stump_line = calibration.get("stump_line")
+    corridor = calibration.get("pitch_corridor") or []
+    return {
+        "available": available,
+        "quality": calibration.get("quality", "Unavailable"),
+        "stump_line_available": bool(stump_line),
+        "pitch_corridor_available": bool(corridor),
+        "calibration": calibration,
+        "notes": notes,
+    }

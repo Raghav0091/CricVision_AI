@@ -26,7 +26,17 @@ from Backends.src.config.constants import (
 )
 from Backends.src.config.paths import (
     CRICKET_OBJECTS_MODEL_PATH,
+    OUTPUTS_DIR,
     REVIEW_FRAMES_DIR,
+)
+from Backends.src.live_delivery_capture import (
+    create_delivery_capture_state,
+    save_delivery_clip,
+    update_delivery_capture_state,
+)
+from Backends.src.session_calibration import (
+    build_default_live_stump_boxes,
+    build_live_calibration_report,
 )
 from Backends.src.utils.cv2_loader import cv2
 from Backends.src.tracking.ball_tracking_utils import (
@@ -73,6 +83,58 @@ MAX_MISSING_BALL_FRAMES = 12
 MAX_TRAJECTORY_POINTS = 35
 MAX_RECORDED_FRAMES = 450
 DEFAULT_RECORDING_FPS = 25
+LIVE_DELIVERIES_DIR = OUTPUTS_DIR / "live_deliveries"
+DEFAULT_LIVE_FRAME_WIDTH = 1280
+DEFAULT_LIVE_FRAME_HEIGHT = 720
+
+
+class LiveSessionBridge:
+    """Shared state between Streamlit UI and the webrtc video processor thread."""
+
+    def __init__(self):
+        self.lock = Lock()
+        self.calibration = None
+        self.calibration_enabled = False
+        self.show_near_box = True
+        self.show_far_box = True
+        self.live_session_active = False
+        self.capture_state = create_delivery_capture_state()
+        self.last_saved_path = None
+        self.status_message = "Continue bowling"
+        self.frame_size = (DEFAULT_LIVE_FRAME_WIDTH, DEFAULT_LIVE_FRAME_HEIGHT)
+
+    def configure(
+        self,
+        *,
+        calibration=None,
+        calibration_enabled=False,
+        show_near_box=True,
+        show_far_box=True,
+        live_session_active=False,
+    ):
+        with self.lock:
+            self.calibration = calibration
+            self.calibration_enabled = bool(calibration_enabled)
+            self.show_near_box = bool(show_near_box)
+            self.show_far_box = bool(show_far_box)
+            self.live_session_active = bool(live_session_active)
+
+    def reset_capture(self):
+        with self.lock:
+            self.capture_state = create_delivery_capture_state()
+            self.last_saved_path = None
+            self.status_message = "Continue bowling"
+
+    def snapshot(self):
+        with self.lock:
+            return {
+                "recording": bool(self.capture_state.get("recording")),
+                "delivery_count": int(self.capture_state.get("delivery_count") or 0),
+                "last_saved_path": self.last_saved_path,
+                "status_message": self.status_message,
+                "live_session_active": self.live_session_active,
+                "frame_size": self.frame_size,
+            }
 
 
 def get_live_model_options():
@@ -125,21 +187,404 @@ class LiveDeliveryRecordingState:
             return len(self.frames)
 
 
-def create_delivery_recorder_class(recording_state):
+def create_delivery_recorder_class(recording_state, live_bridge=None):
     import av
     from streamlit_webrtc import VideoProcessorBase
 
     class DeliveryRecorder(VideoProcessorBase):
         def __init__(self):
             self.recording_state = recording_state
+            self.live_bridge = live_bridge
 
         def recv(self, frame):
             image = frame.to_ndarray(format="bgr24")
             self.recording_state.append_frame(image)
 
-            return av.VideoFrame.from_ndarray(image, format="bgr24")
+            display = image
+            bridge = self.live_bridge
+            if bridge is not None:
+                with bridge.lock:
+                    bridge.frame_size = (int(image.shape[1]), int(image.shape[0]))
+                    calibration = bridge.calibration
+                    calibration_enabled = bridge.calibration_enabled
+                    show_near = bridge.show_near_box
+                    show_far = bridge.show_far_box
+                    session_active = bridge.live_session_active
+                    capture_state = bridge.capture_state
+
+                # ponytail: light motion/corridor capture only — no YOLO on every live frame.
+                if session_active:
+                    update = update_delivery_capture_state(
+                        image,
+                        detections=None,
+                        calibration=(
+                            calibration
+                            if calibration_enabled and isinstance(calibration, dict) and calibration.get("available")
+                            else None
+                        ),
+                        state=capture_state,
+                    )
+                    with bridge.lock:
+                        bridge.capture_state = update["state"]
+                        if update.get("delivery_detected"):
+                            bridge.status_message = "Delivery detected"
+                        elif update.get("recording"):
+                            bridge.status_message = "Recording delivery..."
+                        completed = update.get("completed_clip")
+                        if completed:
+                            save_result = save_delivery_clip(
+                                completed,
+                                output_dir=LIVE_DELIVERIES_DIR,
+                                fps=DEFAULT_RECORDING_FPS,
+                                prefix="delivery",
+                            )
+                            if save_result.get("saved"):
+                                bridge.last_saved_path = save_result.get("path")
+                                bridge.status_message = (
+                                    "Ball tracking/replay available after clip processing"
+                                )
+                            else:
+                                bridge.status_message = "Continue bowling"
+
+                if calibration_enabled and isinstance(calibration, dict):
+                    display = image.copy()
+                    _draw_live_calibration_overlay(
+                        display,
+                        calibration,
+                        show_near_box=show_near,
+                        show_far_box=show_far,
+                    )
+
+            return av.VideoFrame.from_ndarray(display, format="bgr24")
 
     return DeliveryRecorder
+
+
+def _draw_live_calibration_overlay(
+    frame,
+    calibration,
+    *,
+    show_near_box=True,
+    show_far_box=True,
+):
+    """Draw live stump boxes / stump line / corridor on the preview frame."""
+    report = calibration or {}
+    if not isinstance(report, dict):
+        return False
+
+    drawn = False
+    near = report.get("near_stumps_box") or {}
+    far = report.get("far_stumps_box") or {}
+    try:
+        if show_near_box and all(k in near for k in ("x1", "y1", "x2", "y2")):
+            cv2.rectangle(
+                frame,
+                (int(near["x1"]), int(near["y1"])),
+                (int(near["x2"]), int(near["y2"])),
+                (80, 200, 255),
+                2,
+            )
+            draw_label(frame, "Near stumps", int(near["x1"]), int(near["y1"]), (40, 140, 200))
+            drawn = True
+        if show_far_box and all(k in far for k in ("x1", "y1", "x2", "y2")):
+            cv2.rectangle(
+                frame,
+                (int(far["x1"]), int(far["y1"])),
+                (int(far["x2"]), int(far["y2"])),
+                (80, 200, 255),
+                2,
+            )
+            draw_label(frame, "Far stumps", int(far["x1"]), int(far["y1"]), (40, 140, 200))
+            drawn = True
+    except (TypeError, ValueError):
+        pass
+
+    # Line + corridor only when calibration geometry is usable.
+    if report.get("available"):
+        corridor = report.get("pitch_corridor") or []
+        points = []
+        for point in corridor:
+            if isinstance(point, dict) and "x" in point and "y" in point:
+                try:
+                    points.append((int(point["x"]), int(point["y"])))
+                except (TypeError, ValueError):
+                    continue
+            elif isinstance(point, (list, tuple)) and len(point) >= 2:
+                try:
+                    points.append((int(point[0]), int(point[1])))
+                except (TypeError, ValueError):
+                    continue
+        if len(points) >= 3:
+            for index, point in enumerate(points):
+                cv2.line(frame, point, points[(index + 1) % len(points)], (255, 180, 80), 1)
+            drawn = True
+
+        stump_line = report.get("stump_line") or {}
+        start = stump_line.get("start") or {}
+        end = stump_line.get("end") or {}
+        try:
+            if "x" in start and "y" in start and "x" in end and "y" in end:
+                p1 = (int(start["x"]), int(start["y"]))
+                p2 = (int(end["x"]), int(end["y"]))
+                cv2.line(frame, p1, p2, (255, 0, 0), 3)
+                drawn = True
+        except (TypeError, ValueError):
+            pass
+
+    if drawn:
+        draw_label(
+            frame,
+            "Live calibration: estimated single-camera geometry",
+            12,
+            28,
+            (180, 80, 0),
+        )
+    return drawn
+
+
+def _live_box_defaults(frame_width, frame_height):
+    defaults = build_default_live_stump_boxes((frame_width, frame_height))
+    near = defaults.get("near_stumps_box") or {
+        "x1": int(frame_width * 0.42),
+        "y1": int(frame_height * 0.72),
+        "x2": int(frame_width * 0.58),
+        "y2": int(frame_height * 0.92),
+    }
+    far = defaults.get("far_stumps_box") or {
+        "x1": int(frame_width * 0.45),
+        "y1": int(frame_height * 0.22),
+        "x2": int(frame_width * 0.55),
+        "y2": int(frame_height * 0.38),
+    }
+    return near, far
+
+
+def render_live_camera_setup_guidelines():
+    st.subheader("Camera Setup Guidelines")
+    st.markdown(
+        """
+- Use tripod
+- 6 stumps required
+- Camera behind non-striker stumps
+- Camera not too far back
+- Higher camera is better
+- Do not block camera
+- Bowl a few balls before checking analysis
+"""
+    )
+
+
+def render_live_calibration_section(frame_width, frame_height):
+    """FullTrack-style live stump-box calibration controls."""
+    st.subheader("Live Calibration")
+    enabled = st.checkbox(
+        "Enable Live Session Calibration",
+        value=False,
+        key="live_session_calibration_enabled",
+        help=(
+            "Place near/far stump boxes to estimate a pitch corridor. "
+            "Estimated single-camera geometry only — not official LBW/DRS."
+        ),
+    )
+    show_near = st.checkbox(
+        "Show/overlay near stumps box",
+        value=True,
+        key="live_session_show_near_box",
+        disabled=not enabled,
+    )
+    show_far = st.checkbox(
+        "Show/overlay far stumps box",
+        value=True,
+        key="live_session_show_far_box",
+        disabled=not enabled,
+    )
+
+    if not enabled:
+        report = {
+            "available": False,
+            "quality": "Unavailable",
+            "stump_line_available": False,
+            "pitch_corridor_available": False,
+            "calibration": {
+                "available": False,
+                "quality": "Unavailable",
+                "near_stumps_box": None,
+                "far_stumps_box": None,
+                "stump_line": None,
+                "pitch_corridor": [],
+                "notes": ["Live session calibration disabled."],
+            },
+            "notes": ["Live session calibration disabled."],
+        }
+        st.session_state.live_calibration_report = report
+        st.caption("Calibration Ready: No (disabled)")
+        return report, False, show_near, show_far
+
+    near_default, far_default = _live_box_defaults(frame_width, frame_height)
+    st.caption(
+        f"Adjust boxes so near (non-striker) and far (striker) stumps sit inside them. "
+        f"Frame size: {frame_width} x {frame_height}."
+    )
+    st.markdown("**Near / non-striker stumps box**")
+    near_cols = st.columns(4)
+    near_box = {
+        "x1": near_cols[0].number_input(
+            "Near x1",
+            min_value=0,
+            max_value=frame_width,
+            value=int(near_default["x1"]),
+            step=5,
+            key="live_cal_near_x1",
+        ),
+        "y1": near_cols[1].number_input(
+            "Near y1",
+            min_value=0,
+            max_value=frame_height,
+            value=int(near_default["y1"]),
+            step=5,
+            key="live_cal_near_y1",
+        ),
+        "x2": near_cols[2].number_input(
+            "Near x2",
+            min_value=0,
+            max_value=frame_width,
+            value=int(near_default["x2"]),
+            step=5,
+            key="live_cal_near_x2",
+        ),
+        "y2": near_cols[3].number_input(
+            "Near y2",
+            min_value=0,
+            max_value=frame_height,
+            value=int(near_default["y2"]),
+            step=5,
+            key="live_cal_near_y2",
+        ),
+    }
+    st.markdown("**Far / striker stumps box**")
+    far_cols = st.columns(4)
+    far_box = {
+        "x1": far_cols[0].number_input(
+            "Far x1",
+            min_value=0,
+            max_value=frame_width,
+            value=int(far_default["x1"]),
+            step=5,
+            key="live_cal_far_x1",
+        ),
+        "y1": far_cols[1].number_input(
+            "Far y1",
+            min_value=0,
+            max_value=frame_height,
+            value=int(far_default["y1"]),
+            step=5,
+            key="live_cal_far_y1",
+        ),
+        "x2": far_cols[2].number_input(
+            "Far x2",
+            min_value=0,
+            max_value=frame_width,
+            value=int(far_default["x2"]),
+            step=5,
+            key="live_cal_far_x2",
+        ),
+        "y2": far_cols[3].number_input(
+            "Far y2",
+            min_value=0,
+            max_value=frame_height,
+            value=int(far_default["y2"]),
+            step=5,
+            key="live_cal_far_y2",
+        ),
+    }
+
+    report = build_live_calibration_report(
+        near_box,
+        far_box,
+        frame_size=(frame_width, frame_height),
+    )
+    ready = bool(report.get("available"))
+    if ready:
+        st.success("Calibration Ready")
+    else:
+        st.warning("Calibration Ready: No — adjust stump boxes until quality is Basic or Good.")
+
+    metric_cols = st.columns(3)
+    metric_cols[0].metric("Calibration Quality", report.get("quality", "Unavailable"))
+    metric_cols[1].metric(
+        "Stump Line Available",
+        "Yes" if report.get("stump_line_available") else "No",
+    )
+    metric_cols[2].metric(
+        "Pitch Corridor Available",
+        "Yes" if report.get("pitch_corridor_available") else "No",
+    )
+    with st.expander("Live Calibration Details", expanded=False):
+        st.json(report)
+
+    st.session_state.live_calibration_report = report
+    return report, enabled, show_near, show_far
+
+
+def render_live_delivery_capture_controls(bridge):
+    """Start/stop auto delivery capture while the live camera is running."""
+    st.subheader("Delivery Capture")
+    snap = bridge.snapshot()
+    session_active = bool(st.session_state.get("live_auto_session_active", False))
+
+    cols = st.columns(2)
+    if not session_active:
+        if cols[0].button("Start Live Session", type="primary", use_container_width=True):
+            bridge.reset_capture()
+            st.session_state.live_auto_session_active = True
+            st.session_state.live_status_message = "Live session started. Continue bowling."
+            st.rerun()
+        cols[1].button("Stop Live Session", use_container_width=True, disabled=True)
+    else:
+        cols[0].button("Start Live Session", use_container_width=True, disabled=True)
+        if cols[1].button("Stop Live Session", type="primary", use_container_width=True):
+            st.session_state.live_auto_session_active = False
+            with bridge.lock:
+                bridge.live_session_active = False
+                if bridge.capture_state.get("recording") and bridge.capture_state.get("frames"):
+                    save_result = save_delivery_clip(
+                        list(bridge.capture_state["frames"]),
+                        output_dir=LIVE_DELIVERIES_DIR,
+                        fps=DEFAULT_RECORDING_FPS,
+                        prefix="delivery",
+                    )
+                    if save_result.get("saved"):
+                        bridge.last_saved_path = save_result.get("path")
+                        bridge.capture_state["delivery_count"] = (
+                            int(bridge.capture_state.get("delivery_count") or 0) + 1
+                        )
+                        bridge.capture_state["last_delivery_time"] = datetime.now().isoformat(
+                            timespec="seconds"
+                        )
+                bridge.capture_state["recording"] = False
+                bridge.capture_state["frames"] = []
+                bridge.status_message = "Continue bowling"
+            st.session_state.live_status_message = "Live session stopped."
+            st.rerun()
+
+    snap = bridge.snapshot()
+    status_cols = st.columns(3)
+    status_cols[0].metric("Delivery count", snap["delivery_count"])
+    status_cols[1].metric(
+        "Recording status",
+        "Recording" if snap["recording"] else ("Active" if session_active else "Idle"),
+    )
+    last_path = snap["last_saved_path"] or st.session_state.get("live_last_saved_delivery")
+    status_cols[2].metric(
+        "Last saved clip",
+        Path(last_path).name if last_path else "None",
+    )
+    if last_path:
+        st.session_state.live_last_saved_delivery = last_path
+        st.caption(f"Last saved delivery clip: `{last_path}`")
+        st.info("Ball tracking/replay available after clip processing")
+    st.caption(snap.get("status_message") or "Continue bowling")
+    return session_active
 
 
 def write_video(frames, output_path, fps=DEFAULT_RECORDING_FPS):
@@ -1085,6 +1530,9 @@ def reset_live_delivery_state():
     st.session_state.live_pending_analysis_settings = None
     st.session_state.live_webrtc_key_suffix += 1
     st.session_state.live_status_message = "Ready for a new delivery."
+    st.session_state.live_auto_session_active = False
+    if "live_session_bridge" in st.session_state:
+        st.session_state.live_session_bridge.reset_capture()
 
 
 def initialize_live_session_state():
@@ -1099,11 +1547,17 @@ def initialize_live_session_state():
         "live_pending_analysis_settings": None,
         "live_webrtc_key_suffix": 0,
         "live_status_message": None,
+        "live_auto_session_active": False,
+        "live_last_saved_delivery": None,
+        "live_calibration_report": None,
+        "live_session_bridge": LiveSessionBridge(),
     }
 
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+    if not isinstance(st.session_state.get("live_session_bridge"), LiveSessionBridge):
+        st.session_state.live_session_bridge = LiveSessionBridge()
 
 
 def show_live_session_page():
@@ -1112,6 +1566,7 @@ def show_live_session_page():
 
     initialize_live_session_state()
     recording_state = st.session_state.live_recording_state
+    live_bridge = st.session_state.live_session_bridge
 
     if recording_state.recording:
         status = "Recording"
@@ -1119,12 +1574,14 @@ def show_live_session_page():
         status = "Analyzing"
     elif st.session_state.live_camera_session_ended and st.session_state.live_last_result:
         status = "Review Ready"
+    elif st.session_state.live_auto_session_active:
+        status = "Live Session"
     else:
         status = "Camera Ready"
 
     render_page_header(
         "Live Bowling Session",
-        "Record one clean delivery. Overlays appear only after analysis.",
+        "Calibrate the pitch, capture deliveries live, or record one clean clip for analysis.",
         badge=status,
     )
 
@@ -1198,6 +1655,19 @@ def show_live_session_page():
         unsafe_allow_html=True,
     )
 
+    render_live_camera_setup_guidelines()
+
+    bridge_snap = live_bridge.snapshot()
+    frame_width, frame_height = bridge_snap.get("frame_size") or (
+        DEFAULT_LIVE_FRAME_WIDTH,
+        DEFAULT_LIVE_FRAME_HEIGHT,
+    )
+    live_cal_report, cal_enabled, show_near, show_far = render_live_calibration_section(
+        int(frame_width),
+        int(frame_height),
+    )
+    calibration_payload = (live_cal_report or {}).get("calibration") if cal_enabled else None
+
     field_setup = render_field_setup_card(key_prefix="live_session_field", compact=True, default_preset="Balanced")
 
     with st.expander("Advanced Settings", expanded=False):
@@ -1246,6 +1716,18 @@ def show_live_session_page():
         st.error("streamlit-webrtc is not installed. Add streamlit-webrtc to requirements.txt.")
         return
 
+    session_active = bool(st.session_state.get("live_auto_session_active", False))
+    # Pass boxes even before Ready so overlays can help adjustment; capture uses available only.
+    live_bridge.configure(
+        calibration=calibration_payload,
+        calibration_enabled=bool(cal_enabled and calibration_payload),
+        show_near_box=show_near,
+        show_far_box=show_far,
+        live_session_active=session_active,
+    )
+
+    render_live_delivery_capture_controls(live_bridge)
+
     rtc_config = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
     webrtc_context = None
 
@@ -1253,7 +1735,8 @@ def show_live_session_page():
         webrtc_context = webrtc_streamer(
             key=f"cricvision-live-delivery-recorder-{st.session_state.live_webrtc_key_suffix}",
             video_processor_factory=create_delivery_recorder_class(
-                st.session_state.live_recording_state
+                st.session_state.live_recording_state,
+                live_bridge=live_bridge,
             ),
             rtc_configuration=rtc_config,
             media_stream_constraints={
@@ -1270,6 +1753,9 @@ def show_live_session_page():
     recorder = None
     if webrtc_context is not None:
         recorder = webrtc_context.video_processor
+
+    st.markdown("---")
+    st.caption("Manual single-delivery recording (existing workflow)")
 
     if not recording_state.recording:
         start_clicked = st.button(
