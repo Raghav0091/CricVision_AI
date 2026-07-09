@@ -46,6 +46,7 @@ from Backends.src.models.model_registry import (
     get_model_path,
     validate_model_paths,
 )
+from Backends.src.replay_calibration import build_replay_calibration_report
 from Backends.src.ui.analysis_helpers import (
     ensure_delivery_report_fields,
     persist_result_to_session as _persist_result_to_session,
@@ -1927,6 +1928,110 @@ def render_manual_pitch_calibration_section(result):
     return manual_roi
 
 
+def _default_replay_point_values(frame_width, frame_height):
+    return {
+        "near_left": (frame_width * 0.46, frame_height * 0.84),
+        "near_middle": (frame_width * 0.50, frame_height * 0.84),
+        "near_right": (frame_width * 0.54, frame_height * 0.84),
+        "far_left": (frame_width * 0.48, frame_height * 0.34),
+        "far_middle": (frame_width * 0.50, frame_height * 0.34),
+        "far_right": (frame_width * 0.52, frame_height * 0.34),
+    }
+
+
+def render_replay_calibration_input_section(uploaded_video):
+    st.subheader("Replay Calibration")
+    enabled = st.checkbox(
+        "Enable Manual Replay Calibration",
+        value=False,
+        key="video_analysis_replay_calibration_enabled",
+        help="Manually mark near/far stump bases with numeric x/y coordinates for replay overlays.",
+    )
+    if not enabled:
+        report = {
+            "available": False,
+            "quality": "Unavailable",
+            "notes": ["Manual replay calibration disabled."],
+        }
+        st.session_state.video_analysis_replay_calibration_report = report
+        return report
+
+    frame_width, frame_height = 1280, 720
+    if uploaded_video is not None:
+        try:
+            uploaded_video.seek(0)
+            first_frame = extract_first_video_frame(uploaded_video)
+            uploaded_video.seek(0)
+            if first_frame is not None:
+                frame_height, frame_width = first_frame.shape[:2]
+        except Exception:
+            uploaded_video.seek(0)
+
+    defaults = _default_replay_point_values(frame_width, frame_height)
+    st.caption(
+        f"Enter stump-base pixel coordinates for this clip. Frame size estimate: "
+        f"{frame_width} x {frame_height}."
+    )
+    calibration = {}
+    labels = {
+        "near_left": "Near left",
+        "near_middle": "Near middle",
+        "near_right": "Near right",
+        "far_left": "Far left",
+        "far_middle": "Far middle",
+        "far_right": "Far right",
+    }
+    for key, label in labels.items():
+        cols = st.columns([1.2, 1, 1])
+        cols[0].caption(label)
+        default_x, default_y = defaults[key]
+        calibration[key] = {
+            "x": cols[1].number_input(
+                f"{label} x",
+                min_value=0.0,
+                max_value=float(frame_width),
+                value=float(round(default_x, 1)),
+                step=1.0,
+                key=f"replay_calibration_{key}_x",
+            ),
+            "y": cols[2].number_input(
+                f"{label} y",
+                min_value=0.0,
+                max_value=float(frame_height),
+                value=float(round(default_y, 1)),
+                step=1.0,
+                key=f"replay_calibration_{key}_y",
+            ),
+        }
+
+    report = build_replay_calibration_report(calibration, frame_size=(frame_width, frame_height))
+    st.metric("Replay calibration quality", report.get("quality", "Unavailable"))
+    geometry = report.get("pitch_geometry") or {}
+    st.caption(f"Stump line available: {'Yes' if geometry.get('stump_line') else 'No'}")
+    st.caption(f"Pitch corridor available: {'Yes' if geometry.get('pitch_corridor') else 'No'}")
+    with st.expander("Replay Calibration Details", expanded=False):
+        st.json(report)
+    st.session_state.video_analysis_replay_calibration_report = report
+    return report
+
+
+def render_replay_calibration_result_section(result):
+    st.subheader("Replay Calibration")
+    report = (result or {}).get("replay_calibration") or {
+        "available": False,
+        "quality": "Unavailable",
+        "notes": ["No replay calibration stored for this analysis."],
+    }
+    geometry = report.get("pitch_geometry") or {}
+    metric_cols = st.columns(3)
+    metric_cols[0].metric("Quality", report.get("quality", "Unavailable"))
+    metric_cols[1].metric("Stump Line", "Yes" if geometry.get("stump_line") else "No")
+    metric_cols[2].metric("Pitch Corridor", "Yes" if geometry.get("pitch_corridor") else "No")
+    with st.expander("Replay Calibration Details", expanded=False):
+        st.json(report)
+    return report
+
+
 def render_ball_candidate_reliability_section(
     result, reliable_track=None, physics_report=None, path_validity=None
 ):
@@ -2229,6 +2334,11 @@ def render_3d_replay_section(
                 path_quality = observer_quality
 
     st.caption(f"3D Replay path source: {source_text}")
+    replay_calibration = (result or {}).get("replay_calibration") or {}
+    if replay_calibration.get("available"):
+        st.caption("3D Replay: estimated from calibrated stump line")
+    else:
+        st.caption("3D Replay: estimated from current validated tracker path")
     labels = path_validity.get("labels") or []
     if labels:
         st.caption(" · ".join(labels))
@@ -2385,6 +2495,7 @@ def show_batting_analysis_results(result):
     render_detection_health_section(result)
     path_validity = render_trajectory_validity_section(result)
     render_manual_pitch_calibration_section(result)
+    render_replay_calibration_result_section(result)
     reliable_track = build_reliable_track_from_result(result)
     physics_report = build_physics_trajectory_report_from_result(result, reliable_track=reliable_track)
     render_ball_candidate_reliability_section(
@@ -2417,6 +2528,7 @@ def show_video_analysis_results(result, selected_model_name, preset_name, show_p
     render_detection_health_section(result)
     path_validity = render_trajectory_validity_section(result)
     render_manual_pitch_calibration_section(result)
+    render_replay_calibration_result_section(result)
     reliable_track = build_reliable_track_from_result(result)
     physics_report = build_physics_trajectory_report_from_result(result, reliable_track=reliable_track)
     render_ball_candidate_reliability_section(
@@ -2585,6 +2697,8 @@ def show_video_analysis_page():
         help="Clean keeps ball trail and key markers only. Debug shows ROI, bounce, and labels.",
     )
 
+    replay_calibration_report = render_replay_calibration_input_section(uploaded_video)
+
     with st.expander("Raw Detection Preview", expanded=False):
         st.caption(
             "YOLO-only sampled frames before Kalman, interpolation, or Visual Observer repair. "
@@ -2727,6 +2841,10 @@ def show_video_analysis_page():
         st.session_state.get("video_analysis_frame_limit_choice", "All frames"),
     )
     show_performance = st.session_state.get("video_analysis_show_performance", False)
+    replay_calibration_report = st.session_state.get(
+        "video_analysis_replay_calibration_report",
+        replay_calibration_report,
+    )
 
     if analysis_mode == "Batting Analysis":
         batting_ball_options = {
@@ -2905,11 +3023,21 @@ def show_video_analysis_page():
             st.error(result.get("error", "Video analysis did not complete."))
             st.session_state.video_analysis_result = None
         else:
+            result["replay_calibration"] = replay_calibration_report
             result["raw_output_path"] = (
                 str(raw_output_path)
                 if result.get("processed_video_generated") and raw_output_path.exists()
                 else None
             )
+            if (
+                result.get("processed_video_generated")
+                and raw_output_path.exists()
+                and replay_calibration_report.get("available")
+            ):
+                shared_annotations.add_replay_calibration_overlay_to_video(
+                    raw_output_path,
+                    replay_calibration_report,
+                )
             if result.get("processed_video_generated") and result.get("output_path"):
                 try:
                     final_video_path = convert_to_browser_mp4(

@@ -43,6 +43,54 @@ def draw_search_roi(frame, roi_box):
     draw_label(frame, "Recovery ROI", x1, y1, (150, 40, 130))
 
 
+def _calibration_point_to_xy(point):
+    try:
+        return int(round(float(point["x"]))), int(round(float(point["y"])))
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
+def _draw_calibration_line(frame, line, color, thickness=2):
+    if not line:
+        return False
+    start = _calibration_point_to_xy(line.get("start"))
+    end = _calibration_point_to_xy(line.get("end"))
+    if start is None or end is None:
+        return False
+    cv2.line(frame, start, end, color, thickness)
+    return True
+
+
+def draw_replay_calibration_overlay(frame, replay_calibration_report):
+    """Draw manual replay calibration geometry when available."""
+    report = replay_calibration_report or {}
+    geometry = report.get("pitch_geometry") or {}
+    if not report.get("available") or not geometry.get("available"):
+        return False
+
+    corridor = geometry.get("pitch_corridor") or []
+    corridor_points = [_calibration_point_to_xy(point) for point in corridor]
+    corridor_points = [point for point in corridor_points if point is not None]
+    if len(corridor_points) >= 3:
+        for index, point in enumerate(corridor_points):
+            cv2.line(frame, point, corridor_points[(index + 1) % len(corridor_points)], (255, 180, 80), 1)
+
+    _draw_calibration_line(frame, geometry.get("near_wicket_line"), (255, 200, 120), 1)
+    _draw_calibration_line(frame, geometry.get("far_wicket_line"), (255, 200, 120), 1)
+    line_drawn = _draw_calibration_line(frame, geometry.get("stump_line"), (255, 80, 0), 3)
+    if line_drawn:
+        start = _calibration_point_to_xy((geometry.get("stump_line") or {}).get("start")) or (12, 92)
+        draw_label(frame, "Calibrated stump line", start[0], start[1], (180, 80, 0))
+    draw_label(
+        frame,
+        "Replay calibration: single-camera estimated geometry",
+        12,
+        92,
+        (120, 80, 0),
+    )
+    return line_drawn
+
+
 def draw_ball_detections(frame, ball_detections):
     for detection in ball_detections or []:
         x1, y1, x2, y2 = detection.get("bbox") or detection["box"]
@@ -678,6 +726,43 @@ def add_delivery_trajectory_overlay_to_video(
             tracking_quality=overall_tracking_quality,
             calibration_context=calibration_context,
         )
+        writer.write(ensure_frame_writer_size(frame, width, height))
+    capture.release()
+    writer.release()
+    temp_path.replace(video_path)
+    return video_path
+
+
+def add_replay_calibration_overlay_to_video(video_path, replay_calibration_report):
+    """Rewrite a processed video with manual replay calibration geometry."""
+    report = replay_calibration_report or {}
+    if not report.get("available"):
+        return Path(video_path)
+
+    video_path = Path(video_path)
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        return video_path
+
+    fps = capture.get(cv2.CAP_PROP_FPS) or 25
+    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    temp_path = video_path.with_name(f"{video_path.stem}_replay_calibration{video_path.suffix}")
+    writer = cv2.VideoWriter(
+        str(temp_path),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps,
+        (width, height),
+    )
+    if not writer.isOpened():
+        capture.release()
+        return video_path
+
+    while True:
+        success, frame = capture.read()
+        if not success:
+            break
+        draw_replay_calibration_overlay(frame, report)
         writer.write(ensure_frame_writer_size(frame, width, height))
     capture.release()
     writer.release()
