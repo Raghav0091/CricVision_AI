@@ -35,11 +35,15 @@ from Backends.src.live_delivery_capture import (
     save_delivery_clip,
     update_delivery_capture_state,
 )
-from Backends.src.live_stump_validator import validate_stumps_in_alignment_boxes
+from Backends.src.live_stump_validator import (
+    update_stump_validation_history,
+    validate_stumps_in_alignment_boxes,
+)
 from Backends.src.session_calibration import (
     build_calibration_from_alignment_boxes,
     build_calibration_from_validated_stumps,
-    build_fulltrack_style_box_layout,
+    build_environment_context_from_validated_stumps,
+    build_premium_stump_alignment_boxes,
 )
 from Backends.src.utils.cv2_loader import cv2
 from Backends.src.tracking.ball_tracking_utils import (
@@ -91,6 +95,35 @@ DEFAULT_LIVE_FRAME_WIDTH = 1280
 DEFAULT_LIVE_FRAME_HEIGHT = 720
 # ponytail: sparse live YOLO only — motion capture stays primary; never every frame.
 LIVE_DETECT_EVERY_N = 5
+LIVE_STAGES = {
+    "setup",
+    "align_stumps",
+    "calibration_locked",
+    "live_capture",
+    "session_summary",
+}
+LIVE_STAGE_ALIASES = {
+    "camera_calibration": "align_stumps",
+    "calibrated_ready": "calibration_locked",
+    "delivery_capture": "live_capture",
+    "session_results": "session_summary",
+}
+REQUIRED_STABLE_FRAMES = 5
+
+
+def _normalize_live_stage(stage):
+    if stage in LIVE_STAGE_ALIASES:
+        return LIVE_STAGE_ALIASES[stage]
+    return stage if stage in LIVE_STAGES else "setup"
+
+
+def _get_live_stage():
+    stage = st.session_state.get("live_stage")
+    if not stage:
+        legacy = st.session_state.get("live_session_stage")
+        stage = _normalize_live_stage(legacy or "setup")
+        st.session_state.live_stage = stage
+    return _normalize_live_stage(stage)
 
 
 class LiveSessionBridge:
@@ -116,6 +149,8 @@ class LiveSessionBridge:
         self.detect_frame_index = 0
         self.last_ball_point = None
         self.stump_validation = None
+        self.stump_validation_history = None
+        self.show_pitch_axis_preview = False
 
     def configure(
         self,
@@ -129,9 +164,10 @@ class LiveSessionBridge:
         detector_model=None,
         ball_confidence=None,
         detector_available=None,
+        show_pitch_axis_preview=None,
     ):
         with self.lock:
-            self.stage = stage or "setup"
+            self.stage = _normalize_live_stage(stage or "setup")
             self.box_layout = box_layout
             self.calibration = calibration
             self.show_alignment_boxes = bool(show_alignment_boxes)
@@ -146,6 +182,8 @@ class LiveSessionBridge:
                     self.ball_confidence = float(ball_confidence)
                 except (TypeError, ValueError):
                     pass
+            if show_pitch_axis_preview is not None:
+                self.show_pitch_axis_preview = bool(show_pitch_axis_preview)
 
     def reset_capture(self):
         with self.lock:
@@ -179,6 +217,7 @@ class LiveSessionBridge:
                 "stage": self.stage,
                 "last_ball_point": self.last_ball_point,
                 "stump_validation": self.stump_validation,
+                "stump_validation_history": self.stump_validation_history,
                 "detector_available": self.detector_available,
             }
 
@@ -264,21 +303,23 @@ def create_delivery_recorder_class(recording_state, live_bridge=None):
                     ball_confidence = bridge.ball_confidence
                     detect_frame_index = bridge.detect_frame_index
                     stump_validation = bridge.stump_validation
+                    validation_history = bridge.stump_validation_history
+                    show_pitch_axis = bridge.show_pitch_axis_preview
 
                 # ponytail: stage is the source of truth — flags alone can be stale across webrtc frames.
                 show_geometry = bool(show_geometry) and stage in {
-                    "calibrated_ready",
-                    "delivery_capture",
+                    "calibration_locked",
+                    "live_capture",
                 }
                 show_boxes = bool(show_boxes) or stage in {
-                    "camera_calibration",
-                    "calibrated_ready",
-                    "delivery_capture",
+                    "align_stumps",
+                    "calibration_locked",
+                    "live_capture",
                 }
 
                 # Rebuild boxes for the real camera size only while aligning.
-                if stage == "camera_calibration" and show_boxes:
-                    live_layout = build_fulltrack_style_box_layout((frame_w, frame_h))
+                if stage == "align_stumps" and show_boxes:
+                    live_layout = build_premium_stump_alignment_boxes((frame_w, frame_h))
                     if live_layout.get("available"):
                         box_layout = live_layout
                         with bridge.lock:
@@ -301,11 +342,19 @@ def create_delivery_recorder_class(recording_state, live_bridge=None):
                             box_layout,
                             frame_size=(frame_w, frame_h),
                         )
+                        history_update = update_stump_validation_history(
+                            stump_validation,
+                            validation_history,
+                            required_stable_frames=REQUIRED_STABLE_FRAMES,
+                        )
+                        stump_validation = dict(stump_validation)
+                        stump_validation["stable"] = history_update.get("ready", False)
                         with bridge.lock:
                             bridge.stump_validation = stump_validation
+                            bridge.stump_validation_history = history_update.get("history")
 
                 # ponytail: motion capture primary; optional sparse YOLO hint if model already warm.
-                if session_active and stage == "delivery_capture":
+                if session_active and stage == "live_capture":
                     detections = None
                     ball_point = None
                     run_detect = (
@@ -379,23 +428,29 @@ def create_delivery_recorder_class(recording_state, live_bridge=None):
                         except Exception:
                             pass
 
-                # ponytail: stage picks the drawer — never calibrated overlay before Continue.
-                if stage == "camera_calibration" and show_boxes:
+                # ponytail: stage picks the drawer — never environment preview before lock.
+                if stage == "align_stumps" and show_boxes:
                     display = image.copy() if display is image else display
-                    draw_alignment_overlay(
+                    draw_stump_alignment_overlay(
                         display,
                         box_layout,
-                        validation=stump_validation,
+                        validation_result=stump_validation,
                     )
-                elif stage in {"calibrated_ready", "delivery_capture"} and (
+                elif stage in {"calibration_locked", "live_capture"} and (
                     show_boxes or show_geometry
                 ):
                     if display is image:
                         display = image.copy()
-                    draw_calibrated_overlay(
+                    env_context = None
+                    if isinstance(calibration, dict):
+                        env_context = calibration.get("environment_context")
+                    show_axis = bool(stage == "calibration_locked" and show_pitch_axis)
+                    draw_environment_preview_overlay(
                         display,
-                        calibration if show_geometry else None,
+                        env_context,
                         box_layout=box_layout,
+                        calibration=calibration if show_geometry else None,
+                        show_pitch_axis=show_axis,
                     )
 
             return av.VideoFrame.from_ndarray(display, format="bgr24")
@@ -780,20 +835,32 @@ def _draw_stump_boxes(frame, box_layout=None, calibration=None, validation=None)
     return drawn
 
 
+def draw_stump_alignment_overlay(frame, box_layout, validation_result=None):
+    """Alignment stage: red/green dashed boxes + small labels. No blue line."""
+    return _draw_stump_boxes(frame, box_layout=box_layout, validation=validation_result)
+
+
 def draw_alignment_overlay(frame, box_layout, validation=None):
-    """Alignment stage: red/green boxes + small labels. No blue line / in-frame text."""
-    return _draw_stump_boxes(frame, box_layout=box_layout, validation=validation)
+    """Backward-compat alias for draw_stump_alignment_overlay."""
+    return draw_stump_alignment_overlay(frame, box_layout, validation_result=validation)
 
 
-def draw_calibrated_overlay(frame, calibration, box_layout=None):
-    """After Continue: red boxes + blue stump line / optional corridor. No giant labels."""
-    drawn = _draw_stump_boxes(frame, box_layout=box_layout, calibration=calibration)
+def draw_environment_preview_overlay(
+    frame,
+    environment_context=None,
+    box_layout=None,
+    calibration=None,
+    show_pitch_axis=False,
+):
+    """After lock: stump boxes + optional subtle corridor. No blue LBW line by default."""
+    env = environment_context if isinstance(environment_context, dict) else {}
     report = calibration if isinstance(calibration, dict) else {}
-    if not report.get("available"):
+    drawn = _draw_stump_boxes(frame, box_layout=box_layout, calibration=report)
+    if not env.get("available") and not report.get("available"):
         return drawn
 
     thickness = _frame_line_thickness(frame, base=2)
-    corridor = report.get("pitch_corridor") or []
+    corridor = env.get("pitch_corridor") or report.get("pitch_corridor") or []
     points = []
     for point in corridor:
         if isinstance(point, dict) and "x" in point and "y" in point:
@@ -812,29 +879,43 @@ def draw_calibrated_overlay(frame, calibration, box_layout=None):
                 frame,
                 point,
                 points[(index + 1) % len(points)],
-                (255, 180, 80),
+                (80, 140, 255),
                 max(1, thickness - 1),
                 cv2.LINE_AA,
             )
         drawn = True
 
-    stump_line = report.get("stump_line") or {}
-    start = stump_line.get("start") or {}
-    end = stump_line.get("end") or {}
-    try:
-        if "x" in start and "y" in start and "x" in end and "y" in end:
-            p1 = (int(start["x"]), int(start["y"]))
-            p2 = (int(end["x"]), int(end["y"]))
-            cv2.line(frame, p1, p2, (255, 0, 0), thickness + 1, cv2.LINE_AA)
-            drawn = True
-    except (TypeError, ValueError):
-        pass
+    if show_pitch_axis:
+        pitch_axis = env.get("pitch_axis") or env.get("stump_line") or report.get("stump_line") or {}
+        start = pitch_axis.get("start") or {}
+        end = pitch_axis.get("end") or {}
+        try:
+            if "x" in start and "y" in start and "x" in end and "y" in end:
+                p1 = (int(start["x"]), int(start["y"]))
+                p2 = (int(end["x"]), int(end["y"]))
+                cv2.line(frame, p1, p2, (80, 180, 255), thickness, cv2.LINE_AA)
+                _draw_white_black_label(frame, "Pitch axis preview", p1[0], p1[1])
+                drawn = True
+        except (TypeError, ValueError):
+            pass
     return drawn
+
+
+def draw_calibrated_overlay(frame, calibration, box_layout=None):
+    """Backward-compat alias — no blue LBW line by default."""
+    env = calibration.get("environment_context") if isinstance(calibration, dict) else None
+    return draw_environment_preview_overlay(
+        frame,
+        environment_context=env,
+        box_layout=box_layout,
+        calibration=calibration,
+        show_pitch_axis=False,
+    )
 
 
 def _ensure_alignment_box_layout(frame_width, frame_height):
     """Build or refresh fixed FullTrack-style boxes for the current frame size."""
-    layout = st.session_state.get("live_alignment_box_layout")
+    layout = st.session_state.get("live_box_layout") or st.session_state.get("live_alignment_box_layout")
     size_key = (int(frame_width), int(frame_height))
     cached_size = st.session_state.get("live_alignment_frame_size")
     if (
@@ -844,7 +925,8 @@ def _ensure_alignment_box_layout(frame_width, frame_height):
     ):
         return layout
 
-    layout = build_fulltrack_style_box_layout(size_key)
+    layout = build_premium_stump_alignment_boxes(size_key)
+    st.session_state.live_box_layout = layout
     st.session_state.live_alignment_box_layout = layout
     st.session_state.live_alignment_frame_size = size_key
     return layout
@@ -863,31 +945,55 @@ def render_live_camera_setup_guidelines():
 
 
 def _set_live_session_stage(stage):
-    st.session_state.live_session_stage = stage
+    normalized = _normalize_live_stage(stage)
+    st.session_state.live_stage = normalized
+    st.session_state.live_session_stage = normalized
 
 
 def render_live_stage_setup(live_bridge):
-    """Stage: setup — short guide + one start button (camera not required yet)."""
-    st.caption(
-        "Set up your camera behind the non-striker stumps, then start live delivery analysis."
+    """Stage: setup — hero card + requirement chips + one start button."""
+    from Backends.src.ui.theme import render_status_row
+
+    st.markdown(
+        """
+        <div class="cv-hero">
+            <h1>Live Bowling Session</h1>
+            <p>Calibrate the stumps, then capture deliveries live.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
-    with st.expander("Setup guide", expanded=True):
-        render_live_camera_setup_guidelines()
+    render_status_row(
+        [
+            ("Tripod", "default"),
+            ("6 stumps", "default"),
+            ("Behind non-striker", "default"),
+            ("Good lighting", "default"),
+            ("Don't block camera", "warning"),
+        ]
+    )
     if st.button("Start Live Delivery Analysis", type="primary", use_container_width=True):
         live_bridge.reset_capture()
         st.session_state.live_camera_active = True
         st.session_state.live_camera_session_ended = False
+        st.session_state.live_box_layout = None
         st.session_state.live_alignment_box_layout = None
         st.session_state.live_alignment_report = None
         st.session_state.live_calibration_payload = None
         st.session_state.live_stump_validation = None
+        st.session_state.live_stump_validation_history = None
         st.session_state.live_environment_context = None
         st.session_state.live_calibration_result = None
+        st.session_state.live_calibration_locked = False
+        st.session_state.live_capture_state = create_delivery_capture_state()
         st.session_state.live_auto_session_active = False
-        _set_live_session_stage("camera_calibration")
+        with live_bridge.lock:
+            live_bridge.stump_validation = None
+            live_bridge.stump_validation_history = None
+        _set_live_session_stage("align_stumps")
         st.rerun()
     with st.expander("Advanced settings", expanded=False):
-        st.caption("Detection model and presets are available after calibration.")
+        st.caption("Field setup and detector options appear after calibration.")
 
 
 def render_live_calibration_instructions():
@@ -898,28 +1004,39 @@ def render_live_calibration_instructions():
     )
 
 
-def render_live_calibration_status_panel(validation, detector_available):
-    """Compact stump validation status during camera calibration."""
+def render_live_calibration_status_panel(validation, detector_available, history_ready=False):
+    """Compact stump validation status chips during align_stumps."""
+    from Backends.src.ui.theme import render_status_row
+
     validation = validation if isinstance(validation, dict) else {}
     striker_found = bool((validation.get("striker") or {}).get("found"))
     non_striker_found = bool((validation.get("non_striker") or {}).get("found"))
-    quality = validation.get("quality") or "Unavailable"
+    stable = bool(validation.get("stable")) or history_ready
 
     if detector_available is False:
         st.warning("Stump detector unavailable. Cannot validate live calibration.")
     elif detector_available is None:
         st.caption("Warming stump detector for live calibration...")
 
-    cols = st.columns(3)
-    cols[0].metric(
-        "Striker Stumps",
-        "Found" if striker_found else "Not Found",
+    striker_tone = "success" if striker_found else ("warning" if detector_available else "error")
+    non_tone = "success" if non_striker_found else ("warning" if detector_available else "error")
+    if stable:
+        setup_tone = "success"
+        setup_label = "Setup Ready"
+    elif striker_found or non_striker_found:
+        setup_tone = "warning"
+        setup_label = "Setup Partial"
+    else:
+        setup_tone = "error"
+        setup_label = "Setup Not Ready"
+
+    render_status_row(
+        [
+            (f"Striker {'Found' if striker_found else 'Searching'}", striker_tone),
+            (f"Non-Striker {'Found' if non_striker_found else 'Searching'}", non_tone),
+            (setup_label, setup_tone),
+        ]
     )
-    cols[1].metric(
-        "Non-Striker Stumps",
-        "Found" if non_striker_found else "Not Found",
-    )
-    cols[2].metric("Calibration Quality", quality)
     return validation
 
 
@@ -930,11 +1047,13 @@ def render_live_stage_camera_calibration_actions(
     layout,
     validation=None,
     detector_available=None,
+    history_ready=False,
 ):
-    """Continue / Cancel below the camera during alignment."""
+    """Continue / Cancel below the camera during align_stumps."""
     override = bool(st.session_state.get("live_calibration_stump_override", False))
     validation = validation if isinstance(validation, dict) else {}
-    can_continue = bool(validation.get("valid")) or override
+    ready = bool(validation.get("stable")) or history_ready
+    can_continue = ready or override
     if detector_available is False and not override:
         can_continue = False
 
@@ -945,9 +1064,9 @@ def render_live_stage_camera_calibration_actions(
         use_container_width=True,
         disabled=not can_continue,
     ):
-        if not validation.get("valid") and not override:
+        if not ready and not override:
             st.warning(
-                "Stumps not detected in both boxes. "
+                "Stumps not detected in both boxes yet. "
                 "Fit both stump sets inside the boxes before continuing."
             )
             return
@@ -958,14 +1077,15 @@ def render_live_stage_camera_calibration_actions(
         with live_bridge.lock:
             live_layout = live_bridge.box_layout
         if not isinstance(live_layout, dict) or not live_layout.get("available"):
-            live_layout = build_fulltrack_style_box_layout((live_w, live_h))
+            live_layout = build_premium_stump_alignment_boxes((live_w, live_h))
         if not live_layout.get("available"):
             live_layout = layout
 
+        st.session_state.live_box_layout = live_layout
         st.session_state.live_alignment_box_layout = live_layout
         st.session_state.live_alignment_frame_size = (live_w, live_h)
 
-        if override and not validation.get("valid"):
+        if override and not ready:
             calibration = build_calibration_from_alignment_boxes(
                 live_layout,
                 frame_size=(live_w, live_h),
@@ -983,15 +1103,16 @@ def render_live_stage_camera_calibration_actions(
             st.session_state.live_stump_validation = validation
             st.session_state.live_environment_context = {
                 "available": False,
-                "camera_view": "Poor",
+                "view_direction": "Poor",
                 "stumps_validated": False,
                 "striker_stumps_found": bool((validation.get("striker") or {}).get("found")),
                 "non_striker_stumps_found": bool((validation.get("non_striker") or {}).get("found")),
-                "stump_line": None,
+                "pitch_axis": None,
                 "pitch_corridor": None,
-                "notes": ["Developer override: continued without stump validation."],
+                "notes": ["Developer override: continued without stable stump validation."],
             }
             st.session_state.live_calibration_result = calibration
+            st.session_state.live_calibration_locked = True
         else:
             calibration = build_calibration_from_validated_stumps(
                 live_layout,
@@ -1007,12 +1128,18 @@ def render_live_stage_camera_calibration_actions(
                 "notes": list(calibration.get("notes") or []),
             }
             st.session_state.live_stump_validation = validation
-            st.session_state.live_environment_context = calibration.get("environment_context") or {}
+            env = calibration.get("environment_context") or build_environment_context_from_validated_stumps(
+                live_layout,
+                validation,
+                frame_size=(live_w, live_h),
+            )
+            st.session_state.live_environment_context = env
             st.session_state.live_calibration_result = calibration
+            st.session_state.live_calibration_locked = True
 
         st.session_state.live_alignment_report = report
         st.session_state.live_calibration_payload = calibration
-        _set_live_session_stage("calibrated_ready")
+        _set_live_session_stage("calibration_locked")
         st.rerun()
 
     if cols[1].button("Cancel / Back", use_container_width=True):
@@ -1021,14 +1148,21 @@ def render_live_stage_camera_calibration_actions(
         st.session_state.live_alignment_report = None
         st.session_state.live_calibration_payload = None
         st.session_state.live_stump_validation = None
+        st.session_state.live_stump_validation_history = None
         st.session_state.live_environment_context = None
         st.session_state.live_calibration_result = None
+        st.session_state.live_calibration_locked = False
+        with live_bridge.lock:
+            live_bridge.stump_validation = None
+            live_bridge.stump_validation_history = None
         _set_live_session_stage("setup")
         st.rerun()
 
 
 def render_live_stage_calibrated_ready_panel(live_bridge):
-    """Streamlit status below camera after Continue — no giant in-frame labels."""
+    """Streamlit status below camera after lock — calibration_locked stage."""
+    from Backends.src.ui.theme import render_status_pill, render_status_row
+
     report = st.session_state.get("live_alignment_report") or {}
     calibration = (
         st.session_state.get("live_calibration_payload")
@@ -1039,7 +1173,21 @@ def render_live_stage_calibrated_ready_panel(live_bridge):
     validation = st.session_state.get("live_stump_validation") or {}
     env = st.session_state.get("live_environment_context") or calibration.get("environment_context") or {}
 
-    st.success("**Calibration Ready**")
+    st.markdown(
+        """
+        <div class="cv-step-card">
+            <p class="cv-step-label">Calibration Locked</p>
+            <p class="cv-step-title">Stumps detected and pitch context created.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    quality = calibration.get("quality") or validation.get("quality") or "Unavailable"
+    tone = "success" if quality in {"Strong", "Found", "Good"} else "warning"
+    if quality == "Manual Override / Low":
+        tone = "error"
+    st.markdown(render_status_pill(f"Quality: {quality}", tone), unsafe_allow_html=True)
+
     striker_found = bool(
         env.get("striker_stumps_found")
         or (validation.get("striker") or {}).get("found")
@@ -1050,41 +1198,54 @@ def render_live_stage_calibrated_ready_panel(live_bridge):
         or (validation.get("non_striker") or {}).get("found")
         or calibration.get("stumps_validated")
     )
-    quality = calibration.get("quality") or validation.get("quality") or "Unavailable"
-    metric_cols = st.columns(3)
-    metric_cols[0].metric("Striker Stumps", "Found" if striker_found else "Not Found")
-    metric_cols[1].metric("Non-Striker Stumps", "Found" if non_striker_found else "Not Found")
-    metric_cols[2].metric("Calibration Quality", quality)
+    render_status_row(
+        [
+            (f"Striker {'Found' if striker_found else 'Not Found'}", "success" if striker_found else "error"),
+            (f"Non-Striker {'Found' if non_striker_found else 'Not Found'}", "success" if non_striker_found else "error"),
+        ]
+    )
     if calibration.get("available"):
-        st.caption("Estimated pitch context created.")
+        st.caption("Estimated pitch context created — not official LBW/DRS.")
     else:
         st.caption("Calibration geometry limited — check camera alignment.")
+
+    with st.expander("Developer / Advanced", expanded=False):
+        st.checkbox(
+            "Show pitch axis preview overlay",
+            value=False,
+            key="live_show_pitch_axis_preview",
+        )
+
     action_cols = st.columns(2)
-    if action_cols[0].button("Start Bowling / Start Capture", type="primary", use_container_width=True):
+    if action_cols[0].button("Start Capture", type="primary", use_container_width=True):
         live_bridge.reset_capture()
         detector = warm_live_detector()
         with live_bridge.lock:
             live_bridge.detector_model = detector
         st.session_state.live_auto_session_active = True
+        st.session_state.live_capture_state = create_delivery_capture_state()
         st.session_state.live_delivery_log = []
         st.session_state.live_analysed_clip_paths = []
         st.session_state.live_last_result = None
         st.session_state.live_result_by_clip = {}
         st.session_state.live_pending_clip_path = None
-        _set_live_session_stage("delivery_capture")
+        _set_live_session_stage("live_capture")
         st.session_state.live_status_message = "Waiting for delivery..."
         st.rerun()
-    if action_cols[1].button("Back to Calibration", use_container_width=True):
+    if action_cols[1].button("Recalibrate", use_container_width=True):
         st.session_state.live_auto_session_active = False
         st.session_state.live_alignment_report = None
         st.session_state.live_calibration_payload = None
         st.session_state.live_stump_validation = None
+        st.session_state.live_stump_validation_history = None
         st.session_state.live_environment_context = None
         st.session_state.live_calibration_result = None
+        st.session_state.live_calibration_locked = False
         with live_bridge.lock:
             live_bridge.stump_validation = None
+            live_bridge.stump_validation_history = None
             live_bridge.detect_frame_index = 0
-        _set_live_session_stage("camera_calibration")
+        _set_live_session_stage("align_stumps")
         st.rerun()
     return calibration
 
@@ -1292,7 +1453,7 @@ def render_live_stage_delivery_capture_panel(live_bridge):
         # Analyse any remaining unprocessed clips before results.
         while process_pending_live_clip_analysis(live_bridge):
             pass
-        _set_live_session_stage("session_results")
+        _set_live_session_stage("session_summary")
         st.session_state.live_status_message = "Session stopped."
         st.rerun()
     if cols[1].button("Back to Setup", use_container_width=True):
@@ -2338,14 +2499,19 @@ def reset_live_delivery_state():
     st.session_state.live_webrtc_key_suffix += 1
     st.session_state.live_status_message = "Ready for a new delivery."
     st.session_state.live_auto_session_active = False
+    st.session_state.live_stage = "setup"
     st.session_state.live_session_stage = "setup"
+    st.session_state.live_box_layout = None
     st.session_state.live_alignment_box_layout = None
     st.session_state.live_alignment_frame_size = None
     st.session_state.live_alignment_report = None
     st.session_state.live_calibration_payload = None
     st.session_state.live_stump_validation = None
+    st.session_state.live_stump_validation_history = None
     st.session_state.live_environment_context = None
     st.session_state.live_calibration_result = None
+    st.session_state.live_calibration_locked = False
+    st.session_state.live_capture_state = None
     st.session_state.live_calibration_stump_override = False
     st.session_state.live_delivery_log = []
     st.session_state.live_analysed_clip_paths = []
@@ -2369,14 +2535,19 @@ def initialize_live_session_state():
         "live_status_message": None,
         "live_auto_session_active": False,
         "live_last_saved_delivery": None,
+        "live_stage": "setup",
         "live_session_stage": "setup",
+        "live_box_layout": None,
         "live_alignment_box_layout": None,
         "live_alignment_frame_size": None,
         "live_alignment_report": None,
         "live_calibration_payload": None,
         "live_stump_validation": None,
+        "live_stump_validation_history": None,
         "live_environment_context": None,
         "live_calibration_result": None,
+        "live_calibration_locked": False,
+        "live_capture_state": None,
         "live_calibration_stump_override": False,
         "live_session_bridge": LiveSessionBridge(),
         "live_delivery_log": [],
@@ -2390,14 +2561,11 @@ def initialize_live_session_state():
             st.session_state[key] = value
     if not isinstance(st.session_state.get("live_session_bridge"), LiveSessionBridge):
         st.session_state.live_session_bridge = LiveSessionBridge()
-    if st.session_state.get("live_session_stage") not in {
-        "setup",
-        "camera_calibration",
-        "calibrated_ready",
-        "delivery_capture",
-        "session_results",
-    }:
-        st.session_state.live_session_stage = "setup"
+    stage = _get_live_stage()
+    if stage not in LIVE_STAGES:
+        stage = "setup"
+        st.session_state.live_stage = stage
+        st.session_state.live_session_stage = stage
 
 
 def show_live_session_page():
@@ -2407,7 +2575,7 @@ def show_live_session_page():
     initialize_live_session_state()
     recording_state = st.session_state.live_recording_state
     live_bridge = st.session_state.live_session_bridge
-    stage = st.session_state.get("live_session_stage", "setup")
+    stage = _get_live_stage()
 
     if recording_state.recording:
         status = "Recording"
@@ -2418,16 +2586,16 @@ def show_live_session_page():
     elif st.session_state.live_camera_session_ended and st.session_state.live_last_result:
         status = "Review Ready"
         status_tone = "success"
-    elif stage == "delivery_capture":
+    elif stage == "live_capture":
         status = "Capturing"
         status_tone = "warning"
-    elif stage == "camera_calibration":
+    elif stage == "align_stumps":
         status = "Calibrating"
         status_tone = "warning"
-    elif stage == "calibrated_ready":
+    elif stage == "calibration_locked":
         status = "Calibrated"
         status_tone = "success"
-    elif stage == "session_results":
+    elif stage == "session_summary":
         status = "Results"
         status_tone = "gold"
     else:
@@ -2436,12 +2604,8 @@ def show_live_session_page():
 
     # ponytail: calibration stages stay compact — skip the heavy page chrome.
     if stage == "setup":
-        render_page_header(
-            "Live Bowling Session",
-            "Set up the camera, align stump boxes, then capture deliveries.",
-            badge=status,
-        )
-    elif stage not in {"camera_calibration", "calibrated_ready"}:
+        pass
+    elif stage not in {"align_stumps", "calibration_locked"}:
         render_page_header(
             "Live Bowling Session",
             "Align the camera to fixed stump boxes, capture deliveries live, then review results.",
@@ -2535,14 +2699,14 @@ def show_live_session_page():
     show_alignment_boxes = False
     show_calibrated_geometry = False
     camera_needed = stage in {
-        "camera_calibration",
-        "calibrated_ready",
-        "delivery_capture",
+        "align_stumps",
+        "calibration_locked",
+        "live_capture",
     }
 
     if stage == "setup":
         render_live_stage_setup(live_bridge)
-    elif stage == "camera_calibration":
+    elif stage == "align_stumps":
         st.markdown("### Live Bowling Session")
         box_layout = _ensure_alignment_box_layout(frame_width, frame_height)
         show_alignment_boxes = True
@@ -2553,18 +2717,28 @@ def show_live_session_page():
         render_live_calibration_instructions()
         bridge_snap = live_bridge.snapshot()
         validation = bridge_snap.get("stump_validation") or st.session_state.get("live_stump_validation") or {}
+        history = bridge_snap.get("stump_validation_history") or st.session_state.get("live_stump_validation_history")
+        history_update = update_stump_validation_history(
+            validation,
+            history,
+            required_stable_frames=REQUIRED_STABLE_FRAMES,
+        )
         st.session_state.live_stump_validation = validation
+        st.session_state.live_stump_validation_history = history_update.get("history")
+        with live_bridge.lock:
+            live_bridge.stump_validation_history = history_update.get("history")
         render_live_calibration_status_panel(
             validation,
             bridge_snap.get("detector_available"),
+            history_ready=history_update.get("ready", False),
         )
         with st.expander("Developer / Advanced", expanded=False):
             st.checkbox(
-                "Developer override: continue without stump detection",
+                "Allow calibration without stump detection",
                 value=False,
                 key="live_calibration_stump_override",
             )
-    elif stage == "calibrated_ready":
+    elif stage == "calibration_locked":
         st.markdown("### Live Bowling Session")
         box_layout = _ensure_alignment_box_layout(frame_width, frame_height)
         calibration_payload = (
@@ -2573,13 +2747,13 @@ def show_live_session_page():
         )
         show_alignment_boxes = True
         show_calibrated_geometry = True
-    elif stage == "delivery_capture":
+    elif stage == "live_capture":
         box_layout = _ensure_alignment_box_layout(frame_width, frame_height)
         render_live_stage_delivery_capture(live_bridge)
         calibration_payload = st.session_state.get("live_calibration_payload")
         show_alignment_boxes = True
         show_calibrated_geometry = True
-    elif stage == "session_results":
+    elif stage == "session_summary":
         render_live_stage_session_results(live_bridge)
         with st.expander("Developer / Advanced", expanded=False):
             st.caption("Session debug snapshot")
@@ -2600,7 +2774,7 @@ def show_live_session_page():
     if camera_needed:
         field_setup = st.session_state.get("current_field_setup")
         # ponytail: hide field/advanced/manual capture during alignment — camera only.
-        show_setup_panels = stage == "delivery_capture"
+        show_setup_panels = stage == "live_capture"
 
         selected_model_name = st.session_state.get(
             "live_session_model",
@@ -2623,11 +2797,11 @@ def show_live_session_page():
             return
 
         session_active = bool(st.session_state.get("live_auto_session_active", False)) and (
-            stage == "delivery_capture"
+            stage == "live_capture"
         )
         detector_for_bridge = None
         detector_available = None
-        if stage in {"camera_calibration", "delivery_capture"}:
+        if stage in {"align_stumps", "live_capture"}:
             with live_bridge.lock:
                 detector_for_bridge = live_bridge.detector_model
             if detector_for_bridge is None:
@@ -2643,6 +2817,9 @@ def show_live_session_page():
             detector_model=detector_for_bridge,
             ball_confidence=confidence,
             detector_available=detector_available,
+            show_pitch_axis_preview=bool(
+                st.session_state.get("live_show_pitch_axis_preview", False)
+            ),
         )
 
         rtc_config = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
@@ -2672,9 +2849,15 @@ def show_live_session_page():
             recorder = webrtc_context.video_processor
 
         # Actions / status sit under the camera for mobile-friendly calibration.
-        if stage == "camera_calibration":
+        if stage == "align_stumps":
             bridge_snap = live_bridge.snapshot()
             validation = bridge_snap.get("stump_validation") or st.session_state.get("live_stump_validation") or {}
+            history = bridge_snap.get("stump_validation_history") or st.session_state.get("live_stump_validation_history")
+            history_update = update_stump_validation_history(
+                validation,
+                history,
+                required_stable_frames=REQUIRED_STABLE_FRAMES,
+            )
             render_live_stage_camera_calibration_actions(
                 live_bridge,
                 frame_width,
@@ -2682,8 +2865,9 @@ def show_live_session_page():
                 box_layout,
                 validation=validation,
                 detector_available=bridge_snap.get("detector_available"),
+                history_ready=history_update.get("ready", False),
             )
-        elif stage == "calibrated_ready":
+        elif stage == "calibration_locked":
             calibration_payload = render_live_stage_calibrated_ready_panel(live_bridge)
             live_bridge.configure(
                 stage=stage,
@@ -2693,7 +2877,7 @@ def show_live_session_page():
                 show_calibrated_geometry=True,
                 live_session_active=False,
             )
-        elif stage == "delivery_capture":
+        elif stage == "live_capture":
             render_live_stage_delivery_capture_panel(live_bridge)
 
         if show_setup_panels:

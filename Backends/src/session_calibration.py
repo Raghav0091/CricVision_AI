@@ -439,23 +439,23 @@ def _unavailable_alignment_calibration(notes: list[str]) -> dict[str, Any]:
     }
 
 
-def build_fulltrack_style_box_layout(frame_size: Any) -> dict[str, Any]:
-    """Fixed FullTrack-style alignment boxes — move camera to fit stumps, no manual coords."""
+def build_premium_stump_alignment_boxes(frame_size: Any) -> dict[str, Any]:
+    """Mobile/tablet-first FullTrack boxes — portrait striker upper, non-striker lower/bigger."""
     notes: list[str] = []
     size = _parse_frame_size(frame_size)
     if size is None:
-        notes.append("Invalid frame_size; FullTrack-style boxes unavailable.")
+        notes.append("Invalid frame_size; premium alignment boxes unavailable.")
         return _unavailable_alignment_layout(notes)
 
     width, height = size
     portrait = height > width
-    # ponytail: phone portrait vs landscape webcam — keep boxes centred, never full-frame.
+    # ponytail: portrait = phone/tablet upright; landscape = wider webcam/tablet.
     if portrait:
-        striker_w, striker_h, striker_cy = 0.32, 0.25, 0.30
-        non_w, non_h, non_cy = 0.62, 0.30, 0.72
+        striker_w, striker_h, striker_cy = 0.34, 0.22, 0.28
+        non_w, non_h, non_cy = 0.68, 0.32, 0.74
     else:
-        striker_w, striker_h, striker_cy = 0.22, 0.24, 0.28
-        non_w, non_h, non_cy = 0.36, 0.28, 0.74
+        striker_w, striker_h, striker_cy = 0.24, 0.22, 0.26
+        non_w, non_h, non_cy = 0.40, 0.30, 0.76
 
     def _centered_box(box_w_frac: float, box_h_frac: float, cy_frac: float) -> dict[str, float] | None:
         box_w = width * box_w_frac
@@ -475,21 +475,101 @@ def build_fulltrack_style_box_layout(frame_size: Any) -> dict[str, Any]:
     striker = _centered_box(striker_w, striker_h, striker_cy)
     non_striker = _centered_box(non_w, non_h, non_cy)
     if striker is None or non_striker is None:
-        notes.append("Could not build FullTrack-style boxes for this frame size.")
+        notes.append("Could not build premium alignment boxes for this frame size.")
         return _unavailable_alignment_layout(notes)
 
     striker_ints = _box_as_ints(striker)
     non_striker_ints = _box_as_ints(non_striker)
     if striker_ints is None or non_striker_ints is None:
-        notes.append("Could not convert alignment boxes to integer pixels.")
+        notes.append("Could not convert premium alignment boxes to integer pixels.")
         return _unavailable_alignment_layout(notes)
 
-    notes.append("FullTrack-style fixed boxes: move camera/tripod until stumps fit.")
+    notes.append("Premium mobile/tablet alignment boxes — move camera until stumps fit.")
     notes.append("Estimated single-camera geometry only — not official LBW/DRS.")
     return {
         "available": True,
         "striker_stumps_box": striker_ints,
         "non_striker_stumps_box": non_striker_ints,
+        "frame_size": {"width": width, "height": height},
+        "orientation": "portrait" if portrait else "landscape",
+        "notes": notes,
+    }
+
+
+def build_fulltrack_style_box_layout(frame_size: Any) -> dict[str, Any]:
+    """Fixed FullTrack-style alignment boxes — wraps premium layout for backward compat."""
+    return build_premium_stump_alignment_boxes(frame_size)
+
+
+def build_environment_context_from_validated_stumps(
+    box_layout: Any,
+    validation_result: Any,
+    frame_size: Any = None,
+) -> dict[str, Any]:
+    """Hidden pitch/environment context from validated stumps — not official LBW/DRS."""
+    notes: list[str] = [
+        "Estimated single-camera geometry only — not official LBW/DRS.",
+    ]
+    validation = validation_result if isinstance(validation_result, dict) else {}
+    layout = box_layout if isinstance(box_layout, dict) else {}
+
+    striker_found = bool((validation.get("striker") or {}).get("found"))
+    non_found = bool((validation.get("non_striker") or {}).get("found"))
+    stumps_validated = bool(validation.get("valid"))
+    quality = validation.get("quality") or "Not Found"
+
+    view_direction = "Unknown"
+    if not stumps_validated:
+        view_direction = "Partial" if striker_found or non_found else "Unknown"
+    elif quality == "Strong":
+        view_direction = "Good"
+    elif quality in {"Found", "Weak"}:
+        view_direction = "Usable"
+    else:
+        view_direction = "Poor"
+
+    striker_box = _normalize_box(layout.get("striker_stumps_box"), frame_size=frame_size)
+    non_striker_box = _normalize_box(layout.get("non_striker_stumps_box"), frame_size=frame_size)
+    striker_center = _box_center(striker_box) if striker_box else None
+    non_striker_center = _box_center(non_striker_box) if non_striker_box else None
+
+    pitch_axis = None
+    pitch_corridor = None
+    scale_reference = None
+    available = stumps_validated and striker_box is not None and non_striker_box is not None
+
+    if available:
+        pitch_axis = {"start": non_striker_center, "end": striker_center}
+        notes.append("Pitch axis: non-striker centre → striker centre.")
+        base = build_calibration_from_alignment_boxes(layout, frame_size=frame_size)
+        if base.get("available"):
+            pitch_corridor = list(base.get("pitch_corridor") or [])
+            notes.append("Pitch corridor estimated from alignment boxes.")
+        avg_w = 0.0
+        if striker_box and non_striker_box:
+            avg_w = (_box_width(striker_box) + _box_width(non_striker_box)) / 2.0
+        scale_reference = {"stump_box_width_px": round(avg_w, 2)}
+    elif not stumps_validated:
+        notes.append("Validation failed — environment context not created.")
+        available = False
+
+    return {
+        "available": available,
+        "stumps_validated": stumps_validated,
+        "view_direction": view_direction,
+        "striker_box": striker_box,
+        "non_striker_box": non_striker_box,
+        "striker_center": striker_center,
+        "non_striker_center": non_striker_center,
+        "pitch_axis": pitch_axis,
+        "pitch_corridor": pitch_corridor,
+        "scale_reference": scale_reference,
+        "quality": quality,
+        # backward compat keys
+        "camera_view": view_direction,
+        "striker_stumps_found": striker_found,
+        "non_striker_stumps_found": non_found,
+        "stump_line": pitch_axis,
         "notes": notes,
     }
 
@@ -595,8 +675,6 @@ def build_calibration_from_validated_stumps(
     frame_size: Any = None,
 ) -> dict[str, Any]:
     """Build live calibration only after stump validation passes."""
-    from Backends.src.live_stump_validator import build_environment_context_from_stumps
-
     notes: list[str] = [
         "Estimated single-camera geometry only — not official LBW or DRS.",
     ]
@@ -611,15 +689,15 @@ def build_calibration_from_validated_stumps(
             non_striker_box = box_layout.get("non_striker_stumps_box")
         return {
             "available": False,
-            "quality": validation.get("quality", "Unavailable"),
+            "quality": validation.get("quality", "Not Found"),
             "stumps_validated": False,
             "striker_stumps_box": striker_box,
             "non_striker_stumps_box": non_striker_box,
             "stump_line": None,
             "pitch_corridor": None,
-            "environment_context": build_environment_context_from_stumps(
-                validation,
+            "environment_context": build_environment_context_from_validated_stumps(
                 box_layout,
+                validation,
                 frame_size=frame_size,
             ),
             "notes": notes,
@@ -627,9 +705,9 @@ def build_calibration_from_validated_stumps(
 
     base = build_calibration_from_alignment_boxes(box_layout, frame_size=frame_size)
     notes.extend(list(base.get("notes") or []))
-    environment_context = build_environment_context_from_stumps(
-        validation,
+    environment_context = build_environment_context_from_validated_stumps(
         box_layout,
+        validation,
         frame_size=frame_size,
     )
     quality = validation.get("quality") or base.get("quality", "Partial")
