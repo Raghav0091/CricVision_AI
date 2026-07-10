@@ -46,6 +46,7 @@ from Backends.src.session_calibration import (
 from Backends.src.virtual_pitch_overlay import (
     draw_alignment_boxes,
     draw_environment_preview_overlay,
+    draw_setup_complete_overlay,
 )
 from Backends.src.utils.cv2_loader import cv2
 from Backends.src.tracking.ball_tracking_utils import (
@@ -435,10 +436,19 @@ def create_delivery_recorder_class(recording_state, live_bridge=None):
                 # ponytail: stage picks the drawer — alignment boxes only before solve.
                 if stage == "align_stumps" and show_boxes:
                     display = image.copy() if display is image else display
-                    draw_alignment_boxes(display, box_layout)
-                elif stage in {"setup_complete", "live_capture"} and (
-                    show_boxes or show_geometry
-                ):
+                    draw_alignment_boxes(display, box_layout, validation_result=stump_validation)
+                elif stage == "setup_complete" and show_geometry:
+                    if display is image:
+                        display = image.copy()
+                    env_context = None
+                    if isinstance(calibration, dict):
+                        env_context = calibration.get("environment_context")
+                    draw_setup_complete_overlay(
+                        display,
+                        calibration_result=calibration,
+                        environment_context=env_context,
+                    )
+                elif stage == "live_capture" and show_geometry:
                     if display is image:
                         display = image.copy()
                     env_context = None
@@ -459,38 +469,13 @@ def create_delivery_recorder_class(recording_state, live_bridge=None):
 
 def _sparse_live_stump_detections(model, frame, confidence=0.25):
     """Sparse stump detections for live calibration validation."""
-    if model is None or frame is None:
-        return []
-    try:
-        class_names = map_model_classes(model)
-        conf = float(confidence) if confidence is not None else 0.25
-        results = model.predict(frame, conf=conf, verbose=False, imgsz=640)
-        if not results:
-            return []
-        result = results[0]
-        if result.boxes is None or len(result.boxes) == 0:
-            return []
-        stump_detections = []
-        for box in result.boxes:
-            class_id = int(box.cls[0].cpu().numpy())
-            class_name = class_names.get(class_id)
-            if class_name != "stump":
-                continue
-            score = float(box.conf[0].cpu().numpy())
-            x1, y1, x2, y2 = [int(v) for v in box.xyxy[0].cpu().numpy()]
-            center = (int((x1 + x2) / 2), int((y1 + y2) / 2))
-            stump_detections.append(
-                {
-                    "class_name": "stump",
-                    "confidence": score,
-                    "box": (x1, y1, x2, y2),
-                    "center": center,
-                    "source": "live_calibration",
-                }
-            )
-        return stump_detections
-    except Exception:
-        return []
+    from Backends.src.stump_detection import resolve_live_stump_detections
+
+    return resolve_live_stump_detections(
+        frame,
+        primary_model=model,
+        conf=confidence,
+    )
 
 
 def _sparse_live_ball_detections(model, frame, confidence=0.25):
@@ -796,6 +781,7 @@ def render_live_stage_setup(live_bridge):
         st.session_state.live_stump_validation_history = None
         st.session_state.live_environment_context = None
         st.session_state.live_calibration_result = None
+        st.session_state.live_calibration_snapshot = None
         st.session_state.live_calibration_snapshot_frame = None
         st.session_state.live_calibration_locked = False
         st.session_state.live_capture_state = create_delivery_capture_state()
@@ -886,6 +872,7 @@ def _apply_calibration_solve_result(solve_result, live_layout, live_w, live_h, v
     st.session_state.live_calibration_result = solve_result
     st.session_state.live_calibration_payload = calibration
     st.session_state.live_alignment_report = report
+    st.session_state.live_calibration_snapshot = None
     st.session_state.live_calibration_snapshot_frame = None
     st.session_state.live_calibration_locked = True
 
@@ -912,7 +899,7 @@ def render_live_stage_camera_calibration_actions(
     ):
         frame = live_bridge.get_last_frame()
         if frame is None:
-            st.warning("Waiting for a camera frame. Allow camera access, then try again.")
+            st.warning("Camera frame not ready yet. Allow camera access, then try again.")
             return
 
         live_w, live_h = int(frame.shape[1]), int(frame.shape[0])
@@ -928,6 +915,7 @@ def render_live_stage_camera_calibration_actions(
             st.warning("Could not capture calibration snapshot. Try again.")
             return
 
+        st.session_state.live_calibration_snapshot = snapshot
         st.session_state.live_calibration_snapshot_frame = frame
         _set_live_session_stage("calibration_solving")
 
@@ -957,7 +945,7 @@ def render_live_stage_camera_calibration_actions(
             snapshot_validation = solve_result.get("validation") or validation
 
         if not solve_result.get("success"):
-            st.warning("Stumps not detected. Align both stump sets and try again.")
+            st.warning("Stumps not detected in both boxes. Align both stump sets and try again.")
             _set_live_session_stage("align_stumps")
             st.rerun()
 
@@ -980,6 +968,7 @@ def render_live_stage_camera_calibration_actions(
         st.session_state.live_stump_validation_history = None
         st.session_state.live_environment_context = None
         st.session_state.live_calibration_result = None
+        st.session_state.live_calibration_snapshot = None
         st.session_state.live_calibration_snapshot_frame = None
         st.session_state.live_calibration_locked = False
         with live_bridge.lock:
@@ -1072,6 +1061,7 @@ def render_live_stage_setup_complete_panel(live_bridge):
         st.session_state.live_stump_validation_history = None
         st.session_state.live_environment_context = None
         st.session_state.live_calibration_result = None
+        st.session_state.live_calibration_snapshot = None
         st.session_state.live_calibration_snapshot_frame = None
         st.session_state.live_calibration_locked = False
         with live_bridge.lock:
@@ -1089,6 +1079,7 @@ def render_live_stage_setup_complete_panel(live_bridge):
         st.session_state.live_stump_validation_history = None
         st.session_state.live_environment_context = None
         st.session_state.live_calibration_result = None
+        st.session_state.live_calibration_snapshot = None
         st.session_state.live_calibration_snapshot_frame = None
         st.session_state.live_calibration_locked = False
         with live_bridge.lock:
@@ -2364,6 +2355,7 @@ def reset_live_delivery_state():
     st.session_state.live_stump_validation_history = None
     st.session_state.live_environment_context = None
     st.session_state.live_calibration_result = None
+    st.session_state.live_calibration_snapshot = None
     st.session_state.live_calibration_snapshot_frame = None
     st.session_state.live_calibration_locked = False
     st.session_state.live_capture_state = None
@@ -2401,6 +2393,7 @@ def initialize_live_session_state():
         "live_stump_validation_history": None,
         "live_environment_context": None,
         "live_calibration_result": None,
+        "live_calibration_snapshot": None,
         "live_calibration_snapshot_frame": None,
         "live_calibration_locked": False,
         "live_capture_state": None,
@@ -2581,9 +2574,10 @@ def show_live_session_page():
         )
         with st.expander("Developer / Advanced", expanded=False):
             st.checkbox(
-                "Allow calibration without stump detection",
+                "Manual Override / Low",
                 value=False,
                 key="live_calibration_stump_override",
+                help="Continue without stump detections — low-quality geometry only.",
             )
     elif stage == "calibration_solving":
         st.markdown("### Live Bowling Session")

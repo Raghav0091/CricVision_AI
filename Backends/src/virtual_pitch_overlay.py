@@ -75,14 +75,16 @@ def _draw_white_black_label(frame, text, x, y):
     )
 
 
-def draw_alignment_boxes(frame, box_layout=None):
-    """align_stumps: red dashed boxes + small labels. No blue line, no virtual stumps."""
+def draw_alignment_boxes(frame, box_layout=None, validation_result=None):
+    """align_stumps: dashed boxes + small labels. Green when validation marks a side found."""
     layout = box_layout if isinstance(box_layout, dict) else {}
+    validation = validation_result if isinstance(validation_result, dict) else {}
     striker = layout.get("striker_stumps_box") or {}
     non_striker = layout.get("non_striker_stumps_box") or {}
     thickness = _frame_line_thickness(frame, base=2)
     drawn = False
-    color = (0, 0, 255)
+    red = (0, 0, 255)
+    green = (0, 200, 80)
 
     try:
         if all(k in striker for k in ("x1", "y1", "x2", "y2")):
@@ -92,6 +94,8 @@ def draw_alignment_boxes(frame, box_layout=None):
                 int(striker["x2"]),
                 int(striker["y2"]),
             )
+            striker_found = bool((validation.get("striker") or {}).get("found"))
+            color = green if striker_found else red
             _draw_dashed_rect(frame, x1, y1, x2, y2, color, thickness)
             _draw_white_black_label(frame, "Striker", x1, y1)
             drawn = True
@@ -102,6 +106,8 @@ def draw_alignment_boxes(frame, box_layout=None):
                 int(non_striker["x2"]),
                 int(non_striker["y2"]),
             )
+            non_found = bool((validation.get("non_striker") or {}).get("found"))
+            color = green if non_found else red
             _draw_dashed_rect(frame, x1, y1, x2, y2, color, thickness)
             _draw_white_black_label(frame, "Non-Striker", x1, y1)
             drawn = True
@@ -235,3 +241,13 @@ def draw_calibrated_overlay(frame, calibration, box_layout=None):
         calibration=calibration,
         show_pitch_axis=False,
     )
+
+
+def draw_setup_complete_overlay(frame, calibration_result=None, environment_context=None):
+    """setup_complete: virtual stumps + subtle corridor — no LBW line."""
+    report = calibration_result if isinstance(calibration_result, dict) else {}
+    merged = dict(report)
+    if isinstance(environment_context, dict) and environment_context:
+        merged.setdefault("environment_context", environment_context)
+        merged.setdefault("pitch_corridor", environment_context.get("pitch_corridor"))
+    return draw_virtual_stumps_overlay(frame, merged)

@@ -5,7 +5,7 @@ from __future__ import annotations
 from math import isfinite
 from typing import Any
 
-STUMP_LABELS = frozenset({"stump", "stumps", "wicket", "wickets"})
+STUMP_LABELS = frozenset({"stump", "stumps", "stump_set", "wicket", "wickets"})
 REJECTED_LABELS = frozenset(
     {
         "ball",
