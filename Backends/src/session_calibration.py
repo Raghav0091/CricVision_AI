@@ -669,6 +669,231 @@ def build_live_alignment_report(
     }
 
 
+def _three_vertical_stump_lines_from_box(box: Any) -> list[dict[str, int]]:
+    """Estimate three vertical stump lines spread across a bbox — visual overlay only."""
+    normalized = _normalize_box(box)
+    if normalized is None:
+        return []
+    x1, y1, x2, y2 = normalized["x1"], normalized["y1"], normalized["x2"], normalized["y2"]
+    width = max(1.0, x2 - x1)
+    xs = [x1 + width * frac for frac in (0.2, 0.5, 0.8)]
+    return [
+        {
+            "x1": int(round(x)),
+            "y1": int(round(y1)),
+            "x2": int(round(x)),
+            "y2": int(round(y2)),
+        }
+        for x in xs
+    ]
+
+
+def capture_calibration_snapshot(frame: Any, box_layout: Any) -> dict[str, Any]:
+    """Freeze the current live frame and alignment boxes for one-shot calibration."""
+    notes: list[str] = []
+    layout = box_layout if isinstance(box_layout, dict) else {}
+    if frame is None:
+        notes.append("No camera frame available for calibration snapshot.")
+        return {
+            "available": False,
+            "frame": None,
+            "box_layout": layout,
+            "notes": notes,
+        }
+    if not layout.get("available"):
+        notes.append("Alignment box layout unavailable for snapshot.")
+        return {
+            "available": False,
+            "frame": frame,
+            "box_layout": layout,
+            "notes": notes,
+        }
+    notes.append("Calibration snapshot captured from live stream frame.")
+    return {
+        "available": True,
+        "frame": frame,
+        "box_layout": layout,
+        "notes": notes,
+    }
+
+
+def build_virtual_stumps_from_calibration(calibration_result: Any) -> dict[str, Any]:
+    """Build estimated virtual stump lines from solved calibration — overlay only."""
+    notes: list[str] = [
+        "Estimated virtual stumps — visual context only, not official LBW/DRS.",
+    ]
+    result = calibration_result if isinstance(calibration_result, dict) else {}
+    if not result.get("available") and not result.get("success"):
+        notes.append("Calibration unavailable; virtual stumps not built.")
+        return {
+            "available": False,
+            "near_virtual_stumps": [],
+            "far_virtual_stumps": [],
+            "notes": notes,
+        }
+
+    striker_box = result.get("striker_stumps_box")
+    non_striker_box = result.get("non_striker_stumps_box")
+    striker_det = result.get("striker_stumps") if isinstance(result.get("striker_stumps"), dict) else {}
+    non_striker_det = (
+        result.get("non_striker_stumps") if isinstance(result.get("non_striker_stumps"), dict) else {}
+    )
+    if striker_box is None and striker_det.get("detections"):
+        first = striker_det["detections"][0] if striker_det["detections"] else {}
+        striker_box = (first.get("bbox") if isinstance(first, dict) else None)
+    if non_striker_box is None and non_striker_det.get("detections"):
+        first = non_striker_det["detections"][0] if non_striker_det["detections"] else {}
+        non_striker_box = (first.get("bbox") if isinstance(first, dict) else None)
+    layout_striker = (result.get("box_layout") or {}).get("striker_stumps_box")
+    layout_non = (result.get("box_layout") or {}).get("non_striker_stumps_box")
+    if layout_striker and layout_non:
+        striker_box = layout_striker
+        non_striker_box = layout_non
+    elif isinstance(result.get("environment_context"), dict):
+        env = result["environment_context"]
+        striker_box = striker_box or env.get("striker_box")
+        non_striker_box = non_striker_box or env.get("non_striker_box")
+
+    far_lines = _three_vertical_stump_lines_from_box(striker_box)
+    near_lines = _three_vertical_stump_lines_from_box(non_striker_box)
+    if not far_lines and not near_lines:
+        notes.append("Could not estimate virtual stump lines from calibration geometry.")
+        return {
+            "available": False,
+            "near_virtual_stumps": [],
+            "far_virtual_stumps": [],
+            "notes": notes,
+        }
+
+    notes.append("Three vertical lines estimated per stump set from detection/alignment bbox.")
+    return {
+        "available": True,
+        "near_virtual_stumps": near_lines,
+        "far_virtual_stumps": far_lines,
+        "non_striker_virtual_stumps": near_lines,
+        "striker_virtual_stumps": far_lines,
+        "notes": notes,
+    }
+
+
+def solve_stump_calibration_from_snapshot(
+    frame: Any,
+    box_layout: Any,
+    detections: Any = None,
+    frame_size: Any = None,
+    *,
+    dev_override: bool = False,
+) -> dict[str, Any]:
+    """One-shot stump validation + environment context from a frozen live frame."""
+    from Backends.src.live_stump_validator import validate_stumps_in_alignment_boxes
+
+    notes: list[str] = [
+        "Estimated single-camera geometry only — not official LBW/DRS.",
+    ]
+    layout = box_layout if isinstance(box_layout, dict) else {}
+    size = _parse_frame_size(frame_size)
+    if size is None and layout.get("frame_size") is not None:
+        size = _parse_frame_size(layout.get("frame_size"))
+    if frame is None:
+        notes.append("Snapshot frame missing.")
+        return {
+            "success": False,
+            "available": False,
+            "quality": "Unavailable",
+            "striker_stumps": None,
+            "non_striker_stumps": None,
+            "pitch_axis": None,
+            "pitch_corridor": [],
+            "virtual_stumps": build_virtual_stumps_from_calibration({}),
+            "environment_context": None,
+            "notes": notes,
+        }
+
+    validation = validate_stumps_in_alignment_boxes(detections, layout, frame_size=size)
+    notes.extend(list(validation.get("notes") or []))
+    striker_side = validation.get("striker") or {}
+    non_striker_side = validation.get("non_striker") or {}
+
+    if not validation.get("valid"):
+        if dev_override:
+            notes.append("Developer override: solving from alignment box centres without detections.")
+            calibration = build_calibration_from_alignment_boxes(layout, frame_size=size)
+            calibration["quality"] = "Manual Override / Low"
+            calibration["stumps_validated"] = False
+            quality = "Manual Override / Low"
+            env = {
+                "available": bool(calibration.get("available")),
+                "stumps_validated": False,
+                "view_direction": "Poor",
+                "striker_box": _normalize_box(layout.get("striker_stumps_box"), frame_size=size),
+                "non_striker_box": _normalize_box(layout.get("non_striker_stumps_box"), frame_size=size),
+                "pitch_axis": calibration.get("stump_line"),
+                "pitch_corridor": list(calibration.get("pitch_corridor") or []),
+                "quality": quality,
+                "notes": ["Developer override: continued without stump detections."],
+            }
+            result = {
+                "success": True,
+                "available": bool(calibration.get("available")),
+                "quality": quality,
+                "striker_stumps": striker_side,
+                "non_striker_stumps": non_striker_side,
+                "striker_stumps_box": calibration.get("striker_stumps_box"),
+                "non_striker_stumps_box": calibration.get("non_striker_stumps_box"),
+                "stump_line": calibration.get("stump_line"),
+                "pitch_axis": calibration.get("stump_line"),
+                "pitch_corridor": list(calibration.get("pitch_corridor") or []),
+                "environment_context": env,
+                "box_layout": layout,
+                "validation": validation,
+                "notes": notes,
+            }
+            result["virtual_stumps"] = build_virtual_stumps_from_calibration(result)
+            return result
+
+        notes.append("Stump validation failed on snapshot frame.")
+        return {
+            "success": False,
+            "available": False,
+            "quality": validation.get("quality", "Not Found"),
+            "striker_stumps": striker_side,
+            "non_striker_stumps": non_striker_side,
+            "pitch_axis": None,
+            "pitch_corridor": [],
+            "virtual_stumps": build_virtual_stumps_from_calibration({}),
+            "environment_context": None,
+            "validation": validation,
+            "notes": notes,
+        }
+
+    calibration = build_calibration_from_validated_stumps(layout, validation, frame_size=size)
+    env = calibration.get("environment_context") or build_environment_context_from_validated_stumps(
+        layout,
+        validation,
+        frame_size=size,
+    )
+    quality = calibration.get("quality") or validation.get("quality") or "Partial"
+    result = {
+        "success": True,
+        "available": bool(calibration.get("available")),
+        "quality": quality,
+        "striker_stumps": striker_side,
+        "non_striker_stumps": non_striker_side,
+        "striker_stumps_box": calibration.get("striker_stumps_box"),
+        "non_striker_stumps_box": calibration.get("non_striker_stumps_box"),
+        "stump_line": calibration.get("stump_line"),
+        "pitch_axis": env.get("pitch_axis") or calibration.get("stump_line"),
+        "pitch_corridor": list(calibration.get("pitch_corridor") or env.get("pitch_corridor") or []),
+        "environment_context": env,
+        "calibration": calibration,
+        "validation": validation,
+        "box_layout": layout,
+        "notes": notes,
+    }
+    result["virtual_stumps"] = build_virtual_stumps_from_calibration(result)
+    return result
+
+
 def build_calibration_from_validated_stumps(
     box_layout: Any,
     validation_result: Any,

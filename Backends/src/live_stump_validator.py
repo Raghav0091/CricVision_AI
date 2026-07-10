@@ -463,9 +463,18 @@ def validate_stumps_in_alignment_boxes(
         "legacy_quality": _legacy_quality_label(quality),
         "striker": striker,
         "non_striker": non_striker,
-        "stable": False,
+        "stable": valid,
         "notes": notes,
     }
+
+
+def validate_snapshot_stumps(
+    detections: Any,
+    box_layout: Any,
+    frame_size: Any = None,
+) -> dict[str, Any]:
+    """One-shot snapshot validation for FullTrack-style Continue calibration."""
+    return validate_stumps_in_alignment_boxes(detections, box_layout, frame_size=frame_size)
 
 
 def update_stump_validation_history(
