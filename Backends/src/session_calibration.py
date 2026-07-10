@@ -451,11 +451,11 @@ def build_premium_stump_alignment_boxes(frame_size: Any) -> dict[str, Any]:
     portrait = height > width
     # ponytail: portrait = phone/tablet upright; landscape = wider webcam/tablet.
     if portrait:
-        striker_w, striker_h, striker_cy = 0.34, 0.22, 0.28
-        non_w, non_h, non_cy = 0.68, 0.32, 0.74
+        striker_w, striker_h, striker_cy = 0.26, 0.18, 0.37
+        non_w, non_h, non_cy = 0.40, 0.26, 0.64
     else:
-        striker_w, striker_h, striker_cy = 0.24, 0.22, 0.26
-        non_w, non_h, non_cy = 0.40, 0.30, 0.76
+        striker_w, striker_h, striker_cy = 0.20, 0.16, 0.34
+        non_w, non_h, non_cy = 0.32, 0.24, 0.62
 
     def _centered_box(box_w_frac: float, box_h_frac: float, cy_frac: float) -> dict[str, float] | None:
         box_w = width * box_w_frac
