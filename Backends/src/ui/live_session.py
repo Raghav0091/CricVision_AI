@@ -28,6 +28,7 @@ from Backends.src.config.paths import (
     CRICKET_OBJECTS_MODEL_PATH,
     OUTPUTS_DIR,
     REVIEW_FRAMES_DIR,
+    VIDEO_ANALYSIS_OUTPUT_DIR,
 )
 from Backends.src.live_delivery_capture import (
     create_delivery_capture_state,
@@ -87,6 +88,8 @@ DEFAULT_RECORDING_FPS = 25
 LIVE_DELIVERIES_DIR = OUTPUTS_DIR / "live_deliveries"
 DEFAULT_LIVE_FRAME_WIDTH = 1280
 DEFAULT_LIVE_FRAME_HEIGHT = 720
+# ponytail: sparse live YOLO only — motion capture stays primary; never every frame.
+LIVE_DETECT_EVERY_N = 5
 
 
 class LiveSessionBridge:
@@ -102,8 +105,14 @@ class LiveSessionBridge:
         self.live_session_active = False
         self.capture_state = create_delivery_capture_state()
         self.last_saved_path = None
+        self.saved_clip_paths = []
         self.status_message = "Waiting for delivery..."
         self.frame_size = (DEFAULT_LIVE_FRAME_WIDTH, DEFAULT_LIVE_FRAME_HEIGHT)
+        # ponytail: detector warmed on Streamlit thread; webrtc only reuses the handle.
+        self.detector_model = None
+        self.ball_confidence = 0.25
+        self.detect_frame_index = 0
+        self.last_ball_point = None
 
     def configure(
         self,
@@ -114,6 +123,8 @@ class LiveSessionBridge:
         show_alignment_boxes=False,
         show_calibrated_geometry=False,
         live_session_active=False,
+        detector_model=None,
+        ball_confidence=None,
     ):
         with self.lock:
             self.stage = stage or "setup"
@@ -122,12 +133,32 @@ class LiveSessionBridge:
             self.show_alignment_boxes = bool(show_alignment_boxes)
             self.show_calibrated_geometry = bool(show_calibrated_geometry)
             self.live_session_active = bool(live_session_active)
+            if detector_model is not None:
+                self.detector_model = detector_model
+            if ball_confidence is not None:
+                try:
+                    self.ball_confidence = float(ball_confidence)
+                except (TypeError, ValueError):
+                    pass
 
     def reset_capture(self):
         with self.lock:
             self.capture_state = create_delivery_capture_state()
             self.last_saved_path = None
+            self.saved_clip_paths = []
             self.status_message = "Waiting for delivery..."
+            self.detect_frame_index = 0
+            self.last_ball_point = None
+
+    def record_saved_clip(self, path):
+        """Thread-safe note that a delivery clip was written to disk."""
+        if not path:
+            return
+        path_str = str(path)
+        with self.lock:
+            self.last_saved_path = path_str
+            if path_str not in self.saved_clip_paths:
+                self.saved_clip_paths.append(path_str)
 
     def snapshot(self):
         with self.lock:
@@ -135,10 +166,12 @@ class LiveSessionBridge:
                 "recording": bool(self.capture_state.get("recording")),
                 "delivery_count": int(self.capture_state.get("delivery_count") or 0),
                 "last_saved_path": self.last_saved_path,
+                "saved_clip_paths": list(self.saved_clip_paths),
                 "status_message": self.status_message,
                 "live_session_active": self.live_session_active,
                 "frame_size": self.frame_size,
                 "stage": self.stage,
+                "last_ball_point": self.last_ball_point,
             }
 
 
@@ -219,6 +252,9 @@ def create_delivery_recorder_class(recording_state, live_bridge=None):
                     show_geometry = bridge.show_calibrated_geometry
                     session_active = bridge.live_session_active
                     capture_state = bridge.capture_state
+                    detector_model = bridge.detector_model
+                    ball_confidence = bridge.ball_confidence
+                    detect_frame_index = bridge.detect_frame_index
 
                 # ponytail: stage is the source of truth — flags alone can be stale across webrtc frames.
                 show_geometry = bool(show_geometry) and stage in {
@@ -239,11 +275,31 @@ def create_delivery_recorder_class(recording_state, live_bridge=None):
                         with bridge.lock:
                             bridge.box_layout = live_layout
 
-                # ponytail: light motion capture only — no YOLO on every live frame.
+                # ponytail: motion capture primary; optional sparse YOLO hint if model already warm.
                 if session_active and stage == "delivery_capture":
+                    detections = None
+                    ball_point = None
+                    run_detect = (
+                        detector_model is not None
+                        and (detect_frame_index % LIVE_DETECT_EVERY_N) == 0
+                    )
+                    with bridge.lock:
+                        bridge.detect_frame_index = detect_frame_index + 1
+                    if run_detect:
+                        detections, ball_point = _sparse_live_ball_detections(
+                            detector_model,
+                            image,
+                            confidence=ball_confidence,
+                        )
+                        with bridge.lock:
+                            bridge.last_ball_point = ball_point
+                    else:
+                        with bridge.lock:
+                            ball_point = bridge.last_ball_point
+
                     update = update_delivery_capture_state(
                         image,
-                        detections=None,
+                        detections=detections,
                         calibration=(
                             calibration
                             if isinstance(calibration, dict) and calibration.get("available")
@@ -270,21 +326,39 @@ def create_delivery_recorder_class(recording_state, live_bridge=None):
                                 prefix="delivery",
                             )
                             if save_result.get("saved"):
-                                bridge.last_saved_path = save_result.get("path")
+                                path_str = str(save_result.get("path"))
+                                bridge.last_saved_path = path_str
+                                if path_str not in bridge.saved_clip_paths:
+                                    bridge.saved_clip_paths.append(path_str)
                                 bridge.status_message = (
-                                    "Replay available after clip processing"
+                                    "Clip saved — analysing next..."
                                 )
                             else:
                                 bridge.status_message = "Continue bowling"
 
+                    if ball_point is not None:
+                        if display is image:
+                            display = image.copy()
+                        try:
+                            cv2.circle(
+                                display,
+                                (int(ball_point[0]), int(ball_point[1])),
+                                8,
+                                (255, 180, 0),
+                                2,
+                            )
+                        except Exception:
+                            pass
+
                 # ponytail: stage picks the drawer — never calibrated overlay before Continue.
                 if stage == "camera_calibration" and show_boxes:
-                    display = image.copy()
+                    display = image.copy() if display is image else display
                     draw_alignment_overlay(display, box_layout)
                 elif stage in {"calibrated_ready", "delivery_capture"} and (
                     show_boxes or show_geometry
                 ):
-                    display = image.copy()
+                    if display is image:
+                        display = image.copy()
                     draw_calibrated_overlay(
                         display,
                         calibration if show_geometry else None,
@@ -295,6 +369,237 @@ def create_delivery_recorder_class(recording_state, live_bridge=None):
 
     return DeliveryRecorder
 
+
+def _sparse_live_ball_detections(model, frame, confidence=0.25):
+    """Optional light ball hint for capture trigger/overlay. Never invents points."""
+    if model is None or frame is None:
+        return None, None
+    try:
+        class_names = map_model_classes(model)
+        conf = float(confidence) if confidence is not None else 0.25
+        results = model.predict(frame, conf=conf, verbose=False, imgsz=640)
+        if not results:
+            return None, None
+        result = results[0]
+        if result.boxes is None or len(result.boxes) == 0:
+            return None, None
+        ball_detections = []
+        for box in result.boxes:
+            class_id = int(box.cls[0].cpu().numpy())
+            class_name = class_names.get(class_id)
+            if class_name != "ball":
+                continue
+            score = float(box.conf[0].cpu().numpy())
+            x1, y1, x2, y2 = [int(v) for v in box.xyxy[0].cpu().numpy()]
+            center = (int((x1 + x2) / 2), int((y1 + y2) / 2))
+            ball_detections.append(
+                {
+                    "class_name": "ball",
+                    "confidence": score,
+                    "box": (x1, y1, x2, y2),
+                    "center": center,
+                }
+            )
+        if not ball_detections:
+            return None, None
+        best = max(ball_detections, key=lambda item: item["confidence"])
+        return {"ball_detections": ball_detections}, best["center"]
+    except Exception:
+        return None, None
+
+
+def warm_live_detector():
+    """Load current_best on the Streamlit thread for optional sparse live hints."""
+    try:
+        return get_cached_yolo_model("current_best")
+    except Exception:
+        return None
+
+
+def analyse_saved_live_clip(
+    clip_path,
+    *,
+    model_path=None,
+    model_key="current_best",
+    confidence=0.25,
+    imgsz=640,
+    use_ensemble=False,
+    show_pitch_roi=False,
+    field_setup=None,
+    session_calibration=None,
+    model_name=None,
+    preset_name=None,
+):
+    """Run the existing Video Analysis pipeline on one saved live clip.
+
+    Defensive: failures return success=False and never raise into the live UI.
+    """
+    from Backends.src.ui.video_analysis import process_video
+
+    clip = Path(clip_path) if clip_path else None
+    if clip is None or not clip.is_file():
+        return {
+            "success": False,
+            "error": f"Saved clip not found: {clip_path}",
+            "source_clip_path": str(clip_path) if clip_path else None,
+        }
+
+    VIDEO_ANALYSIS_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    raw_output = VIDEO_ANALYSIS_OUTPUT_DIR / f"live_clip_{stamp}_raw.mp4"
+    browser_output = VIDEO_ANALYSIS_OUTPUT_DIR / f"live_clip_{stamp}.mp4"
+    calibration = (
+        session_calibration
+        if isinstance(session_calibration, dict)
+        else {}
+    )
+
+    try:
+        result = process_video(
+            video_path=clip,
+            output_path=raw_output,
+            model_path=Path(model_path) if model_path else CRICKET_OBJECTS_MODEL_PATH,
+            model_key=model_key,
+            confidence=confidence,
+            imgsz=imgsz,
+            use_ensemble=use_ensemble,
+            show_pitch_roi=show_pitch_roi,
+            field_setup=field_setup,
+            # ponytail: Smart Balanced keeps live post-clip analysis usable on short clips.
+            speed_mode="Smart Balanced",
+            generate_processed_video=True,
+            overlay_detail="Clean",
+        )
+    except Exception as error:
+        return {
+            "success": False,
+            "error": f"Live clip analysis failed: {type(error).__name__}: {error}",
+            "source_clip_path": str(clip),
+            "session_calibration": calibration,
+        }
+
+    if not isinstance(result, dict):
+        return {
+            "success": False,
+            "error": "Live clip analysis returned an empty result.",
+            "source_clip_path": str(clip),
+            "session_calibration": calibration,
+        }
+
+    result["source_clip_path"] = str(clip)
+    result["session_calibration"] = calibration
+    result["active_model"] = model_name or result.get("active_model") or "Ball + Stump Detector"
+    result["active_preset"] = preset_name or result.get("active_preset") or "Balanced Mode"
+    result["analysis_source"] = "live_delivery_clip"
+
+    if result.get("success") and result.get("processed_video_generated") and raw_output.exists():
+        result["raw_output_path"] = str(raw_output)
+        try:
+            final_path = convert_to_browser_mp4(
+                input_path=raw_output,
+                output_path=browser_output,
+            )
+            result["output_path"] = str(final_path)
+            result["processed_video_conversion"] = "converted"
+        except Exception as conv_error:
+            result["output_path"] = str(raw_output)
+            result["processed_video_conversion"] = "failed"
+            result["processed_video_conversion_error"] = str(conv_error)
+
+    if not result.get("success"):
+        result.setdefault("source_clip_path", str(clip))
+        result.setdefault("session_calibration", calibration)
+
+    return result
+
+
+def render_live_delivery_result_panel(result, *, expanded_details=False):
+    """Compact last-delivery summary — not the full Video Analysis page."""
+    if not result:
+        st.caption("No delivery analysis yet.")
+        return
+
+    source_clip = result.get("source_clip_path")
+    if source_clip:
+        st.caption(f"Saved clip: `{source_clip}`")
+        if Path(source_clip).is_file():
+            try:
+                st.video(str(source_clip))
+            except Exception:
+                pass
+
+    if not result.get("success"):
+        st.error(result.get("error") or "Delivery analysis failed. Clip was kept.")
+        return
+
+    cols = st.columns(4)
+    cols[0].metric("Line", result.get("estimated_line") or "Unknown")
+    cols[1].metric("Length", result.get("estimated_length") or "Unknown")
+    cols[2].metric(
+        "Ball detect",
+        f"{float(result.get('ball_detection_rate') or 0):.0f}%",
+    )
+    cols[3].metric(
+        "Tracking",
+        result.get("overall_tracking_quality")
+        or result.get("tracking_quality")
+        or "—",
+    )
+
+    path_source = "—"
+    try:
+        from Backends.src.ui.video_analysis import (
+            physics_path_source,
+            prepare_result_path_validity,
+        )
+
+        physics = result.get("physics_trajectory") or {}
+        validity = prepare_result_path_validity(result)
+        path_source = physics_path_source(physics, validity) or "—"
+    except Exception:
+        physics = result.get("physics_trajectory") or {}
+        path_source = physics.get("input_path_source") or path_source
+
+    badge_cols = st.columns(3)
+    badge_cols[0].caption(f"Path source: {path_source}")
+    badge_cols[1].caption(
+        f"Calibration: {result.get('calibration_status') or 'Not calibrated'}"
+    )
+    quality = (result.get("session_calibration") or {}).get("quality")
+    if quality:
+        badge_cols[2].caption(f"Session cal: {quality}")
+
+    processed = result.get("output_path")
+    if processed and Path(processed).is_file():
+        st.markdown("**Processed replay**")
+        try:
+            st.video(str(processed))
+        except Exception:
+            st.caption(f"Processed video: `{processed}`")
+    else:
+        st.info("Replay / trajectory available after processing when detections are strong enough.")
+
+    with st.expander("Trajectory / physics details", expanded=expanded_details):
+        try:
+            from Backends.src.ui.video_analysis import render_trajectory_replay_section
+
+            render_trajectory_replay_section(result)
+        except Exception as error:
+            st.caption(f"Trajectory replay unavailable: {error}")
+        physics = result.get("physics_trajectory") or {}
+        if physics:
+            st.json(
+                {
+                    "path_source": path_source,
+                    "bounce": physics.get("bounce_point") or result.get("estimated_bounce_point"),
+                    "fit_quality": physics.get("fit_quality")
+                    or result.get("trajectory_fit_quality"),
+                    "notes": physics.get("notes") or [],
+                }
+            )
+
+    with st.expander("Full delivery report", expanded=False):
+        show_analysis_output(result)
 
 def _frame_line_thickness(frame, base=2):
     height, width = frame.shape[:2]
@@ -560,7 +865,15 @@ def render_live_stage_calibrated_ready_panel(live_bridge):
     cols = st.columns(2)
     if cols[0].button("Start Bowling / Start Capture", type="primary", use_container_width=True):
         live_bridge.reset_capture()
+        detector = warm_live_detector()
+        with live_bridge.lock:
+            live_bridge.detector_model = detector
         st.session_state.live_auto_session_active = True
+        st.session_state.live_delivery_log = []
+        st.session_state.live_analysed_clip_paths = []
+        st.session_state.live_last_result = None
+        st.session_state.live_result_by_clip = {}
+        st.session_state.live_pending_clip_path = None
         _set_live_session_stage("delivery_capture")
         st.session_state.live_status_message = "Waiting for delivery..."
         st.rerun()
@@ -573,15 +886,133 @@ def render_live_stage_calibrated_ready_panel(live_bridge):
     return calibration
 
 
+def _live_analysis_settings_from_session():
+    """Read current Live Session model/preset choices without mutating globals."""
+    model_options = get_live_model_options()
+    selected_model_name = st.session_state.get(
+        "live_session_model",
+        list(model_options.keys())[0],
+    )
+    selected_model = model_options.get(selected_model_name) or next(iter(model_options.values()))
+    preset_name = st.session_state.get("live_session_preset", "Balanced Mode")
+    active_preset = DETECTION_PRESETS.get(preset_name) or DETECTION_PRESETS.get(
+        "Balanced Mode",
+        {"confidence": 0.25, "imgsz": 640},
+    )
+    return {
+        "model_path": str(selected_model.get("path") or CRICKET_OBJECTS_MODEL_PATH),
+        "model_key": selected_model.get("model_key"),
+        "use_ensemble": bool(selected_model.get("ensemble")),
+        "confidence": active_preset.get("confidence", 0.25),
+        "imgsz": active_preset.get("imgsz", 640),
+        "show_pitch_roi": bool(st.session_state.get("live_session_show_roi", False)),
+        "model_name": selected_model_name,
+        "preset_name": preset_name,
+        "field_setup": st.session_state.get("current_field_setup"),
+        "session_calibration": st.session_state.get("live_calibration_payload"),
+    }
+
+
+def _next_unanalysed_clip_path(live_bridge):
+    snap = live_bridge.snapshot()
+    analysed = set(st.session_state.get("live_analysed_clip_paths") or [])
+    for path in snap.get("saved_clip_paths") or []:
+        if path and path not in analysed:
+            return path
+    last_path = snap.get("last_saved_path") or st.session_state.get("live_last_saved_delivery")
+    if last_path and last_path not in analysed:
+        return last_path
+    return None
+
+
+def _maybe_poll_for_saved_clips(live_bridge):
+    """If Streamlit supports fragments, lightly poll for webrtc-saved clips."""
+    fragment = getattr(st, "fragment", None)
+    if fragment is None:
+        return
+    try:
+
+        @fragment(run_every=2.5)
+        def _poll():
+            if _next_unanalysed_clip_path(live_bridge):
+                st.rerun()
+
+        _poll()
+    except Exception:
+        # ponytail: older Streamlit or fragment quirks — Refresh status button still works.
+        pass
+
+
+def process_pending_live_clip_analysis(live_bridge):
+    """If a new saved clip exists, analyse it once via Video Analysis process_video."""
+    pending = st.session_state.get("live_pending_clip_path")
+    if not pending:
+        pending = _next_unanalysed_clip_path(live_bridge)
+    if not pending:
+        return False
+
+    st.session_state.live_pending_clip_path = pending
+    st.session_state.live_last_saved_delivery = pending
+    settings = _live_analysis_settings_from_session()
+    with st.spinner("Analysing delivery..."):
+        result = analyse_saved_live_clip(pending, **settings)
+
+    analysed = list(st.session_state.get("live_analysed_clip_paths") or [])
+    if pending not in analysed:
+        analysed.append(pending)
+    st.session_state.live_analysed_clip_paths = analysed
+    st.session_state.live_last_result = result
+    st.session_state.live_pending_clip_path = None
+
+    by_clip = dict(st.session_state.get("live_result_by_clip") or {})
+    by_clip[pending] = result
+    st.session_state.live_result_by_clip = by_clip
+
+    log = list(st.session_state.get("live_delivery_log") or [])
+    log.append(
+        {
+            "clip_path": pending,
+            "status": "done" if result.get("success") else "error",
+            "error": None if result.get("success") else result.get("error"),
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "line": result.get("estimated_line"),
+            "length": result.get("estimated_length"),
+            "ball_detection_rate": result.get("ball_detection_rate"),
+            "output_path": result.get("output_path"),
+        }
+    )
+    st.session_state.live_delivery_log = log
+
+    if result.get("success"):
+        try:
+            _persist_result_to_session(
+                result,
+                "Live Session",
+                video_name=Path(pending).name,
+            )
+        except Exception:
+            pass
+        live_bridge.status_message = "Analysis ready — continue bowling"
+    else:
+        live_bridge.status_message = "Analysis failed — clip kept; continue bowling"
+
+    return True
+
+
 def render_live_stage_delivery_capture(live_bridge):
-    """Stage: delivery_capture — motion-based short clip capture."""
+    """Stage: delivery_capture — compact header above camera; drains pending analysis."""
     from Backends.src.ui.theme import render_step_header, render_status_row
 
     render_step_header(
         "Stage 3",
         "Live Capture",
-        "Bowl deliveries. Clips save automatically when motion is detected.",
+        "Bowl deliveries. Clips save automatically, then each clip is analysed.",
     )
+
+    # Drain one pending clip analysis per rerun (keeps UI responsive).
+    if process_pending_live_clip_analysis(live_bridge):
+        st.rerun()
+
     snap = live_bridge.snapshot()
     status = snap.get("status_message") or "Waiting for delivery..."
     recording = bool(snap.get("recording"))
@@ -593,21 +1024,41 @@ def render_live_stage_delivery_capture(live_bridge):
     )
     st.info(status)
 
+
+def render_live_stage_delivery_capture_panel(live_bridge):
+    """Below-camera controls + last delivery result for delivery_capture."""
+    snap = live_bridge.snapshot()
+    last_path = snap["last_saved_path"] or st.session_state.get("live_last_saved_delivery")
+
     status_cols = st.columns(3)
     status_cols[0].metric("Delivery count", snap["delivery_count"])
     status_cols[1].metric(
         "Recording status",
-        "Recording" if recording else "Waiting",
+        "Recording" if snap.get("recording") else "Waiting",
     )
-    last_path = snap["last_saved_path"] or st.session_state.get("live_last_saved_delivery")
     status_cols[2].metric(
         "Last saved clip",
         Path(last_path).name if last_path else "None",
     )
+
+    poll_cols = st.columns(2)
+    if poll_cols[0].button("Refresh status", use_container_width=True):
+        st.rerun()
+    poll_cols[1].caption("Click refresh after bowling if the clip status looks stale.")
+
+    # ponytail: optional Streamlit fragment poll so webrtc-saved clips surface without a new dep.
+    _maybe_poll_for_saved_clips(live_bridge)
+
     if last_path:
         st.session_state.live_last_saved_delivery = last_path
         st.caption(f"Last saved delivery clip: `{last_path}`")
-        st.caption("Replay available after clip processing")
+
+    last_result = st.session_state.get("live_last_result")
+    if last_result:
+        st.markdown("### Last delivery result")
+        render_live_delivery_result_panel(last_result)
+    elif last_path:
+        st.caption("Replay / trajectory appear here after clip processing.")
 
     cols = st.columns(2)
     if cols[0].button("Stop Session", type="primary", use_container_width=True):
@@ -621,7 +1072,10 @@ def render_live_stage_delivery_capture(live_bridge):
                     prefix="delivery",
                 )
                 if save_result.get("saved"):
-                    live_bridge.last_saved_path = save_result.get("path")
+                    path_str = str(save_result.get("path"))
+                    live_bridge.last_saved_path = path_str
+                    if path_str not in live_bridge.saved_clip_paths:
+                        live_bridge.saved_clip_paths.append(path_str)
                     live_bridge.capture_state["delivery_count"] = (
                         int(live_bridge.capture_state.get("delivery_count") or 0) + 1
                     )
@@ -632,6 +1086,9 @@ def render_live_stage_delivery_capture(live_bridge):
             live_bridge.capture_state["frames"] = []
             live_bridge.status_message = "Session stopped"
         st.session_state.live_auto_session_active = False
+        # Analyse any remaining unprocessed clips before results.
+        while process_pending_live_clip_analysis(live_bridge):
+            pass
         _set_live_session_stage("session_results")
         st.session_state.live_status_message = "Session stopped."
         st.rerun()
@@ -645,34 +1102,91 @@ def render_live_stage_delivery_capture(live_bridge):
 
 
 def render_live_stage_session_results(live_bridge):
-    """Stage: session_results — minimal summary after stop."""
+    """Stage: session_results — recent deliveries + last analysis."""
     from Backends.src.ui.theme import render_step_header, render_status_row
+
+    # Catch any clip saved just before stop that wasn't analysed yet.
+    if process_pending_live_clip_analysis(live_bridge):
+        st.rerun()
 
     render_step_header(
         "Stage 4",
         "Session Results",
-        "Recent deliveries and saved clips from this session.",
+        "Recent deliveries with clip + analysis status.",
     )
     snap = live_bridge.snapshot()
+    log = list(st.session_state.get("live_delivery_log") or [])
     last_path = snap["last_saved_path"] or st.session_state.get("live_last_saved_delivery")
+    last_result = st.session_state.get("live_last_result")
     render_status_row(
         [
             (f"Deliveries: {snap['delivery_count']}", "success"),
-            ("Replay: Available" if last_path else "Replay: None", "gold" if last_path else "default"),
+            (
+                "Analysis: Ready" if last_result and last_result.get("success") else "Analysis: Pending/None",
+                "gold" if last_result else "default",
+            ),
         ]
     )
     st.metric("Deliveries captured", snap["delivery_count"])
-    if last_path:
+
+    if log:
+        st.markdown("### Recent deliveries")
+        for index, entry in enumerate(reversed(log), start=1):
+            status = entry.get("status") or "unknown"
+            label = Path(entry.get("clip_path") or "").name or f"Delivery {index}"
+            with st.expander(
+                f"{label} — {status}"
+                + (
+                    f" | {entry.get('line') or '—'} / {entry.get('length') or '—'}"
+                    if status == "done"
+                    else ""
+                ),
+                expanded=(index == 1),
+            ):
+                st.caption(f"Clip: `{entry.get('clip_path')}`")
+                if entry.get("error"):
+                    st.error(entry["error"])
+                clip = entry.get("clip_path")
+                if clip and Path(clip).is_file():
+                    try:
+                        st.video(str(clip))
+                    except Exception:
+                        pass
+                stored = (st.session_state.get("live_result_by_clip") or {}).get(clip)
+                if stored:
+                    render_live_delivery_result_panel(stored, expanded_details=(index == 1))
+                elif (
+                    last_result
+                    and last_result.get("source_clip_path") == entry.get("clip_path")
+                ):
+                    render_live_delivery_result_panel(last_result, expanded_details=True)
+                elif entry.get("output_path") and Path(entry["output_path"]).is_file():
+                    st.markdown("**Processed replay**")
+                    try:
+                        st.video(str(entry["output_path"]))
+                    except Exception:
+                        st.caption(entry["output_path"])
+    elif last_path:
         st.caption(f"Last saved clip: `{last_path}`")
         st.info("Replay available after clip processing")
     else:
         st.caption("No delivery clips were saved in this session.")
+
+    if last_result and not log:
+        st.markdown("### Last analysis result")
+        render_live_delivery_result_panel(last_result, expanded_details=True)
+
     if st.button("Start New Session", type="primary", use_container_width=True):
         live_bridge.reset_capture()
         st.session_state.live_auto_session_active = False
         st.session_state.live_alignment_report = None
         st.session_state.live_calibration_payload = None
         st.session_state.live_alignment_box_layout = None
+        st.session_state.live_delivery_log = []
+        st.session_state.live_analysed_clip_paths = []
+        st.session_state.live_last_result = None
+        st.session_state.live_pending_clip_path = None
+        st.session_state.live_result_by_clip = {}
         _set_live_session_stage("setup")
         st.rerun()
 
@@ -1626,6 +2140,10 @@ def reset_live_delivery_state():
     st.session_state.live_alignment_frame_size = None
     st.session_state.live_alignment_report = None
     st.session_state.live_calibration_payload = None
+    st.session_state.live_delivery_log = []
+    st.session_state.live_analysed_clip_paths = []
+    st.session_state.live_pending_clip_path = None
+    st.session_state.live_result_by_clip = {}
     if "live_session_bridge" in st.session_state:
         st.session_state.live_session_bridge.reset_capture()
 
@@ -1650,6 +2168,10 @@ def initialize_live_session_state():
         "live_alignment_report": None,
         "live_calibration_payload": None,
         "live_session_bridge": LiveSessionBridge(),
+        "live_delivery_log": [],
+        "live_analysed_clip_paths": [],
+        "live_pending_clip_path": None,
+        "live_result_by_clip": {},
     }
 
     for key, value in defaults.items():
@@ -1835,8 +2357,6 @@ def show_live_session_page():
         show_calibrated_geometry = True
     elif stage == "session_results":
         render_live_stage_session_results(live_bridge)
-        with st.expander("Recent Delivery Summary", expanded=True):
-            show_analysis_output(st.session_state.live_last_result)
         with st.expander("Developer / Advanced", expanded=False):
             st.caption("Session debug snapshot")
             st.json(
@@ -1845,6 +2365,8 @@ def show_live_session_page():
                     "delivery_count": bridge_snap.get("delivery_count"),
                     "last_saved_path": bridge_snap.get("last_saved_path")
                     or st.session_state.get("live_last_saved_delivery"),
+                    "analysed_clips": st.session_state.get("live_analysed_clip_paths"),
+                    "delivery_log_count": len(st.session_state.get("live_delivery_log") or []),
                 }
             )
     else:
@@ -1879,6 +2401,12 @@ def show_live_session_page():
         session_active = bool(st.session_state.get("live_auto_session_active", False)) and (
             stage == "delivery_capture"
         )
+        detector_for_bridge = None
+        if stage == "delivery_capture":
+            with live_bridge.lock:
+                detector_for_bridge = live_bridge.detector_model
+            if detector_for_bridge is None:
+                detector_for_bridge = warm_live_detector()
         live_bridge.configure(
             stage=stage,
             box_layout=box_layout,
@@ -1886,6 +2414,8 @@ def show_live_session_page():
             show_alignment_boxes=show_alignment_boxes,
             show_calibrated_geometry=show_calibrated_geometry,
             live_session_active=session_active,
+            detector_model=detector_for_bridge,
+            ball_confidence=confidence,
         )
 
         rtc_config = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
@@ -1932,6 +2462,8 @@ def show_live_session_page():
                 show_calibrated_geometry=True,
                 live_session_active=False,
             )
+        elif stage == "delivery_capture":
+            render_live_stage_delivery_capture_panel(live_bridge)
 
         if show_setup_panels:
             with st.expander("Field Setup", expanded=False):
