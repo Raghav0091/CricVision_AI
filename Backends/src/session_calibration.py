@@ -587,3 +587,64 @@ def build_live_alignment_report(
         "calibration": calibration,
         "notes": notes,
     }
+
+
+def build_calibration_from_validated_stumps(
+    box_layout: Any,
+    validation_result: Any,
+    frame_size: Any = None,
+) -> dict[str, Any]:
+    """Build live calibration only after stump validation passes."""
+    from Backends.src.live_stump_validator import build_environment_context_from_stumps
+
+    notes: list[str] = [
+        "Estimated single-camera geometry only — not official LBW or DRS.",
+    ]
+    validation = validation_result if isinstance(validation_result, dict) else {}
+    if not validation.get("valid"):
+        notes.append("Stump validation did not pass; calibration unavailable.")
+        notes.extend(list(validation.get("notes") or []))
+        striker_box = None
+        non_striker_box = None
+        if isinstance(box_layout, dict):
+            striker_box = box_layout.get("striker_stumps_box")
+            non_striker_box = box_layout.get("non_striker_stumps_box")
+        return {
+            "available": False,
+            "quality": validation.get("quality", "Unavailable"),
+            "stumps_validated": False,
+            "striker_stumps_box": striker_box,
+            "non_striker_stumps_box": non_striker_box,
+            "stump_line": None,
+            "pitch_corridor": None,
+            "environment_context": build_environment_context_from_stumps(
+                validation,
+                box_layout,
+                frame_size=frame_size,
+            ),
+            "notes": notes,
+        }
+
+    base = build_calibration_from_alignment_boxes(box_layout, frame_size=frame_size)
+    notes.extend(list(base.get("notes") or []))
+    environment_context = build_environment_context_from_stumps(
+        validation,
+        box_layout,
+        frame_size=frame_size,
+    )
+    quality = validation.get("quality") or base.get("quality", "Partial")
+    available = bool(base.get("available"))
+    if not available:
+        notes.append("Validated stumps present but corridor geometry unavailable.")
+
+    return {
+        "available": available,
+        "quality": quality,
+        "stumps_validated": True,
+        "striker_stumps_box": base.get("striker_stumps_box"),
+        "non_striker_stumps_box": base.get("non_striker_stumps_box"),
+        "stump_line": base.get("stump_line") if available else None,
+        "pitch_corridor": list(base.get("pitch_corridor") or []) if available else None,
+        "environment_context": environment_context,
+        "notes": notes,
+    }
