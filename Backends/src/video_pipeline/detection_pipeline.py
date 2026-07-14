@@ -94,6 +94,12 @@ def get_model_options():
             "model_key": "current_best",
         },
     }
+    baseline_path = get_model_path("ball_only_e2_1280_baseline")
+    if baseline_path is not None and baseline_path.is_file():
+        options["Ball Only E2 1280 Baseline"] = {
+            "path": baseline_path,
+            "model_key": "ball_only_e2_1280_baseline",
+        }
     if len(get_available_ensemble_model_names()) >= 2:
         options[ENSEMBLE_MODEL_NAME] = {
             "path": None,

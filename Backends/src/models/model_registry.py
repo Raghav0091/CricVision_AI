@@ -35,6 +35,15 @@ MODEL_REGISTRY = {
         "classes": ["ball"],
         "default": False,
     },
+    "ball_only_e2_1280_baseline": {
+        "name": "Ball Only E2 1280 Baseline",
+        "local_path": "Models/Copy of ball_only_E2_1280_baseline.pt",
+        "path": "Models/Copy of ball_only_E2_1280_baseline.pt",
+        "type": "yolo_detection",
+        "task": "ball_detection",
+        "classes": ["ball"],
+        "default": False,
+    },
     "cricshot_bat": {
         "name": "CricShot10k Bat Detector",
         "local_path": "Models/CricShot10k/bat_detector.pt",

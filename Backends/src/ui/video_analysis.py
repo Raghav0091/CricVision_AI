@@ -3104,6 +3104,7 @@ def show_video_analysis_page():
             batting_ball_options = {
                 "Current Best Ball + Stump Model": "current_best",
                 "CricShot10k Ball Detector": "cricshot_ball",
+                "Ball Only E2 1280 Baseline": "ball_only_e2_1280_baseline",
             }
             selected_model_name = st.selectbox(
                 "Ball model",
@@ -3234,6 +3235,7 @@ def show_video_analysis_page():
         batting_ball_options = {
             "Current Best Ball + Stump Model": "current_best",
             "CricShot10k Ball Detector": "cricshot_ball",
+            "Ball Only E2 1280 Baseline": "ball_only_e2_1280_baseline",
         }
         selected_model_name = st.session_state.get(
             "video_analysis_batting_ball_model",
