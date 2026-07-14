@@ -247,8 +247,8 @@ Removal must be recorded below after tests verify it.
 
 ### KEEP FOR FUTURE FEATURE
 
-- `smart_pipeline.crop_frame_with_roi` and
-  `restore_roi_boxes_to_full_frame`
+- ROI inference may return later through the tested worker/shared-package path;
+  the unused legacy crop/restore placeholders were removed in the 2026-07-14 audit.
 - `model_loader.get_cached_keras_model` and shot-classifier registry metadata
 - Experimental player/segmentation registry entries
 - Dev-only Field Map, Datasets, and Training pages

@@ -198,44 +198,6 @@ def update_rough_impact_frame(frame_index, ball_detections, bat_detections, curr
     return current_best
 
 
-def crop_frame_with_roi(frame, roi):
-    """LEGACY placeholder: ROI crop helper reserved for future safe ROI inference."""
-    if roi is None:
-        return frame, 0, 0
-    x1, y1, x2, y2 = roi
-    if x2 <= x1 or y2 <= y1:
-        return frame, 0, 0
-    return frame[y1:y2, x1:x2], x1, y1
-
-
-def restore_roi_boxes_to_full_frame(detections, offset_x, offset_y):
-    """LEGACY placeholder: ROI box restore helper reserved for future safe ROI inference."""
-    if not detections or (offset_x == 0 and offset_y == 0):
-        return detections
-    restored = []
-    for detection in detections:
-        if not isinstance(detection, dict):
-            continue
-        item = copy.deepcopy(detection)
-        box = item.get("box") or item.get("bbox")
-        if box and len(box) >= 4:
-            x1, y1, x2, y2 = box
-            int_box = (
-                int(x1 + offset_x),
-                int(y1 + offset_y),
-                int(x2 + offset_x),
-                int(y2 + offset_y),
-            )
-            item["box"] = int_box
-            if "bbox" in item:
-                item["bbox"] = list(int_box)
-            center = item.get("center")
-            if center is not None and len(center) >= 2:
-                item["center"] = (int(center[0] + offset_x), int(center[1] + offset_y))
-        restored.append(item)
-    return restored
-
-
 def refine_bat_detections_near_impact(
     video_path,
     frame_detections,

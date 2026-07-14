@@ -79,7 +79,7 @@ section describe the superseded intermediate design.
 |------|-------------|
 | `Models/ball_detector/best.pt` | Legacy ensemble weight; file untouched |
 | `Models/cricket_objects/best_external.pt` | Legacy ensemble weight; file untouched |
-| `smart_pipeline.crop_frame_with_roi()` | Placeholder for future safe ROI work |
+| Removed smart-pipeline ROI helpers | Unused placeholders removed after caller audit |
 | `interactive_field_map.draw_field_map()` | Matplotlib preview; dev/debug only |
 | Registry keys `player_type`, `striker_segmentation`, `shot_classifier` | Registered + HF metadata; marked `experimental` / not wired |
 
