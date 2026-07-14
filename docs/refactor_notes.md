@@ -14,9 +14,7 @@ Production navigation (`main.py`, `SHOW_DEV_PAGES=False`):
 
 Analysis stack:
 
-- Engine: `engine/analyze_delivery.py`, `engine/engine_options.py`,
-  `engine/engine_result.py`, `engine/processors/delivery.py`,
-  `engine/processors/batting.py`
+- Orchestration: legacy-active `ui/video_analysis.py` and `ui/live_session.py`
 - Video pipeline: `video_pipeline/video_reader.py`, `detection_pipeline.py`,
   `report_pipeline.py`, `annotation_writer.py`, `performance_timer.py`
 - Smart pipeline: `analysis/smart_pipeline.py`, `analysis/analysis_speed.py`
@@ -28,7 +26,13 @@ Analysis stack:
 
 Dev-only pages remain gated behind `SHOW_DEV_PAGES`: `field_map.py`, `datasets_page.py`, `training_page.py`.
 
-## CricVision Core Engine
+## Historical CricVision Core Engine (removed 2026-07-14)
+
+Caller audit later confirmed that the active Streamlit runtime did not use the
+engine entry point or processors. The unused engine folder and engine-only tests
+were removed during project-structure cleanup. Its one externally used tracking
+mode normalizer moved to `tracking/ball_tracking_utils.py`. The notes in this
+section describe the superseded intermediate design.
 
 - Added the model-free import surface
   `analyze_delivery_clip(video_path, calibration_context=None, options=None)`.
@@ -67,7 +71,7 @@ Dev-only pages remain gated behind `SHOW_DEV_PAGES`: `field_map.py`, `datasets_p
 | Duplicate paths and detection presets | Consolidated into import-safe `config/paths.py` and `config/constants.py` |
 | Persistent uploaded-video temp file | Replaced with auto-cleaned `TemporaryDirectory` |
 | Machine-specific pytest temp/cache failure | Use pytest/OS default temp paths; keep `.pytest_cache/` gitignored |
-| Uploaded-video processing loops in `ui/video_analysis.py` | Moved mechanically to `engine/processors/`; UI now calls `analyze_delivery_clip()` | Engine/UI import tests and result-key comparison |
+| Unused parallel engine orchestration | Removed after caller audit; current UI orchestration remains unchanged | Active UI/tracking tests and full suite |
 
 ## Marked legacy / inactive (kept on disk)
 

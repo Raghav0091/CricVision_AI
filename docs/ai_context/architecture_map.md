@@ -1,23 +1,10 @@
 # CricVision AI — Architecture Map
 
-## Current Structure
+## Current working application
 
 ### `main.py`
 
-Streamlit entrypoint and page router. `SHOW_DEV_PAGES` gates non-production pages.
-
-### `Backends/src/engine/`
-
-- `analyze_delivery.py`
-- `engine_options.py`
-- `engine_result.py`
-- `processors/delivery.py`
-- `processors/batting.py`
-
-Owns the reusable `analyze_delivery_clip(video_path, calibration_context,
-options)` entrypoint, input validation, mode dispatch, processed-video
-finalization, warnings/errors, the stable result contract, and both uploaded
-video frame loops. Engine imports do not load models or import Streamlit/UI.
+Streamlit entry point and page router. `SHOW_DEV_PAGES` gates development-only pages.
 
 ### `Backends/src/ui/`
 
@@ -25,110 +12,59 @@ video frame loops. Engine imports do not load models or import Streamlit/UI.
 - `video_analysis.py`
 - `live_session.py`
 - `results_page.py`
-- `components.py`
-- `analysis_helpers.py`
-- `theme.py`
+- `components.py`, `analysis_helpers.py`, and `theme.py`
 
-Owns presentation, widgets, upload lifecycle, report/session persistence, and
-Streamlit interaction. Video Analysis calls the engine and contains no
-detection/report frame loop.
+Owns current Streamlit presentation and interaction. `video_analysis.py` and
+`live_session.py` also retain legacy-active orchestration while calling shared
+backend modules.
 
-### `Backends/src/video_pipeline/`
+### Shared active backend modules
 
-- `video_reader.py`
-- `detection_pipeline.py`
-- `report_pipeline.py`
-- `annotation_writer.py`
-- `performance_timer.py`
+- `video_pipeline/`: video reading/writing, detection support, reports, annotations, and timing.
+- `tracking/`: ball tracking, trajectory scoring, and trajectory fitting.
+- `calibration/`, `pitch_calibration.py`, `session_calibration.py`, and `replay_calibration.py`: distinct current calibration contexts.
+- `analysis/` and `agents/`: cricket reports and observer/repair logic.
+- `models/`: local-first registry and lazy model loading.
+- `storage/`: backward-compatible local session persistence.
+- `replay3d/`, `trajectory_replay.py`, and `virtual_pitch_overlay.py`: active replay/overlay paths.
 
-Reusable video processing, annotation, performance measurement, and report orchestration.
+`Backends/src/engine/` was removed after caller audit showed that the active UI
+did not use it. The single tracking-mode normalizer used outside that folder now
+lives in `tracking/ball_tracking_utils.py`.
 
-### `Backends/src/agents/`
+## Professional v2 foundation
 
-- `observer_timeline.py`
-- `vision_agent.py`
-- `tracking_repair_agent.py`
-- `visual_observer_agent.py`
+### `apps/web/`
 
-Detection-quality review, deterministic 2D tracking repair, and agent-style analysis.
+Future Next.js browser frontend. Currently provides the app shell, browser
+camera, stump-alignment guides, and safe calibration request flow.
 
-### `Backends/src/calibration/`
+### `services/api/`
 
-- `calibration_context.py`
-- `stump_calibration.py`
-- `pitch_calibration.py`
+Future FastAPI control plane. Provides health, calibration, session, delivery,
+and analysis-job contracts using local/process-only storage.
 
-Practice-environment understanding: stumps, pitch corridor, camera view, handedness, and calibration quality.
+### `services/worker/`
 
-### `Backends/src/analysis/`
+Unconnected future processing boundary. It is not a queue consumer or current
+ML pipeline yet.
 
-- `frame_detection_utils.py`
-- `smart_pipeline.py`
-- `impact_detection.py`
-- `shot_classification.py`
-- `shot_direction.py`
-- `outcome_prediction.py`
-- `delivery_enrichment.py`
-- `cricket_agent.py`
+### `packages/cricket_vision/`
 
-Cricket analysis logic.
+Future framework-independent shared package. It currently contains useful
+calibration geometry, detection contracts/adapters, and report schemas only.
+Active tracking, trajectory, and replay remain under `Backends/` until a real
+migration replaces them.
 
-### `Backends/src/models/`
-
-- `model_registry.py`
-- `model_loader.py`
-- `remote_model_loader.py`
-
-Local-first model paths, cached lazy loading, and Hugging Face fallback.
-
-### `Backends/src/storage/`
-
-- `session_store.py`
-
-Session-result persistence and backward-compatible normalization.
-
-### `Backends/src/config/`
-
-- `constants.py`
-- `paths.py`
-
-Stable shared constants and project paths.
-
-### `tests/`
-
-Lightweight tests using synthetic or dummy data: no real model files, GPU, camera, `HF_TOKEN`, or internet.
-
-### `scripts/`
-
-- `smoke_check.py`
-- `performance_check.py`
-
-Fast contract and performance checks.
-
-## Target Direction
-
-Continue the framework-neutral engine:
+## Direction
 
 ```text
-Backends/src/engine/
-    analyze_delivery.py
-    engine_options.py
-    engine_result.py
-    processors/
-        delivery.py
-        batting.py
-    session_engine.py      # later
-
-services/api/       # later
-services/worker/    # later
+main.py + Backends/        current Streamlit implementation
+apps/web/                  future browser frontend
+services/api/              future FastAPI control plane
+services/worker/           future background processing
+packages/cricket_vision/   future shared CV contracts
 ```
 
-The engine should expose:
-
-```python
-analyze_delivery_clip(video_path, calibration_context, options)
-```
-
-Streamlit calls this engine. Future FastAPI, worker, mobile, and glasses
-clients should call the same engine. Do not move analysis logic back into
-Streamlit pages.
+Migrate measured workflows into the worker/shared package only when they are
+actually connected. Do not create another unused orchestration layer.

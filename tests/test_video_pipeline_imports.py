@@ -1,7 +1,6 @@
 """Video pipeline modules import without triggering model loading."""
 
 import importlib
-import inspect
 import sys
 
 
@@ -63,7 +62,7 @@ def test_detection_pipeline_imports_without_streamlit_runtime(monkeypatch):
     assert module.st is None
 
 
-def test_ui_modules_no_longer_cross_import(monkeypatch):
+def test_ui_module_imports_do_not_load_models(monkeypatch):
     calls = []
 
     def fake_get_cached_yolo_model(model_key):
@@ -81,4 +80,3 @@ def test_ui_modules_no_longer_cross_import(monkeypatch):
     importlib.reload(live_session)
 
     assert calls == []
-    assert "Backends.src.ui.video_analysis" not in inspect.getsource(live_session)

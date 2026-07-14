@@ -7,6 +7,19 @@ MIN_BOUNCE_POINTS = 6
 MAX_KALMAN_MISSING_FRAMES = 10
 
 
+def normalize_ball_tracking_mode(mode):
+    """Map UI aliases to the two supported tracking modes."""
+    normalized = str(mode or "Balanced").strip().lower()
+    if normalized in {
+        "accuracy",
+        "accuracy / small ball",
+        "accuracy/small ball",
+        "small ball",
+    }:
+        return "Accuracy / Small Ball"
+    return "Balanced"
+
+
 def _point_to_xy(point):
     if point is None:
         return None, None

@@ -11,7 +11,7 @@ The existing Streamlit application remains available and unchanged as the legacy
 - `apps/web`: Next.js, React, TypeScript, and Tailwind client. Owns camera permission, alignment UI, capture buffering, navigation, and result presentation.
 - `services/api`: FastAPI control plane. Validates contracts, registers sessions and deliveries, stores calibration frames, and exposes job status.
 - `services/worker`: Python execution boundary for calibration, detection, tracking, trajectory, and replay work.
-- `packages/cricket-vision`: reusable CV contracts and geometry that depend on neither Streamlit nor FastAPI.
+- `packages/cricket_vision`: reusable CV contracts and geometry that depend on neither Streamlit nor FastAPI.
 - local filesystem: development storage for frames, clips, and replays. Object and relational storage are later milestones.
 
 ## Data flow
@@ -27,7 +27,7 @@ The existing Streamlit application remains available and unchanged as the legacy
 
 ## Responsibilities and boundaries
 
-The frontend never claims calibration, tracking, or trajectory success on visual alignment alone. The API never performs heavy inference in a request handler. The worker never owns browser state. The cricket-vision package owns domain types and reusable CV logic, but not transport or UI.
+The frontend never claims calibration, tracking, or trajectory success on visual alignment alone. The API never performs heavy inference in a request handler. The worker never owns browser state. The `cricket_vision` package owns domain types and reusable CV logic, but not transport or UI.
 
 Current local stores are process-local scaffolds. They make API contracts executable but are not durable or multi-worker safe. Generated calibration frames are written below `outputs/pro_v2/`, which must remain uncommitted.
 

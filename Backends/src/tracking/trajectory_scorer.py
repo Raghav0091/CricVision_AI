@@ -1502,7 +1502,7 @@ def should_enable_online_best_tracklet(
     speed_mode: str,
 ) -> bool:
     from Backends.src.analysis.smart_pipeline import resolve_smart_mode
-    from Backends.src.engine.engine_options import normalize_ball_tracking_mode
+    from Backends.src.tracking.ball_tracking_utils import normalize_ball_tracking_mode
 
     return (
         normalize_ball_tracking_mode(ball_tracking_mode) == "Accuracy / Small Ball"

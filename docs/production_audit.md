@@ -4,6 +4,11 @@ Audit date: 2026-07-01
 Runtime target: Python 3.11, Streamlit, OpenCV, Ultralytics YOLO  
 Scope: public MVP (`main.py`) plus backend, dev-only pages, tests, scripts, and Git hygiene.
 
+> Cleanup note (2026-07-14): references below to `Backends/src/engine/`
+> describe a historical intermediate state. Caller audit later confirmed that
+> active Streamlit orchestration did not use it, so the unused layer was
+> removed. See `docs/CLEANUP_AUDIT.md`.
+
 ## 1. Executive summary
 
 The project has a sound MVP boundary: page routing is small, model loading is
@@ -11,9 +16,8 @@ lazy, one shared detection timeline feeds reports, and deterministic observer
 repair has no model or network dependency. The main production risks are not
 algorithmic. They are maintenance and lifecycle risks:
 
-- `ui/live_session.py` (about 1,360 lines) still combines webcam UI,
-  orchestration, frame loops, and result shaping. Uploaded Video Analysis now
-  delegates its frame loops to the engine.
+- `ui/live_session.py` and `ui/video_analysis.py` still combine UI and
+  orchestration responsibilities in the legacy-active application.
 - Output and model paths are repeated and mostly relative to the current
   process directory.
 - Uploaded Video Analysis input is written with `delete=False` and is not
@@ -476,7 +480,7 @@ remain future work.
 - Clean overlay is default; debug overlay is optional. No map outputs
   reintroduced; no model loading behavior changed.
 
-## 16. CricVision Core Engine - Sprint 1 (2026-07-05)
+## 16. Historical: CricVision Core Engine - Sprint 1 (superseded)
 
 - Added `Backends/src/engine/` with a public `analyze_delivery_clip()` function,
   normalized `EngineOptions`, and backward-compatible `EngineResult`.
@@ -491,7 +495,7 @@ remain future work.
 - Import/default/error/result-normalization tests require no model files, GPU,
   camera, token, or internet.
 
-## 17. CricVision Core Engine extraction completed (2026-07-06)
+## 17. Historical: CricVision Core Engine extraction (superseded)
 
 - Moved the established full-delivery and batting frame loops from
   `ui/video_analysis.py` to `engine/processors/`.
