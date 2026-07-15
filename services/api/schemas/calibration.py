@@ -48,10 +48,21 @@ class VirtualStump(BaseModel):
     base: Point
 
 
-class VirtualStumpGeometry(BaseModel):
+class VirtualBails(BaseModel):
+    name: Literal["bails"]
+    left: Point
+    right: Point
+
+
+class VirtualStumpEnd(BaseModel):
     geometry_type: Literal["estimated_from_bbox"]
-    striker: list[VirtualStump]
-    non_striker: list[VirtualStump]
+    stumps: list[VirtualStump]
+    bails: VirtualBails
+
+
+class VirtualStumpGeometry(BaseModel):
+    striker: VirtualStumpEnd | None
+    non_striker: VirtualStumpEnd | None
 
 
 class CalibrationDebugFiles(BaseModel):

@@ -11,7 +11,7 @@ from PIL import Image, ImageDraw
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 STUMP_MODEL_PATH = PROJECT_ROOT / "Models" / "stump_detector" / "best.pt"
-STUMP_CLASS_FRAGMENT = "stump"
+STUMP_CLASS_FRAGMENTS = ("stump", "wicket")
 
 
 def solve_stump_calibration(
@@ -73,6 +73,14 @@ def solve_stump_calibration(
             "environment_context": None,
         }
 
+    virtual_stumps = {
+        end: (
+            _virtual_stumps_from_bbox(detection["bbox"])
+            if detection["found"] and detection["bbox"]
+            else None
+        )
+        for end, detection in detections.items()
+    }
     if not all(item["found"] for item in detections.values()):
         return {
             "success": False,
@@ -82,17 +90,12 @@ def solve_stump_calibration(
                 "the red boxes and try again."
             ),
             "detections": detections,
-            "virtual_stumps": None,
+            "virtual_stumps": (
+                virtual_stumps if any(virtual_stumps.values()) else None
+            ),
             "environment_context": None,
         }
 
-    virtual_stumps = {
-        "geometry_type": "estimated_from_bbox",
-        "striker": _virtual_stumps_from_bbox(detections["striker"]["bbox"]),
-        "non_striker": _virtual_stumps_from_bbox(
-            detections["non_striker"]["bbox"]
-        ),
-    }
     environment_context = _build_environment_context(detections)
     return {
         "success": True,
@@ -141,7 +144,7 @@ def _detect_end(
         coordinates = _to_list(getattr(boxes, "xyxy", []))
         for class_id, confidence, xyxy in zip(classes, confidences, coordinates):
             class_name = _class_name(names, int(class_id))
-            if STUMP_CLASS_FRAGMENT not in class_name.lower():
+            if not _is_stump_class(class_name, names):
                 continue
             confidence = float(confidence)
             if best is not None and confidence <= best["confidence"]:
@@ -182,21 +185,29 @@ def _normalized_box_to_pixels(
     return x1, y1, x2, y2
 
 
-def _virtual_stumps_from_bbox(bbox: dict[str, int]) -> list[dict[str, Any]]:
+def _virtual_stumps_from_bbox(bbox: dict[str, int]) -> dict[str, Any]:
     x = bbox["x"]
     y = bbox["y"]
     width = bbox["width"]
     height = bbox["height"]
     top_y = round(y + height * 0.08)
     base_y = y + height
-    return [
-        {
-            "name": name,
-            "top": {"x": round(x + width * fraction), "y": top_y},
-            "base": {"x": round(x + width * fraction), "y": base_y},
-        }
-        for name, fraction in (("left", 0.2), ("middle", 0.5), ("right", 0.8))
-    ]
+    return {
+        "geometry_type": "estimated_from_bbox",
+        "stumps": [
+            {
+                "name": name,
+                "top": {"x": round(x + width * fraction), "y": top_y},
+                "base": {"x": round(x + width * fraction), "y": base_y},
+            }
+            for name, fraction in (("left", 0.2), ("middle", 0.5), ("right", 0.8))
+        ],
+        "bails": {
+            "name": "bails",
+            "left": {"x": round(x + width * 0.16), "y": top_y},
+            "right": {"x": round(x + width * 0.84), "y": top_y},
+        },
+    }
 
 
 def _build_environment_context(detections: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -259,10 +270,16 @@ def save_debug_overlay(
                 fill="lime",
             )
 
-        for stump in (virtual_stumps or {}).get(end, []):
+        end_geometry = (virtual_stumps or {}).get(end) or {}
+        for stump in end_geometry.get("stumps", []):
             top = stump["top"]
             base = stump["base"]
             draw.line((top["x"], top["y"], base["x"], base["y"]), fill="yellow", width=3)
+        bails = end_geometry.get("bails")
+        if bails:
+            left = bails["left"]
+            right = bails["right"]
+            draw.line((left["x"], left["y"], right["x"], right["y"]), fill="yellow", width=3)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     debug.save(output_path, format="JPEG", quality=92)
@@ -285,3 +302,11 @@ def _class_name(names, class_id: int) -> str:
     if isinstance(names, (list, tuple)) and 0 <= class_id < len(names):
         return str(names[class_id])
     return str(class_id)
+
+
+def _is_stump_class(class_name: str, names) -> bool:
+    normalized = class_name.strip().lower()
+    if any(fragment in normalized for fragment in STUMP_CLASS_FRAGMENTS):
+        return True
+    # A single-purpose detector may use an arbitrary class label.
+    return isinstance(names, (dict, list, tuple)) and len(names) == 1

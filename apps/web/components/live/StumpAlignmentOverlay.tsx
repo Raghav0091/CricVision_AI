@@ -74,7 +74,7 @@ export function StumpAlignmentOverlay({
             );
           })}
           {virtualStumps && (["striker", "non_striker"] as const).flatMap((end) =>
-            virtualStumps[end].map((stump) => (
+            (virtualStumps[end]?.stumps ?? []).map((stump) => (
               <line
                 key={`${end}-${stump.name}`}
                 x1={stump.top.x}
@@ -88,6 +88,23 @@ export function StumpAlignmentOverlay({
               />
             ))
           )}
+          {virtualStumps && (["striker", "non_striker"] as const).map((end) => {
+            const bails = virtualStumps[end]?.bails;
+            if (!bails) return null;
+            return (
+              <line
+                key={`${end}-bails`}
+                x1={bails.left.x}
+                y1={bails.left.y}
+                x2={bails.right.x}
+                y2={bails.right.y}
+                stroke="#ffe761"
+                strokeWidth="3"
+                strokeLinecap="round"
+                vectorEffect="non-scaling-stroke"
+              />
+            );
+          })}
         </svg>
       )}
       {virtualStumps && (

@@ -27,7 +27,7 @@ function failureMessage(result: CalibrationResponse): string {
     return "Stump detector model is missing. Add a model at Models/stump_detector/best.pt.";
   }
   if (result.status === "stumps_not_found") {
-    return "Could not detect both stump sets. Place real cricket stumps inside both red boxes and press Continue again.";
+    return "Place real cricket stumps inside both boxes and try again.";
   }
   return result.message;
 }

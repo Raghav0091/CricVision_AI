@@ -37,9 +37,14 @@ export type VirtualStump = {
 };
 
 export type VirtualStumpGeometry = {
+  striker: VirtualStumpEnd | null;
+  non_striker: VirtualStumpEnd | null;
+};
+
+export type VirtualStumpEnd = {
   geometry_type: "estimated_from_bbox";
-  striker: VirtualStump[];
-  non_striker: VirtualStump[];
+  stumps: VirtualStump[];
+  bails: { name: "bails"; left: PixelPoint; right: PixelPoint };
 };
 
 export type CalibrationResponse = {
