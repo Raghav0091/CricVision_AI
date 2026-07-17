@@ -48,16 +48,16 @@ class VirtualStump(BaseModel):
     base: Point
 
 
-class VirtualBails(BaseModel):
-    name: Literal["bails"]
-    left: Point
-    right: Point
+class VirtualBail(BaseModel):
+    name: Literal["left_bail", "right_bail"]
+    start: Point
+    end: Point
 
 
 class VirtualStumpEnd(BaseModel):
     geometry_type: Literal["estimated_from_bbox"]
     stumps: list[VirtualStump]
-    bails: VirtualBails
+    bails: list[VirtualBail]
 
 
 class VirtualStumpGeometry(BaseModel):
@@ -68,6 +68,11 @@ class VirtualStumpGeometry(BaseModel):
 class CalibrationDebugFiles(BaseModel):
     original: str
     overlay: str | None = None
+
+
+class CalibrationQuality(BaseModel):
+    status: Literal["good"]
+    score: float = Field(ge=0, le=1)
 
 
 class CalibrationResponse(BaseModel):
@@ -86,5 +91,7 @@ class CalibrationResponse(BaseModel):
     model_path: str | None = None
     detections: dict[str, StumpDetection] | None = None
     virtual_stumps: VirtualStumpGeometry | None = None
+    pitch_overlay: dict[str, Any] | None = None
+    calibration_quality: CalibrationQuality | None = None
     environment_context: dict[str, Any] | None = None
     debug_files: CalibrationDebugFiles | None = None

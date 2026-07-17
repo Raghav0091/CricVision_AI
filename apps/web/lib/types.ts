@@ -44,7 +44,20 @@ export type VirtualStumpGeometry = {
 export type VirtualStumpEnd = {
   geometry_type: "estimated_from_bbox";
   stumps: VirtualStump[];
-  bails: { name: "bails"; left: PixelPoint; right: PixelPoint };
+  bails: Array<{
+    name: "left_bail" | "right_bail";
+    start: PixelPoint;
+    end: PixelPoint;
+  }>;
+};
+
+export type PitchOverlay = {
+  geometry_type: "estimated_from_stump_bboxes";
+  pitch_axis: { start: PixelPoint; end: PixelPoint };
+  pitch_corridor: PixelPoint[];
+  center_line: PixelPoint[];
+  wickets: VirtualStumpGeometry;
+  crease_guides: Record<"striker" | "non_striker", PixelPoint[]>;
 };
 
 export type CalibrationResponse = {
@@ -57,6 +70,8 @@ export type CalibrationResponse = {
   model_path?: string | null;
   detections?: Record<"striker" | "non_striker", StumpDetection> | null;
   virtual_stumps?: VirtualStumpGeometry | null;
+  pitch_overlay?: PitchOverlay | null;
+  calibration_quality?: { status: "good"; score: number } | null;
   environment_context?: Record<string, unknown> | null;
   debug_files?: { original: string; overlay?: string | null } | null;
 };

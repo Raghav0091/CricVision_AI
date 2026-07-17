@@ -40,6 +40,7 @@ def solve_calibration(request: CalibrationRequest) -> CalibrationResponse:
             box_layout=box_layout,
             detections=result.get("detections"),
             virtual_stumps=result.get("virtual_stumps"),
+            pitch_overlay=result.get("pitch_overlay"),
             output_path=debug_path,
         )
         overlay_filename = debug_path.name
@@ -64,6 +65,8 @@ def solve_calibration(request: CalibrationRequest) -> CalibrationResponse:
         model_path=str(STUMP_MODEL_PATH),
         detections=result.get("detections"),
         virtual_stumps=result.get("virtual_stumps"),
+        pitch_overlay=result.get("pitch_overlay"),
+        calibration_quality=result.get("calibration_quality"),
         environment_context=result.get("environment_context"),
         debug_files={
             "original": frame_path.name,

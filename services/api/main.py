@@ -1,5 +1,8 @@
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from .routes import analysis, calibration, deliveries, health, sessions
 
@@ -18,3 +21,13 @@ app.include_router(calibration.router)
 app.include_router(sessions.router)
 app.include_router(deliveries.router)
 app.include_router(analysis.router)
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+app.mount(
+    "/static/delivery-clips",
+    StaticFiles(
+        directory=str(PROJECT_ROOT / "outputs" / "delivery_clips"),
+        check_dir=False,
+    ),
+    name="delivery-clips-static",
+)

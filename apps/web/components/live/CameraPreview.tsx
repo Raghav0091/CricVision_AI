@@ -7,12 +7,15 @@ import type { CapturedFrame } from "@/lib/types";
 
 export type CameraPreviewHandle = {
   captureFrame: () => CapturedFrame | null;
+  sampleFrame: (width: number, height: number) => ImageData | null;
+  getStream: () => MediaStream | null;
 };
 
 
 export const CameraPreview = forwardRef<CameraPreviewHandle>(function CameraPreview(_, ref) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const sampleCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -50,6 +53,21 @@ export const CameraPreview = forwardRef<CameraPreviewHandle>(function CameraPrev
       canvas.height = video.videoHeight;
       canvas.getContext("2d")?.drawImage(video, 0, 0, canvas.width, canvas.height);
       return { dataUrl: canvas.toDataURL("image/jpeg", 0.9), width: canvas.width, height: canvas.height };
+    },
+    sampleFrame(width, height) {
+      const video = videoRef.current;
+      if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !video.videoWidth) return null;
+      const canvas = sampleCanvasRef.current ?? document.createElement("canvas");
+      sampleCanvasRef.current = canvas;
+      if (canvas.width !== width) canvas.width = width;
+      if (canvas.height !== height) canvas.height = height;
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+      if (!context) return null;
+      context.drawImage(video, 0, 0, width, height);
+      return context.getImageData(0, 0, width, height);
+    },
+    getStream() {
+      return streamRef.current;
     }
   }));
 

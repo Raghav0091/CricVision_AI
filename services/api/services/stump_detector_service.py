@@ -27,11 +27,13 @@ def solve_stump_calibration(
             "success": False,
             "status": "stump_detector_missing",
             "message": (
-                "Calibration frame received, but "
-                "Models/stump_detector/best.pt was not found."
+                "Stump detector model is missing. Add a model at "
+                "Models/stump_detector/best.pt."
             ),
             "detections": None,
             "virtual_stumps": None,
+            "pitch_overlay": None,
+            "calibration_quality": None,
             "environment_context": None,
         }
 
@@ -44,6 +46,8 @@ def solve_stump_calibration(
             "message": f"Stump detector could not be loaded: {type(exc).__name__}.",
             "detections": None,
             "virtual_stumps": None,
+            "pitch_overlay": None,
+            "calibration_quality": None,
             "environment_context": None,
         }
 
@@ -70,12 +74,18 @@ def solve_stump_calibration(
             "message": f"Stump detection failed: {type(exc).__name__}.",
             "detections": None,
             "virtual_stumps": None,
+            "pitch_overlay": None,
+            "calibration_quality": None,
             "environment_context": None,
         }
 
     virtual_stumps = {
         end: (
-            _virtual_stumps_from_bbox(detection["bbox"])
+            _virtual_stumps_from_bbox(
+                detection["bbox"],
+                frame_width=actual_width,
+                frame_height=actual_height,
+            )
             if detection["found"] and detection["bbox"]
             else None
         )
@@ -86,24 +96,41 @@ def solve_stump_calibration(
             "success": False,
             "status": "stumps_not_found",
             "message": (
-                "Could not detect both stump sets. Align real stumps inside "
-                "the red boxes and try again."
+                "Could not detect both stump sets. Make sure both stump sets "
+                "are inside the red boxes and try again."
             ),
             "detections": detections,
             "virtual_stumps": (
                 virtual_stumps if any(virtual_stumps.values()) else None
             ),
+            "pitch_overlay": None,
+            "calibration_quality": None,
             "environment_context": None,
         }
 
-    environment_context = _build_environment_context(detections)
+    pitch_overlay = _build_pitch_overlay(
+        detections,
+        virtual_stumps,
+        frame_width=actual_width,
+        frame_height=actual_height,
+    )
+    confidence_score = round(
+        sum(item["confidence"] for item in detections.values()) / 2,
+        4,
+    )
     return {
         "success": True,
         "status": "setup_complete",
         "message": "Both stump sets detected. Pitch setup is ready.",
         "detections": detections,
         "virtual_stumps": virtual_stumps,
-        "environment_context": environment_context,
+        "pitch_overlay": pitch_overlay,
+        "calibration_quality": {
+            "status": "good",
+            "score": confidence_score,
+        },
+        # Kept for clients using the previous calibration response.
+        "environment_context": pitch_overlay,
     }
 
 
@@ -185,13 +212,20 @@ def _normalized_box_to_pixels(
     return x1, y1, x2, y2
 
 
-def _virtual_stumps_from_bbox(bbox: dict[str, int]) -> dict[str, Any]:
-    x = bbox["x"]
-    y = bbox["y"]
-    width = bbox["width"]
-    height = bbox["height"]
+def _virtual_stumps_from_bbox(
+    bbox: dict[str, int],
+    *,
+    frame_width: int,
+    frame_height: int,
+) -> dict[str, Any]:
+    x = max(0, min(frame_width - 1, bbox["x"]))
+    y = max(0, min(frame_height - 1, bbox["y"]))
+    right = max(x, min(frame_width - 1, bbox["x"] + bbox["width"]))
+    bottom = max(y, min(frame_height - 1, bbox["y"] + bbox["height"]))
+    width = right - x
+    height = bottom - y
     top_y = round(y + height * 0.08)
-    base_y = y + height
+    base_y = bottom
     return {
         "geometry_type": "estimated_from_bbox",
         "stumps": [
@@ -202,39 +236,88 @@ def _virtual_stumps_from_bbox(bbox: dict[str, int]) -> dict[str, Any]:
             }
             for name, fraction in (("left", 0.2), ("middle", 0.5), ("right", 0.8))
         ],
-        "bails": {
-            "name": "bails",
-            "left": {"x": round(x + width * 0.16), "y": top_y},
-            "right": {"x": round(x + width * 0.84), "y": top_y},
-        },
+        "bails": [
+            {
+                "name": "left_bail",
+                "start": {"x": round(x + width * 0.14), "y": top_y},
+                "end": {"x": round(x + width * 0.5), "y": top_y},
+            },
+            {
+                "name": "right_bail",
+                "start": {"x": round(x + width * 0.5), "y": top_y},
+                "end": {"x": round(x + width * 0.86), "y": top_y},
+            },
+        ],
     }
 
 
-def _build_environment_context(detections: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def _build_pitch_overlay(
+    detections: dict[str, dict[str, Any]],
+    virtual_stumps: dict[str, Any],
+    *,
+    frame_width: int,
+    frame_height: int,
+) -> dict[str, Any]:
     striker = detections["striker"]["bbox"]
     non_striker = detections["non_striker"]["bbox"]
 
     def center(box: dict[str, int]) -> dict[str, int]:
         return {
-            "x": round(box["x"] + box["width"] / 2),
-            "y": round(box["y"] + box["height"]),
+            "x": max(
+                0,
+                min(frame_width - 1, round(box["x"] + box["width"] / 2)),
+            ),
+            "y": max(
+                0,
+                min(frame_height - 1, round(box["y"] + box["height"])),
+            ),
         }
 
+    striker_center = center(striker)
+    non_striker_center = center(non_striker)
+    corridor = [
+        {"x": max(0, non_striker["x"]), "y": non_striker_center["y"]},
+        {"x": max(0, striker["x"]), "y": striker_center["y"]},
+        {
+            "x": min(frame_width - 1, striker["x"] + striker["width"]),
+            "y": striker_center["y"],
+        },
+        {
+            "x": min(
+                frame_width - 1,
+                non_striker["x"] + non_striker["width"],
+            ),
+            "y": non_striker_center["y"],
+        },
+    ]
+
+    def crease(box: dict[str, int]) -> list[dict[str, int]]:
+        extension = round(box["width"] * 0.45)
+        y = min(frame_height - 1, box["y"] + box["height"])
+        return [
+            {"x": max(0, box["x"] - extension), "y": y},
+            {
+                "x": min(
+                    frame_width - 1,
+                    box["x"] + box["width"] + extension,
+                ),
+                "y": y,
+            },
+        ]
+
     return {
+        "geometry_type": "estimated_from_stump_bboxes",
         "pitch_axis": {
-            "start": center(non_striker),
-            "end": center(striker),
+            "start": non_striker_center,
+            "end": striker_center,
         },
-        "pitch_corridor": {
-            "points": [
-                {"x": non_striker["x"], "y": non_striker["y"] + non_striker["height"]},
-                {"x": striker["x"], "y": striker["y"] + striker["height"]},
-                {"x": striker["x"] + striker["width"], "y": striker["y"] + striker["height"]},
-                {"x": non_striker["x"] + non_striker["width"], "y": non_striker["y"] + non_striker["height"]},
-            ]
+        "pitch_corridor": corridor,
+        "center_line": [non_striker_center, striker_center],
+        "wickets": virtual_stumps,
+        "crease_guides": {
+            "striker": crease(striker),
+            "non_striker": crease(non_striker),
         },
-        "quality": "good",
-        "geometry_type": "estimated_from_bbox",
     }
 
 
@@ -244,11 +327,36 @@ def save_debug_overlay(
     box_layout: dict[str, dict[str, float]],
     detections: dict[str, dict[str, Any]] | None,
     virtual_stumps: dict[str, Any] | None,
+    pitch_overlay: dict[str, Any] | None,
     output_path: Path,
 ) -> Path:
     debug = image.copy()
-    draw = ImageDraw.Draw(debug)
+    draw = ImageDraw.Draw(debug, "RGBA")
     width, height = debug.size
+
+    corridor = (pitch_overlay or {}).get("pitch_corridor") or []
+    if len(corridor) == 4:
+        polygon = [(point["x"], point["y"]) for point in corridor]
+        draw.polygon(polygon, fill=(255, 216, 92, 35), outline=(255, 216, 92, 210), width=3)
+    center_line = (pitch_overlay or {}).get("center_line") or []
+    if len(center_line) == 2:
+        draw.line(
+            (
+                center_line[0]["x"],
+                center_line[0]["y"],
+                center_line[1]["x"],
+                center_line[1]["y"],
+            ),
+            fill=(255, 255, 255, 210),
+            width=2,
+        )
+    for guide in ((pitch_overlay or {}).get("crease_guides") or {}).values():
+        if len(guide) == 2:
+            draw.line(
+                (guide[0]["x"], guide[0]["y"], guide[1]["x"], guide[1]["y"]),
+                fill=(255, 255, 255, 190),
+                width=2,
+            )
 
     for end in ("striker", "non_striker"):
         x1, y1, x2, y2 = _normalized_box_to_pixels(
@@ -275,11 +383,14 @@ def save_debug_overlay(
             top = stump["top"]
             base = stump["base"]
             draw.line((top["x"], top["y"], base["x"], base["y"]), fill="yellow", width=3)
-        bails = end_geometry.get("bails")
-        if bails:
-            left = bails["left"]
-            right = bails["right"]
-            draw.line((left["x"], left["y"], right["x"], right["y"]), fill="yellow", width=3)
+        for bail in end_geometry.get("bails", []):
+            start = bail["start"]
+            end_point = bail["end"]
+            draw.line(
+                (start["x"], start["y"], end_point["x"], end_point["y"]),
+                fill="yellow",
+                width=4,
+            )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     debug.save(output_path, format="JPEG", quality=92)
