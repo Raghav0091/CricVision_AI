@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from .routes import analysis, calibration, deliveries, health, sessions
+from .routes import analysis, calibration, deliveries, health, sessions, video_analysis
 
 
 app = FastAPI(title="CricVision Pro API", version="0.1.0")
@@ -21,6 +21,7 @@ app.include_router(calibration.router)
 app.include_router(sessions.router)
 app.include_router(deliveries.router)
 app.include_router(analysis.router)
+app.include_router(video_analysis.router)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 app.mount(
@@ -30,4 +31,12 @@ app.mount(
         check_dir=False,
     ),
     name="delivery-clips-static",
+)
+app.mount(
+    "/static/video-analysis",
+    StaticFiles(
+        directory=str(PROJECT_ROOT / "outputs" / "video_analysis"),
+        check_dir=False,
+    ),
+    name="video-analysis-static",
 )

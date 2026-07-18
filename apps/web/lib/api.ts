@@ -171,3 +171,70 @@ export async function getBallDetectionJob(jobId: string): Promise<BallDetectionC
   if (!response.ok) throw new Error(`Ball detection job status returned ${response.status}.`);
   return withBrowserSafeVideoUrl(await response.json() as BallDetectionClipResponse);
 }
+
+
+export type VideoAnalysisPreparedResponse = {
+  success: boolean;
+  analysis_id: string;
+  status: "prepared";
+  original_filename: string;
+  stored_filename: string;
+  file_size_bytes: number;
+  created_at: string;
+  duration_seconds: number;
+  fps: number;
+  frame_count: number;
+  width: number;
+  height: number;
+  codec?: string | null;
+  reference_frame_index: number;
+  original_video_url: string;
+  reference_frame_url: string;
+  message: string;
+};
+
+
+function withBrowserSafeAnalysisUrls(record: VideoAnalysisPreparedResponse): VideoAnalysisPreparedResponse {
+  return {
+    ...record,
+    original_video_url: resolveApiUrl(record.original_video_url) ?? record.original_video_url,
+    reference_frame_url: resolveApiUrl(record.reference_frame_url) ?? record.reference_frame_url
+  };
+}
+
+
+async function videoAnalysisError(response: Response, fallback: string): Promise<Error> {
+  let message = fallback;
+  try {
+    const body = await response.json() as { detail?: string; message?: string };
+    message = body.detail ?? body.message ?? fallback;
+  } catch {
+    // Keep the HTTP status message when the response is not JSON.
+  }
+  return new Error(message);
+}
+
+
+export async function prepareVideoAnalysis(file: File): Promise<VideoAnalysisPreparedResponse> {
+  const formData = new FormData();
+  formData.append("video", file);
+  const response = await fetch(`${API_BASE_URL}/video-analysis/prepare`, {
+    method: "POST",
+    body: formData
+  });
+  if (!response.ok) {
+    throw await videoAnalysisError(response, `Video preparation returned ${response.status}.`);
+  }
+  return withBrowserSafeAnalysisUrls(await response.json() as VideoAnalysisPreparedResponse);
+}
+
+
+export async function getVideoAnalysis(analysisId: string): Promise<VideoAnalysisPreparedResponse> {
+  const response = await fetch(`${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}`, {
+    cache: "no-store"
+  });
+  if (!response.ok) {
+    throw await videoAnalysisError(response, `Video analysis lookup returned ${response.status}.`);
+  }
+  return withBrowserSafeAnalysisUrls(await response.json() as VideoAnalysisPreparedResponse);
+}
