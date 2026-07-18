@@ -194,6 +194,11 @@ export type VideoAnalysisPreparedResponse = {
   calibration_status?: "confirmed" | null;
   calibration_url?: string | null;
   calibration_overlay_url?: string | null;
+  calibration_v2_status?: "confirmed" | "insufficient_geometry" | null;
+  calibration_v2_url?: string | null;
+  calibration_v2_overlay_url?: string | null;
+  calibration_v2_quality_grade?: CalibrationQualityGradeV2 | null;
+  calibration_v2_reprojection_rmse_px?: number | null;
   ball_detection_status?: "detection_queued" | "detecting_ball" | "detection_complete" | "detection_failed" | null;
   ball_detection_job_id?: string | null;
   ball_detection_started_at?: string | null;
@@ -217,6 +222,8 @@ function withBrowserSafeAnalysisUrls(record: VideoAnalysisPreparedResponse): Vid
     reference_frame_url: resolveApiUrl(record.reference_frame_url) ?? record.reference_frame_url,
     calibration_url: resolveApiUrl(record.calibration_url),
     calibration_overlay_url: resolveApiUrl(record.calibration_overlay_url),
+    calibration_v2_url: resolveApiUrl(record.calibration_v2_url),
+    calibration_v2_overlay_url: resolveApiUrl(record.calibration_v2_overlay_url),
     detection_summary_url: resolveApiUrl(record.detection_summary_url),
     detection_overlay_url: resolveApiUrl(record.detection_overlay_url),
     tracking_summary_url: resolveApiUrl(record.tracking_summary_url),
@@ -354,6 +361,168 @@ export type ConfirmedVideoCalibrationResponse = {
 };
 
 
+export type CalibrationLandmarkSource =
+  | "detected"
+  | "inferred"
+  | "manually_adjusted"
+  | "manual";
+
+
+export type ImageLeftRightConvention =
+  | "image_left_is_world_left"
+  | "image_left_is_world_right";
+
+
+export type CricketPitchGeometry = {
+  pitch_length_m: number;
+  wicket_width_m: number;
+  wicket_height_m: number;
+  pitch_width_m: number;
+  popping_crease_distance_m: number;
+};
+
+
+export type CalibrationLandmarkInput = {
+  id: string;
+  label: string;
+  wicket_end: "bowler" | "striker" | "ground";
+  landmark_type: "stump_base" | "ground_control";
+  normalized_x: number;
+  normalized_y: number;
+  source: CalibrationLandmarkSource;
+  confidence?: number | null;
+  world_x_m?: number | null;
+  world_y_m?: number | null;
+  world_z_m?: number | null;
+};
+
+
+export type CalibrationLandmark = CalibrationLandmarkInput & {
+  pixel_x: number;
+  pixel_y: number;
+  world_x_m: number;
+  world_y_m: number;
+  world_z_m: number;
+};
+
+
+export type CalibrationV2InitialiseResponse = {
+  success: true;
+  status: "initialised";
+  analysis_id: string;
+  reference_frame_url: string;
+  image_width: number;
+  image_height: number;
+  pitch_geometry: CricketPitchGeometry;
+  landmarks: CalibrationLandmark[];
+  image_left_right_convention: ImageLeftRightConvention;
+  warnings: string[];
+  message: string;
+};
+
+
+export type ReprojectionDiagnostic = {
+  landmark_id: string;
+  observed_pixel_x: number;
+  observed_pixel_y: number;
+  reprojected_pixel_x: number;
+  reprojected_pixel_y: number;
+  error_px: number;
+};
+
+
+export type CalibrationQualityGradeV2 =
+  | "excellent"
+  | "good"
+  | "usable"
+  | "poor"
+  | "insufficient_geometry";
+
+
+export type CalibrationQualityV2 = {
+  landmark_coverage: number;
+  usable_landmarks: number;
+  reprojection_rmse_px?: number | null;
+  max_reprojection_error_px?: number | null;
+  normalized_reprojection_rmse?: number | null;
+  geometry_condition: "well_conditioned" | "weak" | "unstable" | "insufficient";
+  homography_condition_number?: number | null;
+  image_coverage: number;
+  wicket_order_valid: boolean;
+  transform_available: boolean;
+  manual_adjustment_count: number;
+  warnings: string[];
+  quality_grade: CalibrationQualityGradeV2;
+  overall_confidence: number;
+  reprojection_diagnostics: ReprojectionDiagnostic[];
+};
+
+
+export type GroundHomographyResult = {
+  transform_available: boolean;
+  image_to_ground_homography?: number[][] | null;
+  ground_to_image_homography?: number[][] | null;
+  determinant?: number | null;
+  condition_number?: number | null;
+  image_convention: "pixel_uv";
+  ground_convention: "pitch_xy_metres_z0";
+};
+
+
+export type ProjectedPitchLine = {
+  id: string;
+  label: string;
+  ground_points: Array<{ x_m: number; y_m: number }>;
+  image_points: Array<{ x: number; y: number }>;
+};
+
+
+export type CalibrationV2Result = {
+  success: boolean;
+  status: "confirmed" | "insufficient_geometry";
+  schema_version: "2.0";
+  analysis_id: string;
+  calibration_mode: "ground_plane";
+  coordinate_system: {
+    units: "metres";
+    origin: "bowler_wicket_centre";
+    x_axis: "toward_striker";
+    y_axis: "lateral";
+    z_axis: "up";
+    left_right_convention: string;
+    image_left_right_convention: ImageLeftRightConvention;
+  };
+  pitch_geometry: CricketPitchGeometry;
+  landmark_set: {
+    primary_stump_bases: CalibrationLandmark[];
+    optional_ground_landmarks: CalibrationLandmark[];
+  };
+  homography: GroundHomographyResult;
+  quality: CalibrationQualityV2;
+  virtual_pitch_overlay_geometry: {
+    projected_lines: ProjectedPitchLine[];
+  };
+  calibration_v2_url: string;
+  calibration_v2_overlay_url: string;
+  reference_frame_url: string;
+  image_width: number;
+  image_height: number;
+  created_at: string;
+  updated_at: string;
+  user_note?: string | null;
+  message: string;
+};
+
+
+export type CalibrationV2ConfirmRequest = {
+  analysis_id: string;
+  landmarks: CalibrationLandmarkInput[];
+  pitch_geometry: CricketPitchGeometry;
+  image_left_right_convention: ImageLeftRightConvention;
+  user_note?: string | null;
+};
+
+
 function withBrowserSafeDetectionUrls(
   result: VideoCalibrationDetectionResponse
 ): VideoCalibrationDetectionResponse {
@@ -372,6 +541,32 @@ function withBrowserSafeCalibrationUrls(
     reference_frame_url: resolveApiUrl(result.reference_frame_url) ?? result.reference_frame_url,
     calibration_url: resolveApiUrl(result.calibration_url) ?? result.calibration_url,
     calibration_overlay_url: resolveApiUrl(result.calibration_overlay_url) ?? result.calibration_overlay_url
+  };
+}
+
+
+function withBrowserSafeCalibrationV2InitialiseUrls(
+  result: CalibrationV2InitialiseResponse
+): CalibrationV2InitialiseResponse {
+  return {
+    ...result,
+    reference_frame_url: resolveApiUrl(result.reference_frame_url)
+      ?? result.reference_frame_url
+  };
+}
+
+
+function withBrowserSafeCalibrationV2Urls(
+  result: CalibrationV2Result
+): CalibrationV2Result {
+  return {
+    ...result,
+    reference_frame_url: resolveApiUrl(result.reference_frame_url)
+      ?? result.reference_frame_url,
+    calibration_v2_url: resolveApiUrl(result.calibration_v2_url)
+      ?? result.calibration_v2_url,
+    calibration_v2_overlay_url: resolveApiUrl(result.calibration_v2_overlay_url)
+      ?? result.calibration_v2_overlay_url
   };
 }
 
@@ -409,6 +604,69 @@ export async function confirmVideoAnalysisCalibration(
   }
   return withBrowserSafeCalibrationUrls(
     await response.json() as ConfirmedVideoCalibrationResponse
+  );
+}
+
+
+export async function initialiseVideoAnalysisCalibrationV2(
+  analysisId: string
+): Promise<CalibrationV2InitialiseResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/calibration/v2/initialise`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(
+      response,
+      `Calibration v2 initialisation returned ${response.status}.`
+    );
+  }
+  return withBrowserSafeCalibrationV2InitialiseUrls(
+    await response.json() as CalibrationV2InitialiseResponse
+  );
+}
+
+
+export async function confirmVideoAnalysisCalibrationV2(
+  analysisId: string,
+  request: CalibrationV2ConfirmRequest
+): Promise<CalibrationV2Result> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/calibration/v2/confirm`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request)
+    }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(
+      response,
+      `Calibration v2 confirmation returned ${response.status}.`
+    );
+  }
+  return withBrowserSafeCalibrationV2Urls(
+    await response.json() as CalibrationV2Result
+  );
+}
+
+
+export async function getVideoAnalysisCalibrationV2(
+  analysisId: string
+): Promise<CalibrationV2Result | null> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/calibration/v2`,
+    { cache: "no-store" }
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw await videoAnalysisError(
+      response,
+      `Calibration v2 lookup returned ${response.status}.`
+    );
+  }
+  return withBrowserSafeCalibrationV2Urls(
+    await response.json() as CalibrationV2Result
   );
 }
 

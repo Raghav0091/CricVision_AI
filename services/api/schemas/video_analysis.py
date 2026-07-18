@@ -86,6 +86,20 @@ class VideoAnalysisPreparedResponse(BaseModel):
     calibration_status: Literal["confirmed"] | None = None
     calibration_url: str | None = None
     calibration_overlay_url: str | None = None
+    calibration_v2_status: Literal[
+        "confirmed",
+        "insufficient_geometry",
+    ] | None = None
+    calibration_v2_url: str | None = None
+    calibration_v2_overlay_url: str | None = None
+    calibration_v2_quality_grade: Literal[
+        "excellent",
+        "good",
+        "usable",
+        "poor",
+        "insufficient_geometry",
+    ] | None = None
+    calibration_v2_reprojection_rmse_px: float | None = None
     ball_detection_status: Literal[
         "detection_queued",
         "detecting_ball",
@@ -158,6 +172,212 @@ class ConfirmedVideoCalibrationResponse(BaseModel):
     non_striker_wicket: WicketCalibration
     pitch_geometry: PitchGeometry
     user_note: str | None = None
+    message: str
+
+
+CalibrationLandmarkSource = Literal[
+    "detected",
+    "inferred",
+    "manually_adjusted",
+    "manual",
+]
+
+
+class CricketPitchGeometry(StrictGeometryModel):
+    pitch_length_m: float = Field(default=20.12, gt=0, le=40)
+    wicket_width_m: float = Field(default=0.2286, gt=0, le=1)
+    wicket_height_m: float = Field(default=0.7112, gt=0, le=2)
+    pitch_width_m: float = Field(default=3.05, gt=0, le=10)
+    popping_crease_distance_m: float = Field(default=1.22, gt=0, le=5)
+
+    @model_validator(mode="after")
+    def validate_pitch_dimensions(self) -> "CricketPitchGeometry":
+        if self.pitch_width_m < self.wicket_width_m:
+            raise ValueError("Pitch width must exceed wicket width.")
+        if self.popping_crease_distance_m >= self.pitch_length_m / 2:
+            raise ValueError("Popping crease distance is invalid.")
+        return self
+
+
+class CalibrationCoordinateSystem(BaseModel):
+    units: Literal["metres"]
+    origin: Literal["bowler_wicket_centre"]
+    x_axis: Literal["toward_striker"]
+    y_axis: Literal["lateral"]
+    z_axis: Literal["up"]
+    left_right_convention: str
+    image_left_right_convention: Literal[
+        "image_left_is_world_left",
+        "image_left_is_world_right",
+    ]
+
+
+class CalibrationLandmarkInput(StrictGeometryModel):
+    id: str = Field(min_length=1, max_length=100)
+    label: str = Field(min_length=1, max_length=120)
+    wicket_end: Literal["bowler", "striker", "ground"]
+    landmark_type: Literal["stump_base", "ground_control"]
+    normalized_x: float = Field(ge=0, le=1)
+    normalized_y: float = Field(ge=0, le=1)
+    source: CalibrationLandmarkSource
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    world_x_m: float | None = None
+    world_y_m: float | None = None
+    world_z_m: float | None = None
+
+
+class CalibrationLandmark(CalibrationLandmarkInput):
+    pixel_x: float = Field(ge=0)
+    pixel_y: float = Field(ge=0)
+    world_x_m: float
+    world_y_m: float
+    world_z_m: float
+
+
+class CalibrationLandmarkSet(BaseModel):
+    primary_stump_bases: list[CalibrationLandmark] = Field(
+        min_length=6,
+        max_length=6,
+    )
+    optional_ground_landmarks: list[CalibrationLandmark] = Field(
+        default_factory=list,
+        max_length=32,
+    )
+
+
+class CalibrationV2ConfirmRequest(BaseModel):
+    analysis_id: str
+    landmarks: list[CalibrationLandmarkInput] = Field(
+        min_length=6,
+        max_length=38,
+    )
+    pitch_geometry: CricketPitchGeometry
+    image_left_right_convention: Literal[
+        "image_left_is_world_left",
+        "image_left_is_world_right",
+    ]
+    user_note: str | None = Field(default=None, max_length=1000)
+
+
+class ReprojectionDiagnostic(StrictGeometryModel):
+    landmark_id: str
+    observed_pixel_x: float = Field(ge=0)
+    observed_pixel_y: float = Field(ge=0)
+    reprojected_pixel_x: float
+    reprojected_pixel_y: float
+    error_px: float = Field(ge=0)
+
+
+class GroundHomographyResult(StrictGeometryModel):
+    transform_available: bool
+    image_to_ground_homography: list[list[float]] | None = None
+    ground_to_image_homography: list[list[float]] | None = None
+    determinant: float | None = None
+    condition_number: float | None = Field(default=None, ge=0)
+    image_convention: Literal["pixel_uv"]
+    ground_convention: Literal["pitch_xy_metres_z0"]
+
+
+class CalibrationQualityV2(StrictGeometryModel):
+    landmark_coverage: float = Field(ge=0, le=1)
+    usable_landmarks: int = Field(ge=0)
+    reprojection_rmse_px: float | None = Field(default=None, ge=0)
+    max_reprojection_error_px: float | None = Field(default=None, ge=0)
+    normalized_reprojection_rmse: float | None = Field(default=None, ge=0)
+    geometry_condition: Literal[
+        "well_conditioned",
+        "weak",
+        "unstable",
+        "insufficient",
+    ]
+    homography_condition_number: float | None = Field(default=None, ge=0)
+    image_coverage: float = Field(ge=0, le=1)
+    wicket_order_valid: bool
+    transform_available: bool
+    manual_adjustment_count: int = Field(ge=0)
+    warnings: list[str] = Field(default_factory=list)
+    quality_grade: Literal[
+        "excellent",
+        "good",
+        "usable",
+        "poor",
+        "insufficient_geometry",
+    ]
+    overall_confidence: float = Field(ge=0, le=1)
+    reprojection_diagnostics: list[ReprojectionDiagnostic] = Field(
+        default_factory=list
+    )
+
+
+class GroundPoint2D(StrictGeometryModel):
+    x_m: float
+    y_m: float
+
+
+class ImagePixelPoint(StrictGeometryModel):
+    x: float
+    y: float
+
+
+class ProjectedPitchLine(BaseModel):
+    id: str
+    label: str
+    ground_points: list[GroundPoint2D] = Field(min_length=2)
+    image_points: list[ImagePixelPoint] = Field(min_length=2)
+
+
+class VirtualPitchOverlayGeometry(BaseModel):
+    projected_lines: list[ProjectedPitchLine] = Field(default_factory=list)
+
+
+class CalibrationV2FutureCameraPoseFields(BaseModel):
+    camera_intrinsics: list[list[float]] | None = None
+    distortion_coefficients: list[float] | None = None
+    camera_rotation: list[list[float]] | None = None
+    camera_translation: list[float] | None = None
+    camera_position_world: list[float] | None = None
+    solvepnp_reprojection_rmse: float | None = None
+    stump_top_landmarks: list[CalibrationLandmark] | None = None
+
+
+class CalibrationV2InitialiseResponse(BaseModel):
+    success: Literal[True]
+    status: Literal["initialised"]
+    analysis_id: str
+    reference_frame_url: str
+    image_width: int = Field(gt=0)
+    image_height: int = Field(gt=0)
+    pitch_geometry: CricketPitchGeometry
+    landmarks: list[CalibrationLandmark] = Field(min_length=6, max_length=6)
+    image_left_right_convention: Literal[
+        "image_left_is_world_left",
+        "image_left_is_world_right",
+    ]
+    warnings: list[str] = Field(default_factory=list)
+    message: str
+
+
+class CalibrationV2Result(BaseModel):
+    success: bool
+    status: Literal["confirmed", "insufficient_geometry"]
+    schema_version: Literal["2.0"]
+    analysis_id: str
+    calibration_mode: Literal["ground_plane"]
+    coordinate_system: CalibrationCoordinateSystem
+    pitch_geometry: CricketPitchGeometry
+    landmark_set: CalibrationLandmarkSet
+    homography: GroundHomographyResult
+    quality: CalibrationQualityV2
+    virtual_pitch_overlay_geometry: VirtualPitchOverlayGeometry
+    calibration_v2_url: str
+    calibration_v2_overlay_url: str
+    reference_frame_url: str
+    image_width: int = Field(gt=0)
+    image_height: int = Field(gt=0)
+    created_at: datetime
+    updated_at: datetime
+    user_note: str | None = None
+    future_camera_pose: CalibrationV2FutureCameraPoseFields
     message: str
 
 

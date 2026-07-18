@@ -11,9 +11,11 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import {
   getVideoAnalysis,
   getVideoAnalysisCalibration,
+  getVideoAnalysisCalibrationV2,
   getVideoBallDetectionResult,
   getVideoBallTrackingResult,
   prepareVideoAnalysis,
+  type CalibrationV2Result,
   type ConfirmedVideoCalibrationResponse,
   type VideoAnalysisPreparedResponse,
   type VideoBallDetectionResultResponse,
@@ -126,6 +128,9 @@ export default function VideoAnalysisPage() {
   const [confirmedCalibration, setConfirmedCalibration] = useState<
     ConfirmedVideoCalibrationResponse | null
   >(null);
+  const [calibrationV2, setCalibrationV2] = useState<
+    CalibrationV2Result | null
+  >(null);
   const [ballDetectionResult, setBallDetectionResult] = useState<
     VideoBallDetectionResultResponse | null
   >(null);
@@ -153,6 +158,7 @@ export default function VideoAnalysisPage() {
     setSelectedFile(file);
     setAnalysis(null);
     setConfirmedCalibration(null);
+    setCalibrationV2(null);
     setBallDetectionResult(null);
     setBallTrackingResult(null);
     setActiveStage("upload");
@@ -179,6 +185,7 @@ export default function VideoAnalysisPage() {
     setSelectedFile(null);
     setAnalysis(null);
     setConfirmedCalibration(null);
+    setCalibrationV2(null);
     setBallDetectionResult(null);
     setBallTrackingResult(null);
     setError(null);
@@ -206,6 +213,7 @@ export default function VideoAnalysisPage() {
       const prepared = await prepareVideoAnalysis(selectedFile);
       setAnalysis(prepared);
       setConfirmedCalibration(null);
+      setCalibrationV2(null);
       setBallDetectionResult(null);
       setBallTrackingResult(null);
       setWorkspaceState("prepared");
@@ -230,13 +238,21 @@ export default function VideoAnalysisPage() {
     void Promise.all([
       getVideoAnalysis(analysisId),
       getVideoAnalysisCalibration(analysisId),
+      getVideoAnalysisCalibrationV2(analysisId),
       getVideoBallDetectionResult(analysisId),
       getVideoBallTrackingResult(analysisId)
     ])
-      .then(([restored, calibration, detectionResult, trackingResult]) => {
+      .then(([
+        restored,
+        calibration,
+        restoredCalibrationV2,
+        detectionResult,
+        trackingResult
+      ]) => {
         if (cancelled) return;
         setAnalysis(restored);
         setConfirmedCalibration(calibration);
+        setCalibrationV2(restoredCalibrationV2);
         setBallDetectionResult(detectionResult);
         setBallTrackingResult(trackingResult);
         setWorkspaceState("prepared");
@@ -267,7 +283,11 @@ export default function VideoAnalysisPage() {
   }, []);
 
   const uploadComplete = workspaceState === "prepared" && analysis !== null;
-  const calibrationComplete = confirmedCalibration !== null;
+  const calibrationV2Complete = calibrationV2?.status === "confirmed";
+  const calibrationComplete = (
+    confirmedCalibration !== null
+    || calibrationV2Complete
+  );
   const calibrationActive = uploadComplete && activeStage === "calibration";
   const ballDetectionActive = uploadComplete && activeStage === "ball_detection";
   const ballTrackingActive = (
@@ -284,13 +304,23 @@ export default function VideoAnalysisPage() {
         <p className="mt-4 leading-7 text-white/50">Create a persistent analysis workspace, inspect the source metadata, and extract a clean calibration reference frame.</p>
       </div>
 
-      <div className="mt-8 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+      <div className="mt-8 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
         <WorkflowStage index={1} title="Upload Video" state={uploadComplete ? "complete" : "active"} note={uploadComplete ? "Completed" : "Active"} />
         <WorkflowStage
           index={2}
           title="Scene Calibration"
-          state={calibrationComplete ? "complete" : calibrationActive ? "active" : uploadComplete ? "available" : "locked"}
-          note={calibrationComplete ? "Completed" : calibrationActive ? "Active" : uploadComplete ? "Optional" : "Locked"}
+          state={calibrationV2Complete ? "complete" : calibrationActive ? "active" : uploadComplete ? "available" : "locked"}
+          note={
+            calibrationV2Complete
+              ? "Calibration v2"
+              : calibrationV2?.status === "insufficient_geometry"
+                ? "Needs geometry"
+                : calibrationActive
+                  ? "Active"
+                  : uploadComplete
+                    ? "Available"
+                    : "Locked"
+          }
         />
         <WorkflowStage
           index={3}
@@ -301,10 +331,11 @@ export default function VideoAnalysisPage() {
         <WorkflowStage
           index={4}
           title="Ball Tracking"
-          state={ballTrackingActive ? "active" : ballDetectionResult ? "available" : "locked"}
-          note={ballTrackingActive ? "Active" : ballDetectionResult ? "Available" : "Locked"}
+          state={ballTrackingResult ? "complete" : ballTrackingActive ? "active" : ballDetectionResult ? "available" : "locked"}
+          note={ballTrackingResult ? "Completed" : ballTrackingActive ? "Active" : ballDetectionResult ? "Available" : "Locked"}
         />
-        <WorkflowStage index={5} title="Physics and Replay" state="disabled" note="" />
+        <WorkflowStage index={5} title="Physics" state="disabled" note="" />
+        <WorkflowStage index={6} title="3D Replay" state="disabled" note="" />
       </div>
 
       <Card className="mt-6">
@@ -395,6 +426,7 @@ export default function VideoAnalysisPage() {
               key={analysis.analysis_id}
               analysis={analysis}
               initialCalibration={confirmedCalibration}
+              initialCalibrationV2={calibrationV2}
               onDirty={() => setConfirmedCalibration(null)}
               onCalibrated={(calibration) => {
                 setConfirmedCalibration(calibration);
@@ -404,6 +436,20 @@ export default function VideoAnalysisPage() {
                   calibration_status: "confirmed",
                   calibration_url: calibration.calibration_url,
                   calibration_overlay_url: calibration.calibration_overlay_url,
+                  updated_at: calibration.updated_at
+                } : current);
+              }}
+              onCalibratedV2={(calibration) => {
+                setCalibrationV2(calibration);
+                setAnalysis((current) => current ? {
+                  ...current,
+                  calibration_v2_status: calibration.status,
+                  calibration_v2_url: calibration.calibration_v2_url,
+                  calibration_v2_overlay_url: calibration.calibration_v2_overlay_url,
+                  calibration_v2_quality_grade: calibration.quality.quality_grade,
+                  calibration_v2_reprojection_rmse_px: (
+                    calibration.quality.reprojection_rmse_px
+                  ),
                   updated_at: calibration.updated_at
                 } : current);
               }}

@@ -4,6 +4,9 @@ from typing import Annotated
 from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
 
 from ..schemas.video_analysis import (
+    CalibrationV2ConfirmRequest,
+    CalibrationV2InitialiseResponse,
+    CalibrationV2Result,
     ConfirmedVideoCalibrationResponse,
     VideoAnalysisPreparedResponse,
     VideoBallDetectionJobResponse,
@@ -43,6 +46,11 @@ from ..services.video_calibration_service import (
     confirm_video_calibration,
     detect_video_calibration,
     load_video_calibration,
+)
+from ..services.video_calibration_v2_service import (
+    confirm_video_calibration_v2,
+    initialise_video_calibration_v2,
+    load_video_calibration_v2,
 )
 
 
@@ -243,6 +251,71 @@ def get_analysis_ball_tracking(
     try:
         return load_video_ball_tracking_result(analysis_id)
     except (VideoAnalysisServiceError, VideoBallTrackingError) as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.post(
+    "/{analysis_id}/calibration/v2/initialise",
+    response_model=CalibrationV2InitialiseResponse,
+)
+def initialise_analysis_calibration_v2(
+    analysis_id: str,
+) -> CalibrationV2InitialiseResponse:
+    try:
+        return initialise_video_calibration_v2(analysis_id)
+    except VideoAnalysisServiceError as exc:
+        logger.warning(
+            "Calibration v2 initialisation rejected for %s: %s",
+            analysis_id,
+            exc.message,
+        )
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.put(
+    "/{analysis_id}/calibration/v2/confirm",
+    response_model=CalibrationV2Result,
+)
+def confirm_analysis_calibration_v2(
+    analysis_id: str,
+    request: CalibrationV2ConfirmRequest,
+) -> CalibrationV2Result:
+    try:
+        result = confirm_video_calibration_v2(analysis_id, request)
+        logger.info(
+            "Saved Calibration v2 for %s with status %s",
+            analysis_id,
+            result.status,
+        )
+        return result
+    except VideoAnalysisServiceError as exc:
+        logger.warning(
+            "Calibration v2 confirmation rejected for %s: %s",
+            analysis_id,
+            exc.message,
+        )
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.get(
+    "/{analysis_id}/calibration/v2",
+    response_model=CalibrationV2Result,
+)
+def get_analysis_calibration_v2(
+    analysis_id: str,
+) -> CalibrationV2Result:
+    try:
+        return load_video_calibration_v2(analysis_id)
+    except VideoAnalysisServiceError as exc:
         raise HTTPException(
             status_code=exc.status_code,
             detail=exc.message,

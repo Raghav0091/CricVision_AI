@@ -8,6 +8,7 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import {
   confirmVideoAnalysisCalibration,
   detectVideoAnalysisCalibration,
+  type CalibrationV2Result,
   type ConfirmedVideoCalibrationResponse,
   type VideoAnalysisPreparedResponse,
   type WicketCalibration
@@ -19,6 +20,7 @@ import {
   wicketDistanceWarning,
   wicketFromBox
 } from "./CalibrationCanvas";
+import { CalibrationV2Panel } from "./CalibrationV2Panel";
 
 
 type CalibrationPhase = "idle" | "detecting" | "editing" | "saving" | "saved";
@@ -31,12 +33,16 @@ type DetectedPositions = {
 export function SceneCalibrationPanel({
   analysis,
   initialCalibration,
+  initialCalibrationV2,
   onCalibrated,
+  onCalibratedV2,
   onDirty
 }: {
   analysis: VideoAnalysisPreparedResponse;
   initialCalibration: ConfirmedVideoCalibrationResponse | null;
+  initialCalibrationV2: CalibrationV2Result | null;
   onCalibrated: (calibration: ConfirmedVideoCalibrationResponse) => void;
+  onCalibratedV2: (calibration: CalibrationV2Result) => void;
   onDirty: () => void;
 }) {
   const [phase, setPhase] = useState<CalibrationPhase>(
@@ -427,6 +433,12 @@ export function SceneCalibrationPanel({
           />
         </div>
       )}
+
+      <CalibrationV2Panel
+        analysis={analysis}
+        initialCalibration={initialCalibrationV2}
+        onCalibrated={onCalibratedV2}
+      />
     </Card>
   );
 }
