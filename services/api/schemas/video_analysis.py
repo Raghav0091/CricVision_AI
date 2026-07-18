@@ -97,6 +97,18 @@ class VideoAnalysisPreparedResponse(BaseModel):
     ball_detection_completed_at: datetime | None = None
     detection_summary_url: str | None = None
     detection_overlay_url: str | None = None
+    tracking_status: Literal[
+        "tracking_queued",
+        "tracking_ball",
+        "tracking_complete",
+        "tracking_failed",
+        "tracking_no_reliable_track",
+    ] | None = None
+    tracking_job_id: str | None = None
+    tracking_started_at: datetime | None = None
+    tracking_completed_at: datetime | None = None
+    tracking_summary_url: str | None = None
+    tracking_video_url: str | None = None
     message: str
 
 
@@ -282,4 +294,142 @@ class VideoBallDetectionResultResponse(BaseModel):
     analysis_id: str
     summary: VideoBallDetectionSummary
     frame_candidate_counts: list[int]
+    message: str
+
+
+VideoBallTrackingJobStatus = Literal[
+    "queued",
+    "loading_detections",
+    "analysing_candidates",
+    "building_track",
+    "recovering_gaps",
+    "rendering_video",
+    "saving_results",
+    "ready",
+    "failed",
+    "no_reliable_track",
+]
+
+
+class VideoBallTrackingResultLinks(BaseModel):
+    tracking_video_url: str
+    tracking_json_url: str
+    tracking_csv_url: str
+    tracking_summary_url: str
+
+
+class VideoBallTrackingStartResponse(BaseModel):
+    success: Literal[True]
+    status: Literal["queued"]
+    analysis_id: str
+    job_id: str
+    progress: int = Field(ge=0, le=100)
+    message: str
+
+
+class VideoBallTrackingJobResponse(BaseModel):
+    success: bool
+    status: VideoBallTrackingJobStatus
+    analysis_id: str
+    job_id: str
+    progress: int = Field(ge=0, le=100)
+    created_at: datetime
+    updated_at: datetime
+    error_message: str | None = None
+    result: VideoBallTrackingResultLinks | None = None
+    message: str
+
+
+class TrackingPoint(StrictGeometryModel):
+    frame_index: int = Field(ge=0)
+    timestamp_seconds: float = Field(ge=0)
+    source: Literal["observed", "predicted", "recovered"]
+    candidate_id: str | None = None
+    x: float = Field(ge=0)
+    y: float = Field(ge=0)
+    normalized_x: float = Field(ge=0, le=1)
+    normalized_y: float = Field(ge=0, le=1)
+    confidence: float = Field(ge=0, le=1)
+    vx: float
+    vy: float
+    prediction_error: float | None = Field(default=None, ge=0)
+    inside_pitch_corridor: bool | None = None
+
+
+class TrackingCandidateScoreComponents(StrictGeometryModel):
+    detector_confidence: float
+    motion: float
+    prediction_proximity: float
+    direction: float
+    size_consistency: float
+    corridor: float
+    static_penalty: float = Field(ge=0)
+    jump_penalty: float = Field(ge=0)
+    total: float
+
+
+class TrackingCandidateDiagnostic(StrictGeometryModel):
+    frame_index: int = Field(ge=0)
+    candidate_id: str
+    selected: bool
+    selection_reason: str
+    static_likelihood: float = Field(ge=0, le=1)
+    score_components: TrackingCandidateScoreComponents | None = None
+
+
+class VideoBallTrackingSettings(BaseModel):
+    motion_model: Literal["constant_velocity_recent_median"]
+    max_recoverable_gap: int = Field(ge=1)
+    minimum_observed_points: int = Field(ge=2)
+    static_radius_normalized: float = Field(gt=0)
+    base_gate_normalized: float = Field(gt=0)
+    maximum_gate_normalized: float = Field(gt=0)
+    history_points: int = Field(ge=1)
+
+
+class VideoBallTrackingDocument(BaseModel):
+    analysis_id: str
+    status: Literal["ready", "no_reliable_track"]
+    created_at: datetime
+    completed_at: datetime
+    settings: VideoBallTrackingSettings
+    primary_track: list[TrackingPoint]
+    candidate_diagnostics: list[TrackingCandidateDiagnostic]
+    message: str
+
+
+class VideoBallTrackingSummary(BaseModel):
+    analysis_id: str
+    status: Literal["ready", "no_reliable_track"]
+    total_video_frames: int = Field(gt=0)
+    raw_candidate_count: int = Field(ge=0)
+    candidate_frames: int = Field(ge=0)
+    track_start_frame: int | None = Field(default=None, ge=0)
+    track_end_frame: int | None = Field(default=None, ge=0)
+    track_duration_frames: int = Field(ge=0)
+    track_duration_seconds: float = Field(ge=0)
+    observed_track_points: int = Field(ge=0)
+    predicted_points: int = Field(ge=0)
+    recovered_points: int = Field(ge=0)
+    rejected_candidates: int = Field(ge=0)
+    longest_gap_frames: int = Field(ge=0)
+    average_observed_confidence: float = Field(ge=0, le=1)
+    track_confidence: float = Field(ge=0, le=1)
+    track_quality: Literal["low", "medium", "good", "strong"]
+    approximate_direction: str
+    possible_bounce_transition_detected: bool | Literal["uncertain"]
+    tracking_video_url: str
+    tracking_json_url: str
+    tracking_csv_url: str
+    tracking_summary_url: str
+    processing_duration_seconds: float = Field(ge=0)
+    message: str
+
+
+class VideoBallTrackingResultResponse(BaseModel):
+    success: bool
+    status: Literal["ready", "no_reliable_track"]
+    analysis_id: str
+    summary: VideoBallTrackingSummary
+    primary_track: list[TrackingPoint]
     message: str

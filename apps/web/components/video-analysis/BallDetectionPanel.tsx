@@ -178,11 +178,13 @@ function DetectionResult({
 export function BallDetectionPanel({
   analysis,
   initialResult,
-  initialJobId
+  initialJobId,
+  onResult
 }: {
   analysis: VideoAnalysisPreparedResponse;
   initialResult: VideoBallDetectionResultResponse | null;
   initialJobId?: string | null;
+  onResult?: (result: VideoBallDetectionResultResponse | null) => void;
 }) {
   const pollGeneration = useRef(0);
   const [job, setJob] = useState<JobView | null>(null);
@@ -198,6 +200,7 @@ export function BallDetectionPanel({
     const completed = await getVideoBallDetectionResult(analysis.analysis_id);
     if (!completed) return false;
     setResult(completed);
+    onResult?.(completed);
     setJob(null);
     setError(null);
     return true;
@@ -253,6 +256,7 @@ export function BallDetectionPanel({
     try {
       const started = await startVideoBallDetection(analysis.analysis_id);
       setResult(null);
+      onResult?.(null);
       setJob({
         jobId: started.job_id,
         status: started.status,

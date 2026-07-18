@@ -3,6 +3,7 @@
 import { type ChangeEvent, useEffect, useRef, useState } from "react";
 
 import { BallDetectionPanel } from "@/components/video-analysis/BallDetectionPanel";
+import { BallTrackingPanel } from "@/components/video-analysis/BallTrackingPanel";
 import { SceneCalibrationPanel } from "@/components/video-analysis/SceneCalibrationPanel";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
@@ -11,15 +12,17 @@ import {
   getVideoAnalysis,
   getVideoAnalysisCalibration,
   getVideoBallDetectionResult,
+  getVideoBallTrackingResult,
   prepareVideoAnalysis,
   type ConfirmedVideoCalibrationResponse,
   type VideoAnalysisPreparedResponse,
-  type VideoBallDetectionResultResponse
+  type VideoBallDetectionResultResponse,
+  type VideoBallTrackingResultResponse
 } from "@/lib/api";
 
 
 type WorkspaceState = "idle" | "file_selected" | "uploading" | "prepared" | "failed";
-type ActiveStage = "upload" | "calibration" | "ball_detection";
+type ActiveStage = "upload" | "calibration" | "ball_detection" | "ball_tracking";
 
 
 const MAX_FILE_BYTES = 500 * 1024 * 1024;
@@ -126,6 +129,9 @@ export default function VideoAnalysisPage() {
   const [ballDetectionResult, setBallDetectionResult] = useState<
     VideoBallDetectionResultResponse | null
   >(null);
+  const [ballTrackingResult, setBallTrackingResult] = useState<
+    VideoBallTrackingResultResponse | null
+  >(null);
   const [error, setError] = useState<string | null>(null);
   const [restoring, setRestoring] = useState(false);
 
@@ -148,6 +154,7 @@ export default function VideoAnalysisPage() {
     setAnalysis(null);
     setConfirmedCalibration(null);
     setBallDetectionResult(null);
+    setBallTrackingResult(null);
     setActiveStage("upload");
     setWorkspaceState("file_selected");
     setError(null);
@@ -173,6 +180,7 @@ export default function VideoAnalysisPage() {
     setAnalysis(null);
     setConfirmedCalibration(null);
     setBallDetectionResult(null);
+    setBallTrackingResult(null);
     setError(null);
     setActiveStage("upload");
     setWorkspaceState("idle");
@@ -199,6 +207,7 @@ export default function VideoAnalysisPage() {
       setAnalysis(prepared);
       setConfirmedCalibration(null);
       setBallDetectionResult(null);
+      setBallTrackingResult(null);
       setWorkspaceState("prepared");
       setActiveStage("ball_detection");
       window.history.replaceState(
@@ -221,15 +230,23 @@ export default function VideoAnalysisPage() {
     void Promise.all([
       getVideoAnalysis(analysisId),
       getVideoAnalysisCalibration(analysisId),
-      getVideoBallDetectionResult(analysisId)
+      getVideoBallDetectionResult(analysisId),
+      getVideoBallTrackingResult(analysisId)
     ])
-      .then(([restored, calibration, detectionResult]) => {
+      .then(([restored, calibration, detectionResult, trackingResult]) => {
         if (cancelled) return;
         setAnalysis(restored);
         setConfirmedCalibration(calibration);
         setBallDetectionResult(detectionResult);
+        setBallTrackingResult(trackingResult);
         setWorkspaceState("prepared");
-        setActiveStage("ball_detection");
+        setActiveStage(
+          trackingResult
+          || restored.tracking_status === "tracking_queued"
+          || restored.tracking_status === "tracking_ball"
+            ? "ball_tracking"
+            : "ball_detection"
+        );
         setError(null);
       })
       .catch((caught) => {
@@ -253,6 +270,11 @@ export default function VideoAnalysisPage() {
   const calibrationComplete = confirmedCalibration !== null;
   const calibrationActive = uploadComplete && activeStage === "calibration";
   const ballDetectionActive = uploadComplete && activeStage === "ball_detection";
+  const ballTrackingActive = (
+    uploadComplete
+    && activeStage === "ball_tracking"
+    && ballDetectionResult !== null
+  );
 
   return (
     <div className="mx-auto max-w-7xl py-5">
@@ -273,10 +295,15 @@ export default function VideoAnalysisPage() {
         <WorkflowStage
           index={3}
           title="Ball Detection"
-          state={ballDetectionActive ? "active" : uploadComplete ? "available" : "locked"}
-          note={ballDetectionActive ? "Active" : uploadComplete ? "Available" : "Locked"}
+          state={ballDetectionResult ? "complete" : ballDetectionActive ? "active" : uploadComplete ? "available" : "locked"}
+          note={ballDetectionResult ? "Completed" : ballDetectionActive ? "Active" : uploadComplete ? "Available" : "Locked"}
         />
-        <WorkflowStage index={4} title="Ball Tracking" state="disabled" note="" />
+        <WorkflowStage
+          index={4}
+          title="Ball Tracking"
+          state={ballTrackingActive ? "active" : ballDetectionResult ? "available" : "locked"}
+          note={ballTrackingActive ? "Active" : ballDetectionResult ? "Available" : "Locked"}
+        />
         <WorkflowStage index={5} title="Physics and Replay" state="disabled" note="" />
       </div>
 
@@ -359,7 +386,7 @@ export default function VideoAnalysisPage() {
             </Card>
           </div>
 
-          {!calibrationActive && !ballDetectionActive && (
+          {!calibrationActive && !ballDetectionActive && !ballTrackingActive && (
             <Button onClick={() => setActiveStage("calibration")}>Continue to Scene Calibration</Button>
           )}
 
@@ -402,9 +429,35 @@ export default function VideoAnalysisPage() {
                 analysis={analysis}
                 initialResult={ballDetectionResult}
                 initialJobId={analysis.ball_detection_job_id}
+                onResult={(result) => {
+                  setBallDetectionResult(result);
+                  if (!result) setBallTrackingResult(null);
+                }}
               />
-              <Button variant="secondary" onClick={() => setActiveStage("calibration")}>
-                {calibrationComplete ? "Review Scene Calibration" : "Open Optional Scene Calibration"}
+              <div className="flex flex-wrap gap-3">
+                {ballDetectionResult && (
+                  <Button onClick={() => setActiveStage("ball_tracking")}>
+                    Continue to Ball Tracking
+                  </Button>
+                )}
+                <Button variant="secondary" onClick={() => setActiveStage("calibration")}>
+                  {calibrationComplete ? "Review Scene Calibration" : "Open Optional Scene Calibration"}
+                </Button>
+              </div>
+            </>
+          )}
+
+          {ballTrackingActive && ballDetectionResult && (
+            <>
+              <BallTrackingPanel
+                key={analysis.analysis_id}
+                analysis={analysis}
+                detectionResult={ballDetectionResult}
+                initialResult={ballTrackingResult}
+                initialJobId={analysis.tracking_job_id}
+              />
+              <Button variant="secondary" onClick={() => setActiveStage("ball_detection")}>
+                Back to Raw Ball Detection
               </Button>
             </>
           )}

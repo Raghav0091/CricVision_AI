@@ -200,6 +200,12 @@ export type VideoAnalysisPreparedResponse = {
   ball_detection_completed_at?: string | null;
   detection_summary_url?: string | null;
   detection_overlay_url?: string | null;
+  tracking_status?: "tracking_queued" | "tracking_ball" | "tracking_complete" | "tracking_failed" | "tracking_no_reliable_track" | null;
+  tracking_job_id?: string | null;
+  tracking_started_at?: string | null;
+  tracking_completed_at?: string | null;
+  tracking_summary_url?: string | null;
+  tracking_video_url?: string | null;
   message: string;
 };
 
@@ -212,7 +218,9 @@ function withBrowserSafeAnalysisUrls(record: VideoAnalysisPreparedResponse): Vid
     calibration_url: resolveApiUrl(record.calibration_url),
     calibration_overlay_url: resolveApiUrl(record.calibration_overlay_url),
     detection_summary_url: resolveApiUrl(record.detection_summary_url),
-    detection_overlay_url: resolveApiUrl(record.detection_overlay_url)
+    detection_overlay_url: resolveApiUrl(record.detection_overlay_url),
+    tracking_summary_url: resolveApiUrl(record.tracking_summary_url),
+    tracking_video_url: resolveApiUrl(record.tracking_video_url)
   };
 }
 
@@ -596,5 +604,185 @@ export async function getVideoBallDetectionResult(
   }
   return withBrowserSafeVideoBallDetectionResult(
     await response.json() as VideoBallDetectionResultResponse
+  );
+}
+
+
+export type VideoBallTrackingJobStatus =
+  | "queued"
+  | "loading_detections"
+  | "analysing_candidates"
+  | "building_track"
+  | "recovering_gaps"
+  | "rendering_video"
+  | "saving_results"
+  | "ready"
+  | "failed"
+  | "no_reliable_track";
+
+
+export type VideoBallTrackingResultLinks = {
+  tracking_video_url: string;
+  tracking_json_url: string;
+  tracking_csv_url: string;
+  tracking_summary_url: string;
+};
+
+
+export type VideoBallTrackingStartResponse = {
+  success: true;
+  status: "queued";
+  analysis_id: string;
+  job_id: string;
+  progress: number;
+  message: string;
+};
+
+
+export type VideoBallTrackingJobResponse = {
+  success: boolean;
+  status: VideoBallTrackingJobStatus;
+  analysis_id: string;
+  job_id: string;
+  progress: number;
+  created_at: string;
+  updated_at: string;
+  error_message?: string | null;
+  result?: VideoBallTrackingResultLinks | null;
+  message: string;
+};
+
+
+export type VideoBallTrackingPoint = {
+  frame_index: number;
+  timestamp_seconds: number;
+  source: "observed" | "predicted" | "recovered";
+  candidate_id?: string | null;
+  x: number;
+  y: number;
+  normalized_x: number;
+  normalized_y: number;
+  confidence: number;
+  vx: number;
+  vy: number;
+  prediction_error?: number | null;
+  inside_pitch_corridor?: boolean | null;
+};
+
+
+export type VideoBallTrackingSummary = {
+  analysis_id: string;
+  status: "ready" | "no_reliable_track";
+  total_video_frames: number;
+  raw_candidate_count: number;
+  candidate_frames: number;
+  track_start_frame?: number | null;
+  track_end_frame?: number | null;
+  track_duration_frames: number;
+  track_duration_seconds: number;
+  observed_track_points: number;
+  predicted_points: number;
+  recovered_points: number;
+  rejected_candidates: number;
+  longest_gap_frames: number;
+  average_observed_confidence: number;
+  track_confidence: number;
+  track_quality: "low" | "medium" | "good" | "strong";
+  approximate_direction: string;
+  possible_bounce_transition_detected: boolean | "uncertain";
+  tracking_video_url: string;
+  tracking_json_url: string;
+  tracking_csv_url: string;
+  tracking_summary_url: string;
+  processing_duration_seconds: number;
+  message: string;
+};
+
+
+export type VideoBallTrackingResultResponse = {
+  success: boolean;
+  status: "ready" | "no_reliable_track";
+  analysis_id: string;
+  summary: VideoBallTrackingSummary;
+  primary_track: VideoBallTrackingPoint[];
+  message: string;
+};
+
+
+function withBrowserSafeTrackingLinks(
+  links?: VideoBallTrackingResultLinks | null
+): VideoBallTrackingResultLinks | null | undefined {
+  if (!links) return links;
+  return {
+    tracking_video_url: resolveApiUrl(links.tracking_video_url) ?? links.tracking_video_url,
+    tracking_json_url: resolveApiUrl(links.tracking_json_url) ?? links.tracking_json_url,
+    tracking_csv_url: resolveApiUrl(links.tracking_csv_url) ?? links.tracking_csv_url,
+    tracking_summary_url: resolveApiUrl(links.tracking_summary_url) ?? links.tracking_summary_url
+  };
+}
+
+
+function withBrowserSafeTrackingResult(
+  result: VideoBallTrackingResultResponse
+): VideoBallTrackingResultResponse {
+  return {
+    ...result,
+    summary: {
+      ...result.summary,
+      tracking_video_url: resolveApiUrl(result.summary.tracking_video_url) ?? result.summary.tracking_video_url,
+      tracking_json_url: resolveApiUrl(result.summary.tracking_json_url) ?? result.summary.tracking_json_url,
+      tracking_csv_url: resolveApiUrl(result.summary.tracking_csv_url) ?? result.summary.tracking_csv_url,
+      tracking_summary_url: resolveApiUrl(result.summary.tracking_summary_url) ?? result.summary.tracking_summary_url
+    }
+  };
+}
+
+
+export async function startVideoBallTracking(
+  analysisId: string
+): Promise<VideoBallTrackingStartResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/tracking/start`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(response, `Moving Ball Tracker start returned ${response.status}.`);
+  }
+  return response.json() as Promise<VideoBallTrackingStartResponse>;
+}
+
+
+export async function getVideoBallTrackingJob(
+  analysisId: string,
+  jobId: string
+): Promise<VideoBallTrackingJobResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/tracking/job/${encodeURIComponent(jobId)}`,
+    { cache: "no-store" }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(response, `Moving Ball Tracker job lookup returned ${response.status}.`);
+  }
+  const job = await response.json() as VideoBallTrackingJobResponse;
+  return {
+    ...job,
+    result: withBrowserSafeTrackingLinks(job.result)
+  };
+}
+
+
+export async function getVideoBallTrackingResult(
+  analysisId: string
+): Promise<VideoBallTrackingResultResponse | null> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/tracking`,
+    { cache: "no-store" }
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw await videoAnalysisError(response, `Moving Ball Tracker result lookup returned ${response.status}.`);
+  }
+  return withBrowserSafeTrackingResult(
+    await response.json() as VideoBallTrackingResultResponse
   );
 }
