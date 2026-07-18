@@ -194,6 +194,12 @@ export type VideoAnalysisPreparedResponse = {
   calibration_status?: "confirmed" | null;
   calibration_url?: string | null;
   calibration_overlay_url?: string | null;
+  ball_detection_status?: "detection_queued" | "detecting_ball" | "detection_complete" | "detection_failed" | null;
+  ball_detection_job_id?: string | null;
+  ball_detection_started_at?: string | null;
+  ball_detection_completed_at?: string | null;
+  detection_summary_url?: string | null;
+  detection_overlay_url?: string | null;
   message: string;
 };
 
@@ -204,7 +210,9 @@ function withBrowserSafeAnalysisUrls(record: VideoAnalysisPreparedResponse): Vid
     original_video_url: resolveApiUrl(record.original_video_url) ?? record.original_video_url,
     reference_frame_url: resolveApiUrl(record.reference_frame_url) ?? record.reference_frame_url,
     calibration_url: resolveApiUrl(record.calibration_url),
-    calibration_overlay_url: resolveApiUrl(record.calibration_overlay_url)
+    calibration_overlay_url: resolveApiUrl(record.calibration_overlay_url),
+    detection_summary_url: resolveApiUrl(record.detection_summary_url),
+    detection_overlay_url: resolveApiUrl(record.detection_overlay_url)
   };
 }
 
@@ -410,5 +418,183 @@ export async function getVideoAnalysisCalibration(
   }
   return withBrowserSafeCalibrationUrls(
     await response.json() as ConfirmedVideoCalibrationResponse
+  );
+}
+
+
+export type VideoBallDetectionJobStatus =
+  | "queued"
+  | "loading_model"
+  | "processing"
+  | "writing_video"
+  | "saving_results"
+  | "ready"
+  | "failed"
+  | "ball_detector_missing";
+
+
+export type VideoBallDetectionResultLinks = {
+  processed_video_url: string;
+  detections_json_url: string;
+  detections_csv_url: string;
+  detection_summary_url: string;
+};
+
+
+export type VideoBallDetectionStartResponse = {
+  success: boolean;
+  status: "queued";
+  analysis_id: string;
+  job_id: string;
+  progress: number;
+  current_frame: number;
+  total_frames: number;
+  message: string;
+};
+
+
+export type VideoBallDetectionJobResponse = {
+  success: boolean;
+  status: VideoBallDetectionJobStatus;
+  analysis_id: string;
+  job_id: string;
+  progress: number;
+  current_frame: number;
+  total_frames: number;
+  created_at: string;
+  updated_at: string;
+  model_path_used?: string | null;
+  error_message?: string | null;
+  result?: VideoBallDetectionResultLinks | null;
+  message: string;
+};
+
+
+export type VideoBallDetectionSummary = {
+  analysis_id: string;
+  status: "ready";
+  created_at: string;
+  completed_at: string;
+  original_video_url: string;
+  processed_video_url: string;
+  detections_json_url: string;
+  detections_csv_url: string;
+  detection_summary_url: string;
+  model_path_used: string;
+  model_warning?: string | null;
+  model_class_names: string[];
+  device_used: string;
+  imgsz: 960;
+  confidence_threshold: 0.15;
+  frame_stride: 1;
+  max_det: 20;
+  total_frames: number;
+  frames_processed: number;
+  frames_with_candidates: number;
+  frames_without_candidates: number;
+  total_candidates: number;
+  frames_with_multiple_candidates: number;
+  candidates_inside_pitch_corridor: number;
+  candidates_outside_pitch_corridor: number;
+  candidates_without_corridor_information: number;
+  best_confidence: number;
+  average_confidence: number;
+  average_candidates_per_detected_frame: number;
+  processing_duration_seconds: number;
+  output_video_frame_count: number;
+  input_fps: number;
+  output_fps: number;
+  input_duration_seconds: number;
+  output_duration_seconds: number;
+  message: string;
+};
+
+
+export type VideoBallDetectionResultResponse = {
+  success: true;
+  status: "ready";
+  analysis_id: string;
+  summary: VideoBallDetectionSummary;
+  frame_candidate_counts: number[];
+  message: string;
+};
+
+
+function withBrowserSafeVideoBallDetectionLinks(
+  links?: VideoBallDetectionResultLinks | null
+): VideoBallDetectionResultLinks | null | undefined {
+  if (!links) return links;
+  return {
+    processed_video_url: resolveApiUrl(links.processed_video_url) ?? links.processed_video_url,
+    detections_json_url: resolveApiUrl(links.detections_json_url) ?? links.detections_json_url,
+    detections_csv_url: resolveApiUrl(links.detections_csv_url) ?? links.detections_csv_url,
+    detection_summary_url: resolveApiUrl(links.detection_summary_url) ?? links.detection_summary_url
+  };
+}
+
+
+function withBrowserSafeVideoBallDetectionResult(
+  result: VideoBallDetectionResultResponse
+): VideoBallDetectionResultResponse {
+  return {
+    ...result,
+    summary: {
+      ...result.summary,
+      original_video_url: resolveApiUrl(result.summary.original_video_url) ?? result.summary.original_video_url,
+      processed_video_url: resolveApiUrl(result.summary.processed_video_url) ?? result.summary.processed_video_url,
+      detections_json_url: resolveApiUrl(result.summary.detections_json_url) ?? result.summary.detections_json_url,
+      detections_csv_url: resolveApiUrl(result.summary.detections_csv_url) ?? result.summary.detections_csv_url,
+      detection_summary_url: resolveApiUrl(result.summary.detection_summary_url) ?? result.summary.detection_summary_url
+    }
+  };
+}
+
+
+export async function startVideoBallDetection(
+  analysisId: string
+): Promise<VideoBallDetectionStartResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/ball-detection/start`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(response, `Ball detection start returned ${response.status}.`);
+  }
+  return response.json() as Promise<VideoBallDetectionStartResponse>;
+}
+
+
+export async function getVideoBallDetectionJob(
+  analysisId: string,
+  jobId: string
+): Promise<VideoBallDetectionJobResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/ball-detection/job/${encodeURIComponent(jobId)}`,
+    { cache: "no-store" }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(response, `Ball detection job lookup returned ${response.status}.`);
+  }
+  const job = await response.json() as VideoBallDetectionJobResponse;
+  return {
+    ...job,
+    result: withBrowserSafeVideoBallDetectionLinks(job.result)
+  };
+}
+
+
+export async function getVideoBallDetectionResult(
+  analysisId: string
+): Promise<VideoBallDetectionResultResponse | null> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/ball-detection`,
+    { cache: "no-store" }
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw await videoAnalysisError(response, `Ball detection result lookup returned ${response.status}.`);
+  }
+  return withBrowserSafeVideoBallDetectionResult(
+    await response.json() as VideoBallDetectionResultResponse
   );
 }

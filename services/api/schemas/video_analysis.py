@@ -86,6 +86,17 @@ class VideoAnalysisPreparedResponse(BaseModel):
     calibration_status: Literal["confirmed"] | None = None
     calibration_url: str | None = None
     calibration_overlay_url: str | None = None
+    ball_detection_status: Literal[
+        "detection_queued",
+        "detecting_ball",
+        "detection_complete",
+        "detection_failed",
+    ] | None = None
+    ball_detection_job_id: str | None = None
+    ball_detection_started_at: datetime | None = None
+    ball_detection_completed_at: datetime | None = None
+    detection_summary_url: str | None = None
+    detection_overlay_url: str | None = None
     message: str
 
 
@@ -135,4 +146,140 @@ class ConfirmedVideoCalibrationResponse(BaseModel):
     non_striker_wicket: WicketCalibration
     pitch_geometry: PitchGeometry
     user_note: str | None = None
+    message: str
+
+
+VideoBallDetectionJobStatus = Literal[
+    "queued",
+    "loading_model",
+    "processing",
+    "writing_video",
+    "saving_results",
+    "ready",
+    "failed",
+    "ball_detector_missing",
+]
+
+
+class VideoBallDetectionResultLinks(BaseModel):
+    processed_video_url: str
+    detections_json_url: str
+    detections_csv_url: str
+    detection_summary_url: str
+
+
+class VideoBallDetectionStartResponse(BaseModel):
+    success: bool
+    status: Literal["queued"]
+    analysis_id: str
+    job_id: str
+    progress: int = Field(ge=0, le=100)
+    current_frame: int = Field(ge=0)
+    total_frames: int = Field(gt=0)
+    message: str
+
+
+class VideoBallDetectionJobResponse(BaseModel):
+    success: bool
+    status: VideoBallDetectionJobStatus
+    analysis_id: str
+    job_id: str
+    progress: int = Field(ge=0, le=100)
+    current_frame: int = Field(ge=0)
+    total_frames: int = Field(gt=0)
+    created_at: datetime
+    updated_at: datetime
+    model_path_used: str | None = None
+    error_message: str | None = None
+    result: VideoBallDetectionResultLinks | None = None
+    message: str
+
+
+class PixelPoint(StrictGeometryModel):
+    x: float = Field(ge=0)
+    y: float = Field(ge=0)
+
+
+class BallCandidate(StrictGeometryModel):
+    candidate_id: str
+    class_id: int
+    class_name: str
+    confidence: float = Field(ge=0, le=1)
+    bbox_xyxy: list[float] = Field(min_length=4, max_length=4)
+    bbox_normalized: NormalizedBox
+    center: PixelPoint
+    center_normalized: NormalizedPoint
+    width_pixels: float = Field(gt=0)
+    height_pixels: float = Field(gt=0)
+    area_pixels: float = Field(gt=0)
+    inside_pitch_corridor: bool | None = None
+
+
+class FrameDetectionRecord(BaseModel):
+    frame_index: int = Field(ge=0)
+    timestamp_seconds: float = Field(ge=0)
+    processed: Literal[True]
+    detections: list[BallCandidate] = Field(default_factory=list)
+
+
+class VideoBallDetectionSettings(BaseModel):
+    frame_stride: Literal[1]
+    imgsz: Literal[960]
+    confidence_threshold: Literal[0.15]
+    max_det: Literal[20]
+
+
+class VideoBallDetectionsDocument(BaseModel):
+    analysis_id: str
+    model_path_used: str
+    model_class_names: list[str]
+    settings: VideoBallDetectionSettings
+    frames: list[FrameDetectionRecord]
+
+
+class VideoBallDetectionSummary(BaseModel):
+    analysis_id: str
+    status: Literal["ready"]
+    created_at: datetime
+    completed_at: datetime
+    original_video_url: str
+    processed_video_url: str
+    detections_json_url: str
+    detections_csv_url: str
+    detection_summary_url: str
+    model_path_used: str
+    model_warning: str | None = None
+    model_class_names: list[str]
+    device_used: str
+    imgsz: Literal[960]
+    confidence_threshold: Literal[0.15]
+    frame_stride: Literal[1]
+    max_det: Literal[20]
+    total_frames: int = Field(gt=0)
+    frames_processed: int = Field(gt=0)
+    frames_with_candidates: int = Field(ge=0)
+    frames_without_candidates: int = Field(ge=0)
+    total_candidates: int = Field(ge=0)
+    frames_with_multiple_candidates: int = Field(ge=0)
+    candidates_inside_pitch_corridor: int = Field(ge=0)
+    candidates_outside_pitch_corridor: int = Field(ge=0)
+    candidates_without_corridor_information: int = Field(ge=0)
+    best_confidence: float = Field(ge=0, le=1)
+    average_confidence: float = Field(ge=0, le=1)
+    average_candidates_per_detected_frame: float = Field(ge=0)
+    processing_duration_seconds: float = Field(ge=0)
+    output_video_frame_count: int = Field(gt=0)
+    input_fps: float = Field(gt=0)
+    output_fps: float = Field(gt=0)
+    input_duration_seconds: float = Field(gt=0)
+    output_duration_seconds: float = Field(gt=0)
+    message: str
+
+
+class VideoBallDetectionResultResponse(BaseModel):
+    success: Literal[True]
+    status: Literal["ready"]
+    analysis_id: str
+    summary: VideoBallDetectionSummary
+    frame_candidate_counts: list[int]
     message: str

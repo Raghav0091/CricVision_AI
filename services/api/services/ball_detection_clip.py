@@ -21,12 +21,20 @@ BALL_MODEL_PATHS = (
     PROJECT_ROOT / "Models" / "ball_detector" / "best.pt",
     PROJECT_ROOT / "Models" / "cricket_objects" / "best.pt",
 )
+VIDEO_ANALYSIS_BALL_MODEL_PATHS = BALL_MODEL_PATHS[:2]
 BALL_CLASS_NAMES = {"ball", "cricket_ball", "sports_ball"}
-_INFERENCE_LOCK = Lock()
+BALL_INFERENCE_LOCK = Lock()
 
 
 def resolve_ball_model_path() -> Path | None:
     return next((path for path in BALL_MODEL_PATHS if path.is_file()), None)
+
+
+def resolve_video_analysis_ball_model_path() -> Path | None:
+    return next(
+        (path for path in VIDEO_ANALYSIS_BALL_MODEL_PATHS if path.is_file()),
+        None,
+    )
 
 
 @lru_cache(maxsize=1)
@@ -35,6 +43,10 @@ def _load_ball_model(model_path: str):
     from ultralytics import YOLO
 
     return YOLO(model_path)
+
+
+def load_ball_model(model_path: Path):
+    return _load_ball_model(str(model_path))
 
 
 def process_ball_detection_clip(
@@ -57,7 +69,7 @@ def process_ball_detection_clip(
         )
 
     try:
-        model = _load_ball_model(str(model_path))
+        model = load_ball_model(model_path)
     except Exception as exc:
         return _failure(
             "model_inference_failed",
@@ -119,7 +131,7 @@ def process_ball_detection_clip(
                 model_path,
             )
         else:
-            with _INFERENCE_LOCK:
+            with BALL_INFERENCE_LOCK:
                 while True:
                     ok, frame = capture.read()
                     if not ok or frame_count >= max_frames:
@@ -177,7 +189,7 @@ def process_ball_detection_clip(
         )
 
     try:
-        _transcode_browser_mp4(intermediate_path, processed_path)
+        transcode_browser_mp4(intermediate_path, processed_path)
     except Exception as exc:
         processed_path.unlink(missing_ok=True)
         return _failure(
@@ -209,6 +221,26 @@ def process_ball_detection_clip(
 
 def _best_ball_detection(results, model_names) -> dict[str, Any] | None:
     best = None
+    for candidate in extract_ball_candidates(results, model_names):
+        if best is not None and candidate["confidence"] <= best["confidence"]:
+            continue
+        x1, y1, x2, y2 = (
+            round(float(value)) for value in candidate["bbox_xyxy"]
+        )
+        best = {
+            "confidence": candidate["confidence"],
+            "bbox": (x1, y1, x2, y2),
+        }
+    return best
+
+
+def extract_ball_candidates(
+    results,
+    model_names,
+    *,
+    strict: bool = False,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
     for result in results or []:
         names = getattr(result, "names", None) or model_names
         boxes = getattr(result, "boxes", None)
@@ -217,23 +249,34 @@ def _best_ball_detection(results, model_names) -> dict[str, Any] | None:
         classes = _to_list(getattr(boxes, "cls", []))
         confidence_values = _to_list(getattr(boxes, "conf", []))
         coordinates = _to_list(getattr(boxes, "xyxy", []))
+        if strict and not (
+            len(classes) == len(confidence_values) == len(coordinates)
+        ):
+            raise ValueError("Ball detector returned mismatched box data.")
         for class_id, confidence, xyxy in zip(
             classes,
             confidence_values,
             coordinates,
         ):
-            class_name = _class_name(names, int(class_id))
-            if not _is_ball_class(class_name, names):
-                continue
-            confidence = float(confidence)
-            if best is not None and confidence <= best["confidence"]:
-                continue
-            x1, y1, x2, y2 = (round(float(value)) for value in xyxy[:4])
-            best = {
-                "confidence": confidence,
-                "bbox": (x1, y1, x2, y2),
-            }
-    return best
+            try:
+                if len(xyxy) < 4:
+                    raise ValueError("Ball detector returned an incomplete box.")
+                class_id = int(class_id)
+                class_name = _class_name(names, class_id)
+                if not _is_ball_class(class_name, names):
+                    continue
+                candidates.append(
+                    {
+                        "class_id": class_id,
+                        "class_name": class_name,
+                        "confidence": float(confidence),
+                        "bbox_xyxy": [float(value) for value in xyxy[:4]],
+                    }
+                )
+            except (TypeError, ValueError):
+                if strict:
+                    raise
+    return candidates
 
 
 def _draw_ball_detection(frame, detection: dict[str, Any]) -> None:
@@ -274,7 +317,12 @@ def _draw_ball_detection(frame, detection: dict[str, Any]) -> None:
     )
 
 
-def _transcode_browser_mp4(source: Path, destination: Path) -> None:
+def transcode_browser_mp4(
+    source: Path,
+    destination: Path,
+    *,
+    timeout_seconds: int = 120,
+) -> None:
     try:
         import imageio_ffmpeg
 
@@ -306,7 +354,7 @@ def _transcode_browser_mp4(source: Path, destination: Path) -> None:
         ],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=timeout_seconds,
         check=False,
     )
     if completed.returncode != 0 or not destination.is_file():

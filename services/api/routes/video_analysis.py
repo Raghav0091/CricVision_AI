@@ -1,23 +1,35 @@
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
 
 from ..schemas.video_analysis import (
     ConfirmedVideoCalibrationResponse,
     VideoAnalysisPreparedResponse,
+    VideoBallDetectionJobResponse,
+    VideoBallDetectionResultResponse,
+    VideoBallDetectionStartResponse,
     VideoCalibrationConfirmationRequest,
     VideoCalibrationDetectionResponse,
-)
-from ..services.video_calibration_service import (
-    confirm_video_calibration,
-    detect_video_calibration,
-    load_video_calibration,
 )
 from ..services.video_analysis_service import (
     VideoAnalysisServiceError,
     load_video_analysis,
     prepare_video,
+)
+from ..services.video_ball_detection_job_store import (
+    video_ball_detection_job_store,
+)
+from ..services.video_ball_detection_service import (
+    VideoBallDetectionError,
+    load_video_ball_detection_result,
+    mark_video_ball_detection_queued,
+    run_video_ball_detection_job,
+)
+from ..services.video_calibration_service import (
+    confirm_video_calibration,
+    detect_video_calibration,
+    load_video_calibration,
 )
 
 
@@ -43,6 +55,100 @@ def prepare_video_analysis(
         return record
     except VideoAnalysisServiceError as exc:
         logger.warning("Video analysis preparation rejected: %s", exc.message)
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.post(
+    "/{analysis_id}/ball-detection/start",
+    response_model=VideoBallDetectionStartResponse,
+    status_code=202,
+)
+def start_analysis_ball_detection(
+    analysis_id: str,
+    background_tasks: BackgroundTasks,
+) -> VideoBallDetectionStartResponse:
+    job = None
+    try:
+        analysis = load_video_analysis(analysis_id)
+        job = video_ball_detection_job_store.create(
+            analysis_id,
+            analysis.frame_count,
+        )
+        if job is None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "An active every-frame ball-detection job already exists "
+                    "for this analysis."
+                ),
+            )
+        mark_video_ball_detection_queued(analysis_id, job["job_id"])
+        background_tasks.add_task(
+            run_video_ball_detection_job,
+            analysis_id,
+            job["job_id"],
+        )
+        logger.info(
+            "Queued every-frame ball detection %s for %s",
+            job["job_id"],
+            analysis_id,
+        )
+        return VideoBallDetectionStartResponse.model_validate(job)
+    except VideoAnalysisServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+    except VideoBallDetectionError as exc:
+        if job is not None:
+            video_ball_detection_job_store.update(
+                job["job_id"],
+                success=False,
+                status="failed",
+                error_message=exc.message,
+                message=exc.message,
+            )
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.get(
+    "/{analysis_id}/ball-detection/job/{job_id}",
+    response_model=VideoBallDetectionJobResponse,
+)
+def get_analysis_ball_detection_job(
+    analysis_id: str,
+    job_id: str,
+) -> VideoBallDetectionJobResponse:
+    job = video_ball_detection_job_store.get(job_id)
+    if job is None or job["analysis_id"] != analysis_id:
+        raise HTTPException(
+            status_code=404,
+            detail="Every-frame ball-detection job not found.",
+        )
+    return VideoBallDetectionJobResponse.model_validate(job)
+
+
+@router.get(
+    "/{analysis_id}/ball-detection",
+    response_model=VideoBallDetectionResultResponse,
+)
+def get_analysis_ball_detection(
+    analysis_id: str,
+) -> VideoBallDetectionResultResponse:
+    try:
+        return load_video_ball_detection_result(analysis_id)
+    except VideoAnalysisServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+    except VideoBallDetectionError as exc:
         raise HTTPException(
             status_code=exc.status_code,
             detail=exc.message,
