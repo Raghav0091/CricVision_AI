@@ -2,18 +2,21 @@
 
 import { type ChangeEvent, useEffect, useRef, useState } from "react";
 
+import { SceneCalibrationPanel } from "@/components/video-analysis/SceneCalibrationPanel";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import {
   getVideoAnalysis,
+  getVideoAnalysisCalibration,
   prepareVideoAnalysis,
+  type ConfirmedVideoCalibrationResponse,
   type VideoAnalysisPreparedResponse
 } from "@/lib/api";
 
 
 type WorkspaceState = "idle" | "file_selected" | "uploading" | "prepared" | "failed";
-type ActiveStage = "upload" | "calibration";
+type ActiveStage = "upload" | "calibration" | "ball_detection";
 
 
 const MAX_FILE_BYTES = 500 * 1024 * 1024;
@@ -114,6 +117,9 @@ export default function VideoAnalysisPage() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<VideoAnalysisPreparedResponse | null>(null);
+  const [confirmedCalibration, setConfirmedCalibration] = useState<
+    ConfirmedVideoCalibrationResponse | null
+  >(null);
   const [error, setError] = useState<string | null>(null);
   const [restoring, setRestoring] = useState(false);
 
@@ -134,6 +140,7 @@ export default function VideoAnalysisPage() {
     setPreviewUrl(objectUrl);
     setSelectedFile(file);
     setAnalysis(null);
+    setConfirmedCalibration(null);
     setActiveStage("upload");
     setWorkspaceState("file_selected");
     setError(null);
@@ -157,6 +164,7 @@ export default function VideoAnalysisPage() {
     releasePreview();
     setSelectedFile(null);
     setAnalysis(null);
+    setConfirmedCalibration(null);
     setError(null);
     setActiveStage("upload");
     setWorkspaceState("idle");
@@ -181,6 +189,7 @@ export default function VideoAnalysisPage() {
     try {
       const prepared = await prepareVideoAnalysis(selectedFile);
       setAnalysis(prepared);
+      setConfirmedCalibration(null);
       setWorkspaceState("prepared");
       setActiveStage("upload");
       window.history.replaceState(
@@ -200,11 +209,16 @@ export default function VideoAnalysisPage() {
     let cancelled = false;
     setRestoring(true);
     setWorkspaceState("uploading");
-    void getVideoAnalysis(analysisId)
-      .then((restored) => {
+    void Promise.all([
+      getVideoAnalysis(analysisId),
+      getVideoAnalysisCalibration(analysisId)
+    ])
+      .then(([restored, calibration]) => {
         if (cancelled) return;
         setAnalysis(restored);
+        setConfirmedCalibration(calibration);
         setWorkspaceState("prepared");
+        setActiveStage("calibration");
         setError(null);
       })
       .catch((caught) => {
@@ -225,7 +239,9 @@ export default function VideoAnalysisPage() {
   }, []);
 
   const uploadComplete = workspaceState === "prepared" && analysis !== null;
+  const calibrationComplete = confirmedCalibration !== null;
   const calibrationActive = uploadComplete && activeStage === "calibration";
+  const ballDetectionActive = calibrationComplete && activeStage === "ball_detection";
 
   return (
     <div className="mx-auto max-w-7xl py-5">
@@ -237,8 +253,18 @@ export default function VideoAnalysisPage() {
 
       <div className="mt-8 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
         <WorkflowStage index={1} title="Upload Video" state={uploadComplete ? "complete" : "active"} note={uploadComplete ? "Completed" : "Active"} />
-        <WorkflowStage index={2} title="Scene Calibration" state={calibrationActive ? "active" : uploadComplete ? "available" : "locked"} note={calibrationActive ? "Active" : uploadComplete ? "Available" : "Locked"} />
-        <WorkflowStage index={3} title="Ball Detection" state="disabled" note="" />
+        <WorkflowStage
+          index={2}
+          title="Scene Calibration"
+          state={calibrationComplete ? "complete" : calibrationActive ? "active" : uploadComplete ? "available" : "locked"}
+          note={calibrationComplete ? "Completed" : calibrationActive ? "Active" : uploadComplete ? "Available" : "Locked"}
+        />
+        <WorkflowStage
+          index={3}
+          title="Ball Detection"
+          state={ballDetectionActive ? "active" : calibrationComplete ? "available" : "disabled"}
+          note={ballDetectionActive ? "Active" : calibrationComplete ? "Next" : ""}
+        />
         <WorkflowStage index={4} title="Ball Tracking" state="disabled" note="" />
         <WorkflowStage index={5} title="Physics and Replay" state="disabled" note="" />
       </div>
@@ -298,7 +324,7 @@ export default function VideoAnalysisPage() {
           <Card>
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div>
-                <StatusBadge label="Prepared" tone="good" />
+                <StatusBadge label={calibrationComplete ? "Calibrated" : "Prepared"} tone="good" />
                 <h2 className="mt-4 text-2xl font-black">Video prepared</h2>
                 <p className="mt-2 break-all font-mono text-xs text-white/40">{analysis.analysis_id}</p>
                 <p className="mt-2 text-sm text-white/55">{analysis.original_filename}</p>
@@ -322,17 +348,46 @@ export default function VideoAnalysisPage() {
             </Card>
           </div>
 
-          {!calibrationActive && (
+          {!calibrationActive && !ballDetectionActive && (
             <Button onClick={() => setActiveStage("calibration")}>Continue to Scene Calibration</Button>
           )}
 
           {calibrationActive && (
-            <Card className="border-[#ffca68]/25">
-              <StatusBadge label="Scene Calibration" />
-              <h2 className="mt-4 text-2xl font-black">Calibration reference frame</h2>
-              <p className="mt-3 text-sm leading-6 text-white/55">Stump detection and manual wicket confirmation will be added in the next milestone.</p>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img className="mt-5 h-auto w-full rounded-xl bg-black object-contain" src={analysis.reference_frame_url} alt="Clean scene calibration reference" />
+            <SceneCalibrationPanel
+              key={analysis.analysis_id}
+              analysis={analysis}
+              initialCalibration={confirmedCalibration}
+              onDirty={() => setConfirmedCalibration(null)}
+              onCalibrated={(calibration) => {
+                setConfirmedCalibration(calibration);
+                setAnalysis((current) => current ? {
+                  ...current,
+                  status: "calibrated",
+                  calibration_status: "confirmed",
+                  calibration_url: calibration.calibration_url,
+                  calibration_overlay_url: calibration.calibration_overlay_url,
+                  updated_at: calibration.updated_at
+                } : current);
+              }}
+            />
+          )}
+
+          {calibrationActive && calibrationComplete && (
+            <Button onClick={() => setActiveStage("ball_detection")}>
+              Continue to Ball Detection
+            </Button>
+          )}
+
+          {ballDetectionActive && (
+            <Card className="border-lime/20">
+              <StatusBadge label="Ball Detection — Next" tone="good" />
+              <h2 className="mt-4 text-2xl font-black">Calibration is ready</h2>
+              <p className="mt-3 text-sm leading-6 text-white/55">
+                Every-frame ball detection will be implemented in the next milestone.
+              </p>
+              <Button className="mt-5" variant="secondary" onClick={() => setActiveStage("calibration")}>
+                Back to Scene Calibration
+              </Button>
             </Card>
           )}
         </section>

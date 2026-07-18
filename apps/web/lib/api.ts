@@ -176,11 +176,12 @@ export async function getBallDetectionJob(jobId: string): Promise<BallDetectionC
 export type VideoAnalysisPreparedResponse = {
   success: boolean;
   analysis_id: string;
-  status: "prepared";
+  status: "prepared" | "calibrated";
   original_filename: string;
   stored_filename: string;
   file_size_bytes: number;
   created_at: string;
+  updated_at?: string | null;
   duration_seconds: number;
   fps: number;
   frame_count: number;
@@ -190,6 +191,9 @@ export type VideoAnalysisPreparedResponse = {
   reference_frame_index: number;
   original_video_url: string;
   reference_frame_url: string;
+  calibration_status?: "confirmed" | null;
+  calibration_url?: string | null;
+  calibration_overlay_url?: string | null;
   message: string;
 };
 
@@ -198,7 +202,9 @@ function withBrowserSafeAnalysisUrls(record: VideoAnalysisPreparedResponse): Vid
   return {
     ...record,
     original_video_url: resolveApiUrl(record.original_video_url) ?? record.original_video_url,
-    reference_frame_url: resolveApiUrl(record.reference_frame_url) ?? record.reference_frame_url
+    reference_frame_url: resolveApiUrl(record.reference_frame_url) ?? record.reference_frame_url,
+    calibration_url: resolveApiUrl(record.calibration_url),
+    calibration_overlay_url: resolveApiUrl(record.calibration_overlay_url)
   };
 }
 
@@ -237,4 +243,172 @@ export async function getVideoAnalysis(analysisId: string): Promise<VideoAnalysi
     throw await videoAnalysisError(response, `Video analysis lookup returned ${response.status}.`);
   }
   return withBrowserSafeAnalysisUrls(await response.json() as VideoAnalysisPreparedResponse);
+}
+
+
+export type NormalizedPoint = {
+  x: number;
+  y: number;
+};
+
+
+export type NormalizedBox = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+
+export type WicketCandidate = {
+  candidate_id: string;
+  confidence: number;
+  class_name: string;
+  box: NormalizedBox;
+  center: NormalizedPoint;
+  bottom_center: NormalizedPoint;
+};
+
+
+export type WicketCalibration = {
+  label: "striker" | "non_striker";
+  source: "detected" | "adjusted" | "manual";
+  confidence?: number | null;
+  box: NormalizedBox;
+  center: NormalizedPoint;
+  bottom_center: NormalizedPoint;
+};
+
+
+export type PitchGeometry = {
+  axis_start: NormalizedPoint;
+  axis_end: NormalizedPoint;
+  corridor: [NormalizedPoint, NormalizedPoint, NormalizedPoint, NormalizedPoint];
+  near_end_label: "striker" | "non_striker";
+  far_end_label: "striker" | "non_striker";
+  geometry_type: "approximate_2d";
+  corridor_width_multiplier: number;
+};
+
+
+export type VideoCalibrationDetectionResponse = {
+  success: boolean;
+  status: "candidates_ready" | "manual_required" | "stump_detector_missing" | "stump_detector_error";
+  analysis_id: string;
+  reference_frame_url: string;
+  image_width: number;
+  image_height: number;
+  candidates: WicketCandidate[];
+  provisional_striker_wicket?: WicketCalibration | null;
+  provisional_non_striker_wicket?: WicketCalibration | null;
+  pitch_geometry?: PitchGeometry | null;
+  model_path_used: string;
+  warning?: string | null;
+  message: string;
+};
+
+
+export type VideoCalibrationConfirmationRequest = {
+  analysis_id: string;
+  striker_wicket: Pick<WicketCalibration, "label" | "source" | "confidence" | "box">;
+  non_striker_wicket: Pick<WicketCalibration, "label" | "source" | "confidence" | "box">;
+  corridor_width_multiplier: number;
+  user_note?: string | null;
+};
+
+
+export type ConfirmedVideoCalibrationResponse = {
+  success: boolean;
+  status: "calibrated";
+  analysis_id: string;
+  created_at: string;
+  updated_at: string;
+  reference_frame_index: number;
+  reference_frame_url: string;
+  calibration_url: string;
+  calibration_overlay_url: string;
+  image_width: number;
+  image_height: number;
+  model_path_used?: string | null;
+  striker_wicket: WicketCalibration;
+  non_striker_wicket: WicketCalibration;
+  pitch_geometry: PitchGeometry;
+  user_note?: string | null;
+  message: string;
+};
+
+
+function withBrowserSafeDetectionUrls(
+  result: VideoCalibrationDetectionResponse
+): VideoCalibrationDetectionResponse {
+  return {
+    ...result,
+    reference_frame_url: resolveApiUrl(result.reference_frame_url) ?? result.reference_frame_url
+  };
+}
+
+
+function withBrowserSafeCalibrationUrls(
+  result: ConfirmedVideoCalibrationResponse
+): ConfirmedVideoCalibrationResponse {
+  return {
+    ...result,
+    reference_frame_url: resolveApiUrl(result.reference_frame_url) ?? result.reference_frame_url,
+    calibration_url: resolveApiUrl(result.calibration_url) ?? result.calibration_url,
+    calibration_overlay_url: resolveApiUrl(result.calibration_overlay_url) ?? result.calibration_overlay_url
+  };
+}
+
+
+export async function detectVideoAnalysisCalibration(
+  analysisId: string
+): Promise<VideoCalibrationDetectionResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/calibration/detect`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(response, `Stump detection returned ${response.status}.`);
+  }
+  return withBrowserSafeDetectionUrls(
+    await response.json() as VideoCalibrationDetectionResponse
+  );
+}
+
+
+export async function confirmVideoAnalysisCalibration(
+  analysisId: string,
+  request: VideoCalibrationConfirmationRequest
+): Promise<ConfirmedVideoCalibrationResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/calibration/confirm`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request)
+    }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(response, `Calibration confirmation returned ${response.status}.`);
+  }
+  return withBrowserSafeCalibrationUrls(
+    await response.json() as ConfirmedVideoCalibrationResponse
+  );
+}
+
+
+export async function getVideoAnalysisCalibration(
+  analysisId: string
+): Promise<ConfirmedVideoCalibrationResponse | null> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/calibration`,
+    { cache: "no-store" }
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw await videoAnalysisError(response, `Calibration lookup returned ${response.status}.`);
+  }
+  return withBrowserSafeCalibrationUrls(
+    await response.json() as ConfirmedVideoCalibrationResponse
+  );
 }

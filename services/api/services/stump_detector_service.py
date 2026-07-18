@@ -11,6 +11,7 @@ from PIL import Image, ImageDraw
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 STUMP_MODEL_PATH = PROJECT_ROOT / "Models" / "stump_detector" / "best.pt"
+STUMP_MODEL_RELATIVE_PATH = "Models/stump_detector/best.pt"
 STUMP_CLASS_FRAGMENTS = ("stump", "wicket")
 
 
@@ -141,6 +142,85 @@ def _load_model(model_path: str):
     from ultralytics import YOLO
 
     return YOLO(model_path)
+
+
+def detect_stump_candidates(image: Image.Image) -> dict[str, Any]:
+    """Run the shared cached stump model once over a complete reference frame."""
+    if not STUMP_MODEL_PATH.is_file():
+        return {
+            "success": False,
+            "status": "stump_detector_missing",
+            "message": (
+                "Stump detector model not found at "
+                f"{STUMP_MODEL_RELATIVE_PATH}"
+            ),
+            "candidates": [],
+        }
+
+    try:
+        model = _load_model(str(STUMP_MODEL_PATH))
+        results = model.predict(source=image, verbose=False)
+    except Exception as exc:
+        return {
+            "success": False,
+            "status": "stump_detector_error",
+            "message": f"Stump detector inference failed: {type(exc).__name__}.",
+            "candidates": [],
+        }
+
+    frame_width, frame_height = image.size
+    candidates: list[dict[str, Any]] = []
+    try:
+        for result in results or []:
+            names = getattr(result, "names", None) or getattr(model, "names", {})
+            boxes = getattr(result, "boxes", None)
+            if boxes is None:
+                continue
+            classes = _to_list(getattr(boxes, "cls", []))
+            confidences = _to_list(getattr(boxes, "conf", []))
+            coordinates = _to_list(getattr(boxes, "xyxy", []))
+            for class_id, confidence, xyxy in zip(
+                classes,
+                confidences,
+                coordinates,
+            ):
+                class_name = _class_name(names, int(class_id))
+                if not _is_stump_class(class_name, names):
+                    continue
+                x1, y1, x2, y2 = (float(value) for value in xyxy[:4])
+                x1 = max(0.0, min(float(frame_width), x1))
+                y1 = max(0.0, min(float(frame_height), y1))
+                x2 = max(x1, min(float(frame_width), x2))
+                y2 = max(y1, min(float(frame_height), y2))
+                if x2 - x1 < 1 or y2 - y1 < 1:
+                    continue
+                candidates.append(
+                    {
+                        "confidence": round(float(confidence), 4),
+                        "class_name": class_name,
+                        "bbox": {
+                            "x": x1,
+                            "y": y1,
+                            "width": x2 - x1,
+                            "height": y2 - y1,
+                        },
+                    }
+                )
+    except Exception as exc:
+        return {
+            "success": False,
+            "status": "stump_detector_error",
+            "message": f"Stump detector results could not be read: {type(exc).__name__}.",
+            "candidates": [],
+        }
+
+    candidates.sort(key=lambda candidate: candidate["confidence"], reverse=True)
+    return {
+        "success": True,
+        "status": "candidates_ready",
+        "message": "Stump detection completed.",
+        "candidates": candidates,
+    }
 
 
 def _detect_end(

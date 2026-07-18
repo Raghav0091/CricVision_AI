@@ -3,7 +3,17 @@ from typing import Annotated
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
-from ..schemas.video_analysis import VideoAnalysisPreparedResponse
+from ..schemas.video_analysis import (
+    ConfirmedVideoCalibrationResponse,
+    VideoAnalysisPreparedResponse,
+    VideoCalibrationConfirmationRequest,
+    VideoCalibrationDetectionResponse,
+)
+from ..services.video_calibration_service import (
+    confirm_video_calibration,
+    detect_video_calibration,
+    load_video_calibration,
+)
 from ..services.video_analysis_service import (
     VideoAnalysisServiceError,
     load_video_analysis,
@@ -33,6 +43,67 @@ def prepare_video_analysis(
         return record
     except VideoAnalysisServiceError as exc:
         logger.warning("Video analysis preparation rejected: %s", exc.message)
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.post(
+    "/{analysis_id}/calibration/detect",
+    response_model=VideoCalibrationDetectionResponse,
+)
+def detect_analysis_calibration(
+    analysis_id: str,
+) -> VideoCalibrationDetectionResponse:
+    try:
+        return detect_video_calibration(analysis_id)
+    except VideoAnalysisServiceError as exc:
+        logger.warning(
+            "Video calibration detection rejected for %s: %s",
+            analysis_id,
+            exc.message,
+        )
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.put(
+    "/{analysis_id}/calibration/confirm",
+    response_model=ConfirmedVideoCalibrationResponse,
+)
+def confirm_analysis_calibration(
+    analysis_id: str,
+    request: VideoCalibrationConfirmationRequest,
+) -> ConfirmedVideoCalibrationResponse:
+    try:
+        record = confirm_video_calibration(analysis_id, request)
+        logger.info("Confirmed scene calibration for %s", analysis_id)
+        return record
+    except VideoAnalysisServiceError as exc:
+        logger.warning(
+            "Video calibration confirmation rejected for %s: %s",
+            analysis_id,
+            exc.message,
+        )
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.get(
+    "/{analysis_id}/calibration",
+    response_model=ConfirmedVideoCalibrationResponse,
+)
+def get_analysis_calibration(
+    analysis_id: str,
+) -> ConfirmedVideoCalibrationResponse:
+    try:
+        return load_video_calibration(analysis_id)
+    except VideoAnalysisServiceError as exc:
         raise HTTPException(
             status_code=exc.status_code,
             detail=exc.message,
