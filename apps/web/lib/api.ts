@@ -194,7 +194,13 @@ export type VideoAnalysisPreparedResponse = {
   calibration_status?: "confirmed" | null;
   calibration_url?: string | null;
   calibration_overlay_url?: string | null;
-  calibration_v2_status?: "confirmed" | "insufficient_geometry" | null;
+  calibration_v2_status?:
+    | "confirmed"
+    | "ready"
+    | "weak"
+    | "unstable"
+    | "insufficient_geometry"
+    | null;
   calibration_v2_url?: string | null;
   calibration_v2_overlay_url?: string | null;
   calibration_v2_quality_grade?: CalibrationQualityGradeV2 | null;
@@ -423,6 +429,9 @@ export type CalibrationV2InitialiseResponse = {
 
 export type ReprojectionDiagnostic = {
   landmark_id: string;
+  landmark_source: CalibrationLandmarkSource;
+  used_for_homography: boolean;
+  ransac_inlier?: boolean | null;
   observed_pixel_x: number;
   observed_pixel_y: number;
   reprojected_pixel_x: number;
@@ -435,6 +444,7 @@ export type CalibrationQualityGradeV2 =
   | "excellent"
   | "good"
   | "usable"
+  | "weak"
   | "poor"
   | "insufficient_geometry";
 
@@ -442,15 +452,25 @@ export type CalibrationQualityGradeV2 =
 export type CalibrationQualityV2 = {
   landmark_coverage: number;
   usable_landmarks: number;
+  metric_correspondence_count: number;
+  additional_metric_ground_landmark_count: number;
+  landmark_spread_score: number;
+  world_coverage: number;
   reprojection_rmse_px?: number | null;
   max_reprojection_error_px?: number | null;
+  median_reprojection_error_px?: number | null;
   normalized_reprojection_rmse?: number | null;
   geometry_condition: "well_conditioned" | "weak" | "unstable" | "insufficient";
   homography_condition_number?: number | null;
   image_coverage: number;
   wicket_order_valid: boolean;
   transform_available: boolean;
+  full_pitch_projection_allowed: boolean;
+  projection_outside_fraction?: number | null;
   manual_adjustment_count: number;
+  used_landmark_ids: string[];
+  ignored_landmark_ids: string[];
+  landmark_sources: Record<string, number>;
   warnings: string[];
   quality_grade: CalibrationQualityGradeV2;
   overall_confidence: number;
@@ -464,6 +484,12 @@ export type GroundHomographyResult = {
   ground_to_image_homography?: number[][] | null;
   determinant?: number | null;
   condition_number?: number | null;
+  estimation_method: "none" | "direct" | "ransac";
+  ransac_reprojection_threshold_px?: number | null;
+  ransac_inlier_count?: number | null;
+  ransac_inlier_landmark_ids: string[];
+  round_trip_image_rmse_px?: number | null;
+  round_trip_ground_rmse_m?: number | null;
   image_convention: "pixel_uv";
   ground_convention: "pitch_xy_metres_z0";
 };
@@ -479,8 +505,13 @@ export type ProjectedPitchLine = {
 
 export type CalibrationV2Result = {
   success: boolean;
-  status: "confirmed" | "insufficient_geometry";
-  schema_version: "2.0";
+  status:
+    | "confirmed"
+    | "ready"
+    | "weak"
+    | "unstable"
+    | "insufficient_geometry";
+  schema_version: "2.0" | "2.1";
   analysis_id: string;
   calibration_mode: "ground_plane";
   coordinate_system: {
@@ -501,12 +532,14 @@ export type CalibrationV2Result = {
   quality: CalibrationQualityV2;
   virtual_pitch_overlay_geometry: {
     projected_lines: ProjectedPitchLine[];
+    projection_mode: "full_pitch" | "local_debug" | "landmarks_only";
   };
   calibration_v2_url: string;
   calibration_v2_overlay_url: string;
   reference_frame_url: string;
   image_width: number;
   image_height: number;
+  landmark_semantics_confirmed: boolean;
   created_at: string;
   updated_at: string;
   user_note?: string | null;
@@ -519,6 +552,7 @@ export type CalibrationV2ConfirmRequest = {
   landmarks: CalibrationLandmarkInput[];
   pitch_geometry: CricketPitchGeometry;
   image_left_right_convention: ImageLeftRightConvention;
+  landmark_semantics_confirmed: boolean;
   user_note?: string | null;
 };
 

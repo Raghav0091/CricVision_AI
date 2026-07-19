@@ -28,6 +28,62 @@ type EditorState = {
 };
 
 
+type StandardGroundReference = {
+  id: string;
+  label: string;
+  shortLabel: string;
+  normalizedX: number;
+  normalizedY: number;
+};
+
+
+const STANDARD_GROUND_REFERENCES: StandardGroundReference[] = [
+  {
+    id: "bowler_end_left_ground_reference",
+    label: "Bowler popping crease / left pitch edge",
+    shortLabel: "Bowler left",
+    normalizedX: 0.18,
+    normalizedY: 0.66
+  },
+  {
+    id: "bowler_end_right_ground_reference",
+    label: "Bowler popping crease / right pitch edge",
+    shortLabel: "Bowler right",
+    normalizedX: 0.72,
+    normalizedY: 0.66
+  },
+  {
+    id: "striker_end_left_ground_reference",
+    label: "Striker popping crease / left pitch edge",
+    shortLabel: "Striker left",
+    normalizedX: 0.36,
+    normalizedY: 0.38
+  },
+  {
+    id: "striker_end_right_ground_reference",
+    label: "Striker popping crease / right pitch edge",
+    shortLabel: "Striker right",
+    normalizedX: 0.51,
+    normalizedY: 0.38
+  }
+];
+
+
+function groundReferenceWorldCoordinates(
+  referenceId: string,
+  geometry: CricketPitchGeometry
+): { x: number; y: number } {
+  const bowlerEnd = referenceId.startsWith("bowler_");
+  const leftSide = referenceId.includes("_left_");
+  return {
+    x: bowlerEnd
+      ? geometry.popping_crease_distance_m
+      : geometry.pitch_length_m - geometry.popping_crease_distance_m,
+    y: (leftSide ? -1 : 1) * geometry.pitch_width_m / 2
+  };
+}
+
+
 function stateFromInitialised(
   initialised: CalibrationV2InitialiseResponse
 ): EditorState {
@@ -105,6 +161,9 @@ export function CalibrationV2Panel({
   const [saving, setSaving] = useState(false);
   const [showLabels, setShowLabels] = useState(true);
   const [userNote, setUserNote] = useState(initialCalibration?.user_note ?? "");
+  const [semanticsConfirmed, setSemanticsConfirmed] = useState(
+    initialCalibration?.landmark_semantics_confirmed ?? false
+  );
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -113,6 +172,9 @@ export function CalibrationV2Panel({
       setEditor(restored);
       setSaved(initialCalibration);
       setUserNote(initialCalibration.user_note ?? "");
+      setSemanticsConfirmed(
+        initialCalibration.landmark_semantics_confirmed ?? false
+      );
       return;
     }
     void initialise();
@@ -131,6 +193,7 @@ export function CalibrationV2Panel({
       setEditor(next);
       setAutoGuesses(next);
       setSaved(null);
+      setSemanticsConfirmed(false);
     } catch (caught) {
       setError(
         caught instanceof Error
@@ -162,6 +225,7 @@ export function CalibrationV2Panel({
       ))
     } : current);
     setSaved(null);
+    setSemanticsConfirmed(false);
   }
 
   function swapWicketEnds() {
@@ -174,10 +238,15 @@ export function CalibrationV2Panel({
       return {
         ...current,
         landmarks: current.landmarks.map((landmark) => {
-          if (landmark.wicket_end !== "bowler" && landmark.wicket_end !== "striker") {
+          const currentEnd = landmark.id.startsWith("bowler_")
+            ? "bowler"
+            : landmark.id.startsWith("striker_")
+              ? "striker"
+              : null;
+          if (!currentEnd) {
             return landmark;
           }
-          const oppositeEnd = landmark.wicket_end === "bowler"
+          const oppositeEnd = currentEnd === "bowler"
             ? "striker"
             : "bowler";
           const opposite = byId.get(matchingId(landmark, oppositeEnd));
@@ -193,6 +262,7 @@ export function CalibrationV2Panel({
       };
     });
     setSaved(null);
+    setSemanticsConfirmed(false);
   }
 
   function swapLeftRight() {
@@ -221,6 +291,7 @@ export function CalibrationV2Panel({
       };
     });
     setSaved(null);
+    setSemanticsConfirmed(false);
   }
 
   function resetAutoGuesses() {
@@ -230,6 +301,7 @@ export function CalibrationV2Panel({
         landmarks: autoGuesses.landmarks.map((landmark) => ({ ...landmark }))
       });
       setSaved(null);
+      setSemanticsConfirmed(false);
       return;
     }
     void initialise();
@@ -240,14 +312,86 @@ export function CalibrationV2Panel({
     value: number
   ) {
     if (!Number.isFinite(value)) return;
-    setEditor((current) => current ? {
-      ...current,
-      pitchGeometry: {
+    setEditor((current) => {
+      if (!current) return current;
+      const pitchGeometry = {
         ...current.pitchGeometry,
         [key]: value
+      };
+      return {
+        ...current,
+        pitchGeometry,
+        landmarks: current.landmarks.map((landmark) => {
+          if (
+            landmark.landmark_type !== "ground_control"
+            || !STANDARD_GROUND_REFERENCES.some(
+              (reference) => reference.id === landmark.id
+            )
+          ) {
+            return landmark;
+          }
+          const world = groundReferenceWorldCoordinates(
+            landmark.id,
+            pitchGeometry
+          );
+          return {
+            ...landmark,
+            world_x_m: world.x,
+            world_y_m: world.y,
+            world_z_m: 0
+          };
+        })
+      };
+    });
+    setSaved(null);
+    setSemanticsConfirmed(false);
+  }
+
+  function addGroundReference(reference: StandardGroundReference) {
+    setEditor((current) => {
+      if (
+        !current
+        || current.landmarks.some((landmark) => landmark.id === reference.id)
+      ) {
+        return current;
       }
+      const world = groundReferenceWorldCoordinates(
+        reference.id,
+        current.pitchGeometry
+      );
+      return {
+        ...current,
+        landmarks: [
+          ...current.landmarks,
+          {
+            id: reference.id,
+            label: reference.label,
+            wicket_end: "ground",
+            landmark_type: "ground_control",
+            normalized_x: reference.normalizedX,
+            normalized_y: reference.normalizedY,
+            source: "manual",
+            confidence: null,
+            world_x_m: world.x,
+            world_y_m: world.y,
+            world_z_m: 0
+          }
+        ]
+      };
+    });
+    setSaved(null);
+    setSemanticsConfirmed(false);
+  }
+
+  function removeGroundReference(referenceId: string) {
+    setEditor((current) => current ? {
+      ...current,
+      landmarks: current.landmarks.filter(
+        (landmark) => landmark.id !== referenceId
+      )
     } : current);
     setSaved(null);
+    setSemanticsConfirmed(false);
   }
 
   async function confirmCalibration() {
@@ -280,6 +424,7 @@ export function CalibrationV2Panel({
           })),
           pitch_geometry: editor.pitchGeometry,
           image_left_right_convention: editor.imageConvention,
+          landmark_semantics_confirmed: semanticsConfirmed,
           user_note: userNote.trim() || null
         }
       );
@@ -306,15 +451,25 @@ export function CalibrationV2Panel({
       || landmark.source === "manually_adjusted"
     )
   ).length;
+  const groundLandmarks = editor?.landmarks.filter(
+    (landmark) => landmark.landmark_type === "ground_control"
+  ) ?? [];
   const quality = saved?.quality ?? null;
   const qualityTone = (
-    quality?.quality_grade === "excellent"
-    || quality?.quality_grade === "good"
-    || quality?.quality_grade === "usable"
+    saved?.status === "ready"
+    || saved?.status === "confirmed"
   ) ? "good" : quality ? "warn" : "neutral";
   const qualityLabel = quality
     ? quality.quality_grade.replaceAll("_", " ")
     : "Not calculated";
+  const calibrationStatusLabel = saved
+    ? saved.status.replaceAll("_", " ")
+    : "Not calculated";
+  const worldMappingLabel = quality?.full_pitch_projection_allowed
+    ? "Ready"
+    : quality?.transform_available
+      ? "Local debug only"
+      : "Not ready";
 
   const worldStumps = useMemo(() => {
     const geometry = editor?.pitchGeometry;
@@ -330,16 +485,23 @@ export function CalibrationV2Panel({
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <StatusBadge
-            label={saved ? "Calibration v2" : "Ground Plane Setup"}
-            tone={saved?.status === "confirmed" ? "good" : "neutral"}
+            label={saved ? "Calibration v2A.1" : "Ground Plane Setup"}
+            tone={
+              saved?.status === "ready" || saved?.status === "confirmed"
+                ? "good"
+                : saved
+                  ? "warn"
+                  : "neutral"
+            }
           />
           <h2 className="mt-4 text-2xl font-black">
-            Calibration v2 — Pitch world geometry
+            Calibration v2A.1 — robust ground-plane geometry
           </h2>
           <p className="mt-3 max-w-3xl text-sm leading-6 text-white/55">
-            Confirm six stump bases to map image pixels onto the pitch ground
-            plane. This does not estimate airborne ball height or a full 3D
-            camera pose.
+            Place the six stump bases at their ground-contact points. Add the
+            four named metric ground references only when their exact
+            popping-crease/pitch-edge intersections are visible. This is a
+            ground-plane map, not airborne height or a full 3D camera pose.
           </p>
         </div>
         <Button
@@ -357,13 +519,14 @@ export function CalibrationV2Panel({
         </p>
       )}
 
-      <ol className="mt-5 grid gap-2 text-sm text-white/55 sm:grid-cols-2 lg:grid-cols-5">
+      <ol className="mt-5 grid gap-2 text-sm text-white/55 sm:grid-cols-2 lg:grid-cols-6">
         {[
           "Check bowler-end wicket.",
           "Check striker-end wicket.",
-          "Adjust the six stump-base points.",
-          "Confirm calibration.",
-          "Inspect projected pitch alignment."
+          "Place six ground-contact points.",
+          "Add only visible metric references.",
+          "Confirm landmark meanings.",
+          "Inspect quality and projection."
         ].map((instruction, index) => (
           <li
             key={instruction}
@@ -387,11 +550,12 @@ export function CalibrationV2Panel({
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <p className="text-xs font-bold uppercase tracking-[0.15em] text-white/40">
-                  1–3 · Reference, detected wickets, stump landmarks
+                  1–4 · Reference frame and ground landmarks
                 </p>
                 <p className="mt-2 text-sm text-[#ffe0a3]">
-                  Automatic landmarks are approximate. Adjust stump-base
-                  markers before confirming.
+                  Automatic stump markers and newly added reference positions
+                  are only starters. Drag each marker to the exact visible
+                  ground feature before confirming.
                 </p>
               </div>
               <button
@@ -416,12 +580,72 @@ export function CalibrationV2Panel({
             <div className="mt-3 flex flex-wrap gap-x-5 gap-y-2 text-xs text-white/40">
               <span>Six required landmarks: {primaryLandmarks.length}/6</span>
               <span>Manually adjusted: {manualCount}/6</span>
+              <span>Metric ground references: {groundLandmarks.length}/4</span>
               <span>
                 Image convention:{" "}
                 {editor.imageConvention === "image_left_is_world_left"
                   ? "image left = world left"
                   : "image left = world right"}
               </span>
+            </div>
+          </div>
+
+          <div className="mt-6 rounded-xl border border-[#ff5ebe]/25 bg-[#ff5ebe]/[0.05] p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-bold uppercase tracking-[0.15em] text-[#ff8fd0]">
+                  Known metric ground references
+                </p>
+                <p className="mt-2 max-w-3xl text-xs leading-5 text-white/50">
+                  These controls have known coordinates from the configured
+                  pitch dimensions. Add one only if you can place it on the
+                  named popping-crease/pitch-edge intersection. Arbitrary
+                  image points cannot be assigned invented metres.
+                </p>
+              </div>
+              <span className="rounded-full border border-[#ff5ebe]/25 px-3 py-1 text-xs font-black text-[#ff8fd0]">
+                {groundLandmarks.length}/4 placed
+              </span>
+            </div>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              {STANDARD_GROUND_REFERENCES.map((reference) => {
+                const placed = groundLandmarks.find(
+                  (landmark) => landmark.id === reference.id
+                );
+                const world = groundReferenceWorldCoordinates(
+                  reference.id,
+                  editor.pitchGeometry
+                );
+                return (
+                  <div
+                    key={reference.id}
+                    className="rounded-lg border border-white/10 bg-black/20 p-3"
+                  >
+                    <p className="text-sm font-black">{reference.shortLabel}</p>
+                    <p className="mt-1 text-xs leading-5 text-white/45">
+                      {reference.label}
+                    </p>
+                    <p className="mt-2 font-mono text-[11px] text-[#ff8fd0]">
+                      X {world.x.toFixed(3)} m · Y {world.y.toFixed(3)} m
+                    </p>
+                    <button
+                      type="button"
+                      aria-label={
+                        placed
+                          ? `Remove ${reference.shortLabel} metric ground reference`
+                          : `Add ${reference.shortLabel} metric ground reference`
+                      }
+                      className="mt-3 text-xs font-bold text-lime underline disabled:cursor-default disabled:text-white/30"
+                      disabled={saving}
+                      onClick={() => placed
+                        ? removeGroundReference(reference.id)
+                        : addGroundReference(reference)}
+                    >
+                      {placed ? "Remove reference" : "Add starter marker"}
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           </div>
 
@@ -452,7 +676,7 @@ export function CalibrationV2Panel({
           <div className="mt-7 grid gap-5 lg:grid-cols-2">
             <div className="rounded-xl border border-white/10 bg-black/20 p-4">
               <p className="text-xs font-bold uppercase tracking-[0.15em] text-white/40">
-                4 · World geometry preview
+                5 · World geometry preview
               </p>
               <svg
                 className="mt-4 h-auto w-full rounded-lg bg-[#132112]"
@@ -544,8 +768,49 @@ export function CalibrationV2Panel({
             </div>
           )}
 
+          <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <QualityMetric
+              label="Stump ground contacts"
+              value={`${primaryLandmarks.length}/6`}
+            />
+            <QualityMetric
+              label="Metric ground refs"
+              value={`${groundLandmarks.length}/4`}
+            />
+            <QualityMetric
+              label="Transform status"
+              value={calibrationStatusLabel}
+            />
+            <QualityMetric
+              label="World mapping"
+              value={worldMappingLabel}
+            />
+          </div>
+
+          <label className="mt-6 flex cursor-pointer items-start gap-3 rounded-xl border border-white/10 bg-black/20 p-4 text-sm leading-6">
+            <input
+              className="mt-1 h-4 w-4 accent-[#d5ff6b]"
+              type="checkbox"
+              checked={semanticsConfirmed}
+              disabled={saving}
+              onChange={(event) => {
+                setSemanticsConfirmed(event.target.checked);
+                setSaved(null);
+              }}
+            />
+            <span>
+              I confirm stump markers are ground-contact points and each
+              metric reference is the named popping-crease/pitch-edge
+              intersection.
+              <span className="mt-1 block text-xs text-white/40">
+                This acknowledgement is required before a homography is
+                calculated. It does not make an unclear landmark trustworthy.
+              </span>
+            </span>
+          </label>
+
           <label htmlFor="calibration-v2-note" className="mt-6 block text-sm font-bold">
-            Calibration v2 note{" "}
+            Calibration v2A.1 note{" "}
             <span className="font-normal text-white/35">(optional)</span>
           </label>
           <textarea
@@ -563,24 +828,34 @@ export function CalibrationV2Panel({
 
           <Button
             className="mt-5 w-full sm:w-auto"
-            disabled={saving || primaryLandmarks.length !== 6}
+            disabled={
+              saving
+              || primaryLandmarks.length !== 6
+              || !semanticsConfirmed
+            }
             onClick={() => void confirmCalibration()}
           >
-            {saving ? "Calculating Ground Homography..." : "Confirm Calibration v2"}
+            {saving
+              ? "Validating Ground Homography..."
+              : "Validate Calibration v2A.1"}
           </Button>
         </>
       )}
 
       {saved && (
-        <div className="mt-8 rounded-xl border border-lime/20 bg-lime/[0.04] p-4">
+        <div className="mt-8 rounded-xl border border-white/10 bg-white/[0.03] p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <div className="flex flex-wrap items-center gap-3">
                 <StatusBadge label={qualityLabel} tone={qualityTone} />
                 <p className="font-black">
-                  {saved.status === "confirmed"
-                    ? "Ground-plane transform available"
-                    : "Insufficient geometry"}
+                  {saved.status === "ready" || saved.status === "confirmed"
+                    ? "Full ground-plane projection ready"
+                    : saved.status === "weak"
+                      ? "Ground transform weak — full pitch hidden"
+                      : saved.status === "unstable"
+                        ? "Ground transform unstable"
+                        : "Insufficient ground geometry"}
                 </p>
               </div>
               <p className="mt-2 text-sm text-white/50">{saved.message}</p>
@@ -595,6 +870,14 @@ export function CalibrationV2Panel({
             </a>
           </div>
 
+          {saved.status === "weak" && (
+            <p className="mt-4 rounded-lg border border-[#ffca68]/25 bg-[#ffca68]/[0.06] p-3 text-sm font-bold text-[#ffe0a3]">
+              Low-confidence local debug overlay only. A full pitch projection
+              is deliberately hidden until wide, defensible metric references
+              support it.
+            </p>
+          )}
+
           <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <QualityMetric
               label="Reprojection RMSE"
@@ -603,9 +886,9 @@ export function CalibrationV2Panel({
                 : "Unavailable"}
             />
             <QualityMetric
-              label="Max error"
-              value={quality?.max_reprojection_error_px != null
-                ? `${quality.max_reprojection_error_px.toFixed(2)} px`
+              label="Median error"
+              value={quality?.median_reprojection_error_px != null
+                ? `${quality.median_reprojection_error_px.toFixed(2)} px`
                 : "Unavailable"}
             />
             <QualityMetric
@@ -615,6 +898,46 @@ export function CalibrationV2Panel({
             <QualityMetric
               label="Image coverage"
               value={quality ? `${(quality.image_coverage * 100).toFixed(2)}%` : "Unavailable"}
+            />
+            <QualityMetric
+              label="World coverage"
+              value={quality ? `${(quality.world_coverage * 100).toFixed(2)}%` : "Unavailable"}
+            />
+            <QualityMetric
+              label="Spread score"
+              value={quality ? quality.landmark_spread_score.toFixed(3) : "Unavailable"}
+            />
+            <QualityMetric
+              label="Metric correspondences"
+              value={quality
+                ? `${quality.metric_correspondence_count} (${quality.additional_metric_ground_landmark_count} wide)`
+                : "Unavailable"}
+            />
+            <QualityMetric
+              label="Estimator"
+              value={saved.homography.estimation_method}
+            />
+            <QualityMetric
+              label="RANSAC inliers"
+              value={saved.homography.ransac_inlier_count != null
+                ? `${saved.homography.ransac_inlier_count}/${quality?.metric_correspondence_count ?? 0}`
+                : "Not used"}
+            />
+            <QualityMetric
+              label="Image round trip"
+              value={saved.homography.round_trip_image_rmse_px != null
+                ? `${saved.homography.round_trip_image_rmse_px.toFixed(4)} px`
+                : "Unavailable"}
+            />
+            <QualityMetric
+              label="Ground round trip"
+              value={saved.homography.round_trip_ground_rmse_m != null
+                ? `${saved.homography.round_trip_ground_rmse_m.toFixed(6)} m`
+                : "Unavailable"}
+            />
+            <QualityMetric
+              label="Projection mode"
+              value={saved.virtual_pitch_overlay_geometry.projection_mode.replaceAll("_", " ")}
             />
           </div>
 

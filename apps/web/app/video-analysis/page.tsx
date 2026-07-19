@@ -283,7 +283,10 @@ export default function VideoAnalysisPage() {
   }, []);
 
   const uploadComplete = workspaceState === "prepared" && analysis !== null;
-  const calibrationV2Complete = calibrationV2?.status === "confirmed";
+  const calibrationV2Complete = (
+    calibrationV2?.status === "ready"
+    || calibrationV2?.status === "confirmed"
+  );
   const calibrationComplete = (
     confirmedCalibration !== null
     || calibrationV2Complete
@@ -312,9 +315,14 @@ export default function VideoAnalysisPage() {
           state={calibrationV2Complete ? "complete" : calibrationActive ? "active" : uploadComplete ? "available" : "locked"}
           note={
             calibrationV2Complete
-              ? "Calibration v2"
-              : calibrationV2?.status === "insufficient_geometry"
-                ? "Needs geometry"
+              ? "Calibration v2A.1"
+              : calibrationV2?.status === "weak"
+                ? "Ground transform weak"
+                : (
+                    calibrationV2?.status === "insufficient_geometry"
+                    || calibrationV2?.status === "unstable"
+                  )
+                  ? "Needs geometry"
                 : calibrationActive
                   ? "Active"
                   : uploadComplete
@@ -393,7 +401,27 @@ export default function VideoAnalysisPage() {
           <Card>
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div>
-                <StatusBadge label={calibrationComplete ? "Calibrated" : "Prepared"} tone="good" />
+                <StatusBadge
+                  label={
+                    calibrationV2?.status === "weak"
+                      ? "Ground Mapping Weak"
+                      : (
+                          calibrationV2?.status === "unstable"
+                          || calibrationV2?.status === "insufficient_geometry"
+                        )
+                        ? "Ground Mapping Needed"
+                        : calibrationComplete
+                          ? "Calibrated"
+                          : "Prepared"
+                  }
+                  tone={
+                    calibrationV2?.status === "weak"
+                    || calibrationV2?.status === "unstable"
+                    || calibrationV2?.status === "insufficient_geometry"
+                      ? "warn"
+                      : "good"
+                  }
+                />
                 <h2 className="mt-4 text-2xl font-black">Video prepared</h2>
                 <p className="mt-2 break-all font-mono text-xs text-white/40">{analysis.analysis_id}</p>
                 <p className="mt-2 text-sm text-white/55">{analysis.original_filename}</p>

@@ -76,6 +76,45 @@ def stump_base_world_points(
     }
 
 
+def standard_ground_reference_world_points(
+    geometry: CricketPitchDimensions,
+) -> dict[str, tuple[float, float, float]]:
+    """Known crease/pitch-edge intersections for optional manual placement.
+
+    These world coordinates are metric facts from the configured pitch
+    geometry. Their matching image pixels must still be observed and placed by
+    the user; this function does not invent image correspondences.
+    """
+    geometry.validate()
+    half_pitch = geometry.pitch_width_m / 2
+    bowler_crease_x = geometry.popping_crease_distance_m
+    striker_crease_x = (
+        geometry.pitch_length_m - geometry.popping_crease_distance_m
+    )
+    return {
+        "bowler_end_left_ground_reference": (
+            bowler_crease_x,
+            -half_pitch,
+            0.0,
+        ),
+        "bowler_end_right_ground_reference": (
+            bowler_crease_x,
+            half_pitch,
+            0.0,
+        ),
+        "striker_end_left_ground_reference": (
+            striker_crease_x,
+            -half_pitch,
+            0.0,
+        ),
+        "striker_end_right_ground_reference": (
+            striker_crease_x,
+            half_pitch,
+            0.0,
+        ),
+    }
+
+
 def virtual_pitch_ground_lines(
     geometry: CricketPitchDimensions,
 ) -> dict[str, tuple[tuple[float, float], ...]]:

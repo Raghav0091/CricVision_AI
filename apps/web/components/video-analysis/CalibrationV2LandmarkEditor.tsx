@@ -146,22 +146,31 @@ export function CalibrationV2LandmarkEditor({
         })}
       </svg>
 
-      {primary.map((landmark) => {
-        const color = END_COLORS[
-          landmark.wicket_end === "striker" ? "striker" : "bowler"
-        ];
-        const shortLabel = landmark.id.includes("_left_")
+      {landmarks.map((landmark) => {
+        const groundReference = landmark.landmark_type === "ground_control";
+        const color = groundReference
+          ? "#ff5ebe"
+          : END_COLORS[
+              landmark.wicket_end === "striker" ? "striker" : "bowler"
+            ];
+        const sideLabel = landmark.id.includes("_left_")
           ? "L"
           : landmark.id.includes("_middle_")
             ? "M"
             : "R";
+        const shortLabel = groundReference
+          ? `${landmark.id.startsWith("bowler_") ? "B" : "S"}${sideLabel}`
+          : sideLabel;
         return (
           <button
             key={landmark.id}
             type="button"
             disabled={disabled}
             aria-label={`Move ${landmark.label}`}
-            className="group absolute h-8 w-8 -translate-x-1/2 -translate-y-1/2 cursor-grab rounded-full border-2 border-black/80 text-[11px] font-black text-black shadow-[0_0_0_2px_rgba(255,255,255,.75)] active:cursor-grabbing disabled:cursor-default disabled:opacity-60"
+            data-landmark-kind={landmark.landmark_type}
+            className={`group absolute h-8 w-8 -translate-x-1/2 -translate-y-1/2 cursor-grab border-2 border-black/80 text-[10px] font-black text-black shadow-[0_0_0_2px_rgba(255,255,255,.75)] active:cursor-grabbing disabled:cursor-default disabled:opacity-60 ${
+              groundReference ? "rounded-md" : "rounded-full"
+            }`}
             style={{
               left: `${landmark.normalized_x * 100}%`,
               top: `${landmark.normalized_y * 100}%`,
@@ -176,7 +185,8 @@ export function CalibrationV2LandmarkEditor({
                 className="pointer-events-none absolute left-1/2 top-[-1.8rem] -translate-x-1/2 whitespace-nowrap rounded bg-black/90 px-2 py-1 text-[9px] uppercase tracking-[0.08em]"
                 style={{ color }}
               >
-                {landmark.wicket_end} {shortLabel}
+                {groundReference ? "metric ground" : landmark.wicket_end}{" "}
+                {shortLabel}
               </span>
             )}
           </button>

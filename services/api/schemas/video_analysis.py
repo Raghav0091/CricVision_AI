@@ -88,6 +88,9 @@ class VideoAnalysisPreparedResponse(BaseModel):
     calibration_overlay_url: str | None = None
     calibration_v2_status: Literal[
         "confirmed",
+        "ready",
+        "weak",
+        "unstable",
         "insufficient_geometry",
     ] | None = None
     calibration_v2_url: str | None = None
@@ -96,6 +99,7 @@ class VideoAnalysisPreparedResponse(BaseModel):
         "excellent",
         "good",
         "usable",
+        "weak",
         "poor",
         "insufficient_geometry",
     ] | None = None
@@ -256,11 +260,15 @@ class CalibrationV2ConfirmRequest(BaseModel):
         "image_left_is_world_left",
         "image_left_is_world_right",
     ]
+    landmark_semantics_confirmed: bool = False
     user_note: str | None = Field(default=None, max_length=1000)
 
 
 class ReprojectionDiagnostic(StrictGeometryModel):
     landmark_id: str
+    landmark_source: CalibrationLandmarkSource = "manual"
+    used_for_homography: bool = True
+    ransac_inlier: bool | None = None
     observed_pixel_x: float = Field(ge=0)
     observed_pixel_y: float = Field(ge=0)
     reprojected_pixel_x: float
@@ -274,6 +282,15 @@ class GroundHomographyResult(StrictGeometryModel):
     ground_to_image_homography: list[list[float]] | None = None
     determinant: float | None = None
     condition_number: float | None = Field(default=None, ge=0)
+    estimation_method: Literal["none", "direct", "ransac"] = "none"
+    ransac_reprojection_threshold_px: float | None = Field(
+        default=None,
+        gt=0,
+    )
+    ransac_inlier_count: int | None = Field(default=None, ge=0)
+    ransac_inlier_landmark_ids: list[str] = Field(default_factory=list)
+    round_trip_image_rmse_px: float | None = Field(default=None, ge=0)
+    round_trip_ground_rmse_m: float | None = Field(default=None, ge=0)
     image_convention: Literal["pixel_uv"]
     ground_convention: Literal["pitch_xy_metres_z0"]
 
@@ -281,8 +298,13 @@ class GroundHomographyResult(StrictGeometryModel):
 class CalibrationQualityV2(StrictGeometryModel):
     landmark_coverage: float = Field(ge=0, le=1)
     usable_landmarks: int = Field(ge=0)
+    metric_correspondence_count: int = Field(default=0, ge=0)
+    additional_metric_ground_landmark_count: int = Field(default=0, ge=0)
+    landmark_spread_score: float = Field(default=0, ge=0, le=1)
+    world_coverage: float = Field(default=0, ge=0, le=1)
     reprojection_rmse_px: float | None = Field(default=None, ge=0)
     max_reprojection_error_px: float | None = Field(default=None, ge=0)
+    median_reprojection_error_px: float | None = Field(default=None, ge=0)
     normalized_reprojection_rmse: float | None = Field(default=None, ge=0)
     geometry_condition: Literal[
         "well_conditioned",
@@ -294,12 +316,22 @@ class CalibrationQualityV2(StrictGeometryModel):
     image_coverage: float = Field(ge=0, le=1)
     wicket_order_valid: bool
     transform_available: bool
+    full_pitch_projection_allowed: bool = False
+    projection_outside_fraction: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+    )
     manual_adjustment_count: int = Field(ge=0)
+    used_landmark_ids: list[str] = Field(default_factory=list)
+    ignored_landmark_ids: list[str] = Field(default_factory=list)
+    landmark_sources: dict[str, int] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
     quality_grade: Literal[
         "excellent",
         "good",
         "usable",
+        "weak",
         "poor",
         "insufficient_geometry",
     ]
@@ -328,6 +360,11 @@ class ProjectedPitchLine(BaseModel):
 
 class VirtualPitchOverlayGeometry(BaseModel):
     projected_lines: list[ProjectedPitchLine] = Field(default_factory=list)
+    projection_mode: Literal[
+        "full_pitch",
+        "local_debug",
+        "landmarks_only",
+    ] = "landmarks_only"
 
 
 class CalibrationV2FutureCameraPoseFields(BaseModel):
@@ -359,8 +396,14 @@ class CalibrationV2InitialiseResponse(BaseModel):
 
 class CalibrationV2Result(BaseModel):
     success: bool
-    status: Literal["confirmed", "insufficient_geometry"]
-    schema_version: Literal["2.0"]
+    status: Literal[
+        "confirmed",
+        "ready",
+        "weak",
+        "unstable",
+        "insufficient_geometry",
+    ]
+    schema_version: Literal["2.0", "2.1"]
     analysis_id: str
     calibration_mode: Literal["ground_plane"]
     coordinate_system: CalibrationCoordinateSystem
@@ -374,6 +417,7 @@ class CalibrationV2Result(BaseModel):
     reference_frame_url: str
     image_width: int = Field(gt=0)
     image_height: int = Field(gt=0)
+    landmark_semantics_confirmed: bool = False
     created_at: datetime
     updated_at: datetime
     user_note: str | None = None

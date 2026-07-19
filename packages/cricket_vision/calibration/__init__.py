@@ -2,6 +2,7 @@ from .environment_context import CalibrationQuality, EnvironmentContext
 from .cricket_pitch_geometry import (
     CricketPitchDimensions,
     LEFT_RIGHT_CONVENTION,
+    standard_ground_reference_world_points,
     stump_base_world_points,
     virtual_pitch_ground_lines,
 )
@@ -13,6 +14,7 @@ __all__ = [
     "CricketPitchDimensions",
     "EnvironmentContext",
     "LEFT_RIGHT_CONVENTION",
+    "standard_ground_reference_world_points",
     "build_alignment_boxes",
     "build_environment_context",
     "build_pitch_axis",
