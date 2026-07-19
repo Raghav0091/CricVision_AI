@@ -205,6 +205,13 @@ export type VideoAnalysisPreparedResponse = {
   calibration_v2_overlay_url?: string | null;
   calibration_v2_quality_grade?: CalibrationQualityGradeV2 | null;
   calibration_v2_reprojection_rmse_px?: number | null;
+  camera_pose_status?: CameraPoseStatus | null;
+  camera_pose_quality?: number | null;
+  camera_pose_url?: string | null;
+  camera_pose_overlay_url?: string | null;
+  camera_intrinsics_source?: CameraIntrinsicsSource | null;
+  camera_pose_reprojection_rmse_px?: number | null;
+  calibration_mode_used?: "ground_plane" | "wicket_camera_pose" | null;
   ball_detection_status?: "detection_queued" | "detecting_ball" | "detection_complete" | "detection_failed" | null;
   ball_detection_job_id?: string | null;
   ball_detection_started_at?: string | null;
@@ -230,6 +237,8 @@ function withBrowserSafeAnalysisUrls(record: VideoAnalysisPreparedResponse): Vid
     calibration_overlay_url: resolveApiUrl(record.calibration_overlay_url),
     calibration_v2_url: resolveApiUrl(record.calibration_v2_url),
     calibration_v2_overlay_url: resolveApiUrl(record.calibration_v2_overlay_url),
+    camera_pose_url: resolveApiUrl(record.camera_pose_url),
+    camera_pose_overlay_url: resolveApiUrl(record.camera_pose_overlay_url),
     detection_summary_url: resolveApiUrl(record.detection_summary_url),
     detection_overlay_url: resolveApiUrl(record.detection_overlay_url),
     tracking_summary_url: resolveApiUrl(record.tracking_summary_url),
@@ -383,8 +392,14 @@ export type CricketPitchGeometry = {
   pitch_length_m: number;
   wicket_width_m: number;
   wicket_height_m: number;
+  stump_diameter_m: number;
   pitch_width_m: number;
   popping_crease_distance_m: number;
+  stump_lateral_positions_m: {
+    left: number;
+    middle: number;
+    right: number;
+  };
 };
 
 
@@ -540,6 +555,8 @@ export type CalibrationV2Result = {
   image_width: number;
   image_height: number;
   landmark_semantics_confirmed: boolean;
+  ground_reference_mode: "use" | "skip";
+  ground_transform_reason?: string | null;
   created_at: string;
   updated_at: string;
   user_note?: string | null;
@@ -553,7 +570,180 @@ export type CalibrationV2ConfirmRequest = {
   pitch_geometry: CricketPitchGeometry;
   image_left_right_convention: ImageLeftRightConvention;
   landmark_semantics_confirmed: boolean;
+  ground_reference_mode: "use" | "skip";
   user_note?: string | null;
+};
+
+
+export type WicketLandmarkVisibility =
+  | "visible"
+  | "uncertain"
+  | "occluded"
+  | "unavailable";
+
+
+export type CameraIntrinsicsSource =
+  | "calibrated_device_profile"
+  | "metadata_estimated"
+  | "heuristic_estimated"
+  | "manually_provided";
+
+
+export type CameraPoseStatus =
+  | "ready"
+  | "usable"
+  | "weak"
+  | "unstable"
+  | "insufficient_landmarks"
+  | "solver_failed"
+  | "implausible_pose";
+
+
+export type WicketPoseLandmarkInput = {
+  id: string;
+  label: string;
+  wicket_end: "bowler" | "striker";
+  stump_position: "left" | "middle" | "right";
+  point_type: "base" | "top";
+  normalized_x: number;
+  normalized_y: number;
+  source: CalibrationLandmarkSource;
+  confidence?: number | null;
+  visibility: WicketLandmarkVisibility;
+};
+
+
+export type WicketPoseLandmark = WicketPoseLandmarkInput & {
+  pixel_x: number;
+  pixel_y: number;
+  world_x_m: number;
+  world_y_m: number;
+  world_z_m: number;
+};
+
+
+export type CameraIntrinsics = {
+  image_width: number;
+  image_height: number;
+  fx: number;
+  fy: number;
+  cx: number;
+  cy: number;
+  intrinsic_matrix: number[][];
+  distortion_coefficients: number[];
+  source: CameraIntrinsicsSource;
+  quality: "calibrated" | "estimated" | "low";
+  device_profile_id?: string | null;
+  camera_model?: string | null;
+  lens_mode?: string | null;
+  resolution_label?: string | null;
+  assumed_horizontal_fov_degrees?: number | null;
+  distortion_model_source: "calibrated" | "not_calibrated";
+  assumptions: string[];
+};
+
+
+export type CameraPoseReprojectionDiagnostic = {
+  landmark_id: string;
+  observed_pixel_x: number;
+  observed_pixel_y: number;
+  projected_pixel_x: number;
+  projected_pixel_y: number;
+  residual_px: number;
+  camera_depth_m: number;
+  ransac_inlier: boolean;
+};
+
+
+export type CameraPoseSolution = {
+  solved: boolean;
+  accepted: boolean;
+  solver_method: string;
+  refinement_method?: string | null;
+  rotation_vector?: number[] | null;
+  rotation_matrix?: number[][] | null;
+  translation_vector?: number[] | null;
+  camera_position_world?: number[] | null;
+  camera_forward_direction_world?: number[] | null;
+  camera_height_m?: number | null;
+  landmark_count: number;
+  used_landmark_ids: string[];
+  unavailable_landmark_ids: string[];
+  ransac_inlier_ids: string[];
+  ransac_outlier_ids: string[];
+  reprojection_rmse_px?: number | null;
+  reprojection_median_px?: number | null;
+  reprojection_max_px?: number | null;
+  normalized_reprojection_rmse?: number | null;
+  reprojection_diagnostics: CameraPoseReprojectionDiagnostic[];
+  positive_depth_for_all_used_landmarks?: boolean | null;
+  both_wickets_in_front?: boolean | null;
+  camera_faces_pitch?: boolean | null;
+  wicket_order_plausible?: boolean | null;
+  warnings: string[];
+  rejection_reasons: string[];
+};
+
+
+export type CameraPoseQualityComponents = {
+  landmark_quality: number;
+  landmark_coverage: number;
+  reprojection_quality: number;
+  intrinsics_quality: number;
+  geometry_condition: number;
+  pose_plausibility: number;
+  overall_pose_quality: number;
+};
+
+
+export type WicketCameraPoseInitialiseResponse = {
+  success: true;
+  status: "initialised";
+  analysis_id: string;
+  reference_frame_url: string;
+  image_width: number;
+  image_height: number;
+  pitch_geometry: CricketPitchGeometry;
+  landmarks: WicketPoseLandmark[];
+  camera_intrinsics: CameraIntrinsics;
+  warnings: string[];
+  message: string;
+};
+
+
+export type WicketCameraPoseSolveRequest = {
+  analysis_id: string;
+  landmarks: WicketPoseLandmarkInput[];
+  pitch_geometry: CricketPitchGeometry;
+  camera_intrinsics: CameraIntrinsics;
+  landmark_semantics_confirmed: boolean;
+  user_note?: string | null;
+};
+
+
+export type WicketCameraPoseResult = {
+  success: boolean;
+  status: CameraPoseStatus;
+  schema_version: "2.2";
+  analysis_id: string;
+  calibration_mode: "wicket_camera_pose";
+  coordinate_system: CalibrationV2Result["coordinate_system"];
+  pitch_geometry: CricketPitchGeometry;
+  stump_top_definition: "top_of_stump_body_excluding_bails";
+  landmarks: WicketPoseLandmark[];
+  camera_intrinsics: CameraIntrinsics;
+  camera_pose: CameraPoseSolution;
+  quality: CameraPoseQualityComponents;
+  camera_pose_url: string;
+  camera_pose_overlay_url: string;
+  reference_frame_url: string;
+  image_width: number;
+  image_height: number;
+  landmark_semantics_confirmed: boolean;
+  created_at: string;
+  updated_at: string;
+  user_note?: string | null;
+  message: string;
 };
 
 
@@ -601,6 +791,32 @@ function withBrowserSafeCalibrationV2Urls(
       ?? result.calibration_v2_url,
     calibration_v2_overlay_url: resolveApiUrl(result.calibration_v2_overlay_url)
       ?? result.calibration_v2_overlay_url
+  };
+}
+
+
+function withBrowserSafeCameraPoseInitialiseUrls(
+  result: WicketCameraPoseInitialiseResponse
+): WicketCameraPoseInitialiseResponse {
+  return {
+    ...result,
+    reference_frame_url: resolveApiUrl(result.reference_frame_url)
+      ?? result.reference_frame_url
+  };
+}
+
+
+function withBrowserSafeCameraPoseUrls(
+  result: WicketCameraPoseResult
+): WicketCameraPoseResult {
+  return {
+    ...result,
+    reference_frame_url: resolveApiUrl(result.reference_frame_url)
+      ?? result.reference_frame_url,
+    camera_pose_url: resolveApiUrl(result.camera_pose_url)
+      ?? result.camera_pose_url,
+    camera_pose_overlay_url: resolveApiUrl(result.camera_pose_overlay_url)
+      ?? result.camera_pose_overlay_url
   };
 }
 
@@ -701,6 +917,69 @@ export async function getVideoAnalysisCalibrationV2(
   }
   return withBrowserSafeCalibrationV2Urls(
     await response.json() as CalibrationV2Result
+  );
+}
+
+
+export async function initialiseWicketCameraPose(
+  analysisId: string
+): Promise<WicketCameraPoseInitialiseResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/calibration/v2/camera-pose/initialise`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(
+      response,
+      `Camera-pose initialisation returned ${response.status}.`
+    );
+  }
+  return withBrowserSafeCameraPoseInitialiseUrls(
+    await response.json() as WicketCameraPoseInitialiseResponse
+  );
+}
+
+
+export async function solveWicketCameraPose(
+  analysisId: string,
+  request: WicketCameraPoseSolveRequest
+): Promise<WicketCameraPoseResult> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/calibration/v2/camera-pose/solve`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request)
+    }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(
+      response,
+      `Camera-pose solve returned ${response.status}.`
+    );
+  }
+  return withBrowserSafeCameraPoseUrls(
+    await response.json() as WicketCameraPoseResult
+  );
+}
+
+
+export async function getWicketCameraPose(
+  analysisId: string
+): Promise<WicketCameraPoseResult | null> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/calibration/v2/camera-pose`,
+    { cache: "no-store" }
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw await videoAnalysisError(
+      response,
+      `Camera-pose lookup returned ${response.status}.`
+    );
+  }
+  return withBrowserSafeCameraPoseUrls(
+    await response.json() as WicketCameraPoseResult
   );
 }
 

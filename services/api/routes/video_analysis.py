@@ -17,6 +17,9 @@ from ..schemas.video_analysis import (
     VideoBallTrackingStartResponse,
     VideoCalibrationConfirmationRequest,
     VideoCalibrationDetectionResponse,
+    WicketCameraPoseInitialiseResponse,
+    WicketCameraPoseResult,
+    WicketCameraPoseSolveRequest,
 )
 from ..services.video_analysis_service import (
     VideoAnalysisServiceError,
@@ -51,6 +54,11 @@ from ..services.video_calibration_v2_service import (
     confirm_video_calibration_v2,
     initialise_video_calibration_v2,
     load_video_calibration_v2,
+)
+from ..services.video_camera_pose_service import (
+    initialise_wicket_camera_pose,
+    load_wicket_camera_pose,
+    solve_wicket_camera_pose,
 )
 
 
@@ -315,6 +323,66 @@ def get_analysis_calibration_v2(
 ) -> CalibrationV2Result:
     try:
         return load_video_calibration_v2(analysis_id)
+    except VideoAnalysisServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.post(
+    "/{analysis_id}/calibration/v2/camera-pose/initialise",
+    response_model=WicketCameraPoseInitialiseResponse,
+)
+def initialise_analysis_camera_pose(
+    analysis_id: str,
+) -> WicketCameraPoseInitialiseResponse:
+    try:
+        return initialise_wicket_camera_pose(analysis_id)
+    except VideoAnalysisServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.put(
+    "/{analysis_id}/calibration/v2/camera-pose/solve",
+    response_model=WicketCameraPoseResult,
+)
+def solve_analysis_camera_pose(
+    analysis_id: str,
+    request: WicketCameraPoseSolveRequest,
+) -> WicketCameraPoseResult:
+    try:
+        result = solve_wicket_camera_pose(analysis_id, request)
+        logger.info(
+            "Saved wicket-based camera pose for %s with status %s",
+            analysis_id,
+            result.status,
+        )
+        return result
+    except VideoAnalysisServiceError as exc:
+        logger.warning(
+            "Camera-pose solve rejected for %s: %s",
+            analysis_id,
+            exc.message,
+        )
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.get(
+    "/{analysis_id}/calibration/v2/camera-pose",
+    response_model=WicketCameraPoseResult,
+)
+def get_analysis_camera_pose(
+    analysis_id: str,
+) -> WicketCameraPoseResult:
+    try:
+        return load_wicket_camera_pose(analysis_id)
     except VideoAnalysisServiceError as exc:
         raise HTTPException(
             status_code=exc.status_code,

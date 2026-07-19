@@ -164,6 +164,14 @@ export function CalibrationV2Panel({
   const [semanticsConfirmed, setSemanticsConfirmed] = useState(
     initialCalibration?.landmark_semantics_confirmed ?? false
   );
+  const [groundReferenceMode, setGroundReferenceMode] = useState<"use" | "skip">(
+    initialCalibration?.ground_reference_mode
+      ?? (
+        initialCalibration?.landmark_set.optional_ground_landmarks.length
+          ? "use"
+          : "skip"
+      )
+  );
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -175,6 +183,11 @@ export function CalibrationV2Panel({
       setSemanticsConfirmed(
         initialCalibration.landmark_semantics_confirmed ?? false
       );
+      setGroundReferenceMode(initialCalibration.ground_reference_mode ?? (
+        initialCalibration.landmark_set.optional_ground_landmarks.length
+          ? "use"
+          : "skip"
+      ));
       return;
     }
     void initialise();
@@ -194,6 +207,7 @@ export function CalibrationV2Panel({
       setAutoGuesses(next);
       setSaved(null);
       setSemanticsConfirmed(false);
+      setGroundReferenceMode("skip");
     } catch (caught) {
       setError(
         caught instanceof Error
@@ -348,6 +362,7 @@ export function CalibrationV2Panel({
   }
 
   function addGroundReference(reference: StandardGroundReference) {
+    setGroundReferenceMode("use");
     setEditor((current) => {
       if (
         !current
@@ -394,6 +409,20 @@ export function CalibrationV2Panel({
     setSemanticsConfirmed(false);
   }
 
+  function changeGroundReferenceMode(mode: "use" | "skip") {
+    setGroundReferenceMode(mode);
+    if (mode === "skip") {
+      setEditor((current) => current ? {
+        ...current,
+        landmarks: current.landmarks.filter(
+          (landmark) => landmark.landmark_type !== "ground_control"
+        )
+      } : current);
+    }
+    setSaved(null);
+    setSemanticsConfirmed(false);
+  }
+
   async function confirmCalibration() {
     if (!editor) return;
     setSaving(true);
@@ -425,6 +454,7 @@ export function CalibrationV2Panel({
           pitch_geometry: editor.pitchGeometry,
           image_left_right_convention: editor.imageConvention,
           landmark_semantics_confirmed: semanticsConfirmed,
+          ground_reference_mode: groundReferenceMode,
           user_note: userNote.trim() || null
         }
       );
@@ -608,6 +638,29 @@ export function CalibrationV2Panel({
               </span>
             </div>
             <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <Button
+                variant={groundReferenceMode === "use" ? "primary" : "secondary"}
+                disabled={saving}
+                onClick={() => changeGroundReferenceMode("use")}
+              >
+                Available / Use Ground References
+              </Button>
+              <Button
+                variant={groundReferenceMode === "skip" ? "primary" : "secondary"}
+                disabled={saving}
+                onClick={() => changeGroundReferenceMode("skip")}
+              >
+                Not Visible / Skip Ground References
+              </Button>
+            </div>
+            {groundReferenceMode === "skip" && (
+              <p className="mt-3 rounded-lg border border-[#ffca68]/25 bg-black/20 p-3 text-xs leading-5 text-[#ffe0a3]">
+                Trusted metric ground references are not available. No magenta
+                correspondence will be fabricated; this does not block the
+                wicket-based camera-pose mode below.
+              </p>
+            )}
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
               {STANDARD_GROUND_REFERENCES.map((reference) => {
                 const placed = groundLandmarks.find(
                   (landmark) => landmark.id === reference.id
@@ -636,7 +689,7 @@ export function CalibrationV2Panel({
                           : `Add ${reference.shortLabel} metric ground reference`
                       }
                       className="mt-3 text-xs font-bold text-lime underline disabled:cursor-default disabled:text-white/30"
-                      disabled={saving}
+                      disabled={saving || groundReferenceMode === "skip"}
                       onClick={() => placed
                         ? removeGroundReference(reference.id)
                         : addGroundReference(reference)}
@@ -733,6 +786,7 @@ export function CalibrationV2Panel({
                   ["pitch_length_m", "Pitch length"],
                   ["wicket_width_m", "Wicket width"],
                   ["wicket_height_m", "Wicket height"],
+                  ["stump_diameter_m", "Stump diameter"],
                   ["pitch_width_m", "Pitch width"],
                   ["popping_crease_distance_m", "Popping crease"]
                 ] as const).map(([key, label]) => (
@@ -946,6 +1000,60 @@ export function CalibrationV2Panel({
               {quality.warnings.map((warning) => (
                 <p key={warning}>• {warning}</p>
               ))}
+            </div>
+          )}
+
+          {saved.homography.estimation_method === "ransac" && (
+            <div className="mt-4 rounded-lg border border-white/10 bg-black/20 p-3 text-xs leading-5">
+              <p className="font-black text-lime">
+                RANSAC INLIERS
+              </p>
+              <p className="mt-1 break-words font-mono text-white/55">
+                {saved.homography.ransac_inlier_landmark_ids.join(", ") || "None"}
+              </p>
+              <p className="mt-3 font-black text-[#ffaaa6]">
+                RANSAC OUTLIERS
+              </p>
+              <p className="mt-1 break-words font-mono text-white/55">
+                {quality?.ignored_landmark_ids.join(", ") || "None"}
+              </p>
+            </div>
+          )}
+
+          {quality && quality.reprojection_diagnostics.length > 0 && (
+            <div className="mt-4 overflow-x-auto">
+              <table className="w-full min-w-[720px] text-left text-xs">
+                <thead className="text-white/35">
+                  <tr>
+                    <th className="p-2">Landmark</th>
+                    <th className="p-2">Observed</th>
+                    <th className="p-2">Projected</th>
+                    <th className="p-2">Residual</th>
+                    <th className="p-2">RANSAC</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {quality.reprojection_diagnostics.map((diagnostic) => (
+                    <tr key={diagnostic.landmark_id} className="border-t border-white/10">
+                      <td className="p-2 font-mono">{diagnostic.landmark_id}</td>
+                      <td className="p-2">
+                        ({diagnostic.observed_pixel_x.toFixed(1)}, {diagnostic.observed_pixel_y.toFixed(1)})
+                      </td>
+                      <td className="p-2">
+                        ({diagnostic.reprojected_pixel_x.toFixed(1)}, {diagnostic.reprojected_pixel_y.toFixed(1)})
+                      </td>
+                      <td className="p-2">{diagnostic.error_px.toFixed(2)} px</td>
+                      <td className="p-2">
+                        {diagnostic.ransac_inlier == null
+                          ? "Not used"
+                          : diagnostic.ransac_inlier
+                            ? "Inlier"
+                            : "Outlier"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
 

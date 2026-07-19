@@ -2,7 +2,7 @@ from datetime import datetime
 import math
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 
 class StrictGeometryModel(BaseModel):
@@ -104,6 +104,32 @@ class VideoAnalysisPreparedResponse(BaseModel):
         "insufficient_geometry",
     ] | None = None
     calibration_v2_reprojection_rmse_px: float | None = None
+    camera_pose_status: Literal[
+        "ready",
+        "usable",
+        "weak",
+        "unstable",
+        "insufficient_landmarks",
+        "solver_failed",
+        "implausible_pose",
+    ] | None = None
+    camera_pose_quality: float | None = Field(default=None, ge=0, le=1)
+    camera_pose_url: str | None = None
+    camera_pose_overlay_url: str | None = None
+    camera_intrinsics_source: Literal[
+        "calibrated_device_profile",
+        "metadata_estimated",
+        "heuristic_estimated",
+        "manually_provided",
+    ] | None = None
+    camera_pose_reprojection_rmse_px: float | None = Field(
+        default=None,
+        ge=0,
+    )
+    calibration_mode_used: Literal[
+        "ground_plane",
+        "wicket_camera_pose",
+    ] | None = None
     ball_detection_status: Literal[
         "detection_queued",
         "detecting_ball",
@@ -191,6 +217,7 @@ class CricketPitchGeometry(StrictGeometryModel):
     pitch_length_m: float = Field(default=20.12, gt=0, le=40)
     wicket_width_m: float = Field(default=0.2286, gt=0, le=1)
     wicket_height_m: float = Field(default=0.7112, gt=0, le=2)
+    stump_diameter_m: float = Field(default=0.0381, gt=0, le=0.1)
     pitch_width_m: float = Field(default=3.05, gt=0, le=10)
     popping_crease_distance_m: float = Field(default=1.22, gt=0, le=5)
 
@@ -198,9 +225,21 @@ class CricketPitchGeometry(StrictGeometryModel):
     def validate_pitch_dimensions(self) -> "CricketPitchGeometry":
         if self.pitch_width_m < self.wicket_width_m:
             raise ValueError("Pitch width must exceed wicket width.")
+        if self.stump_diameter_m >= self.wicket_width_m / 2:
+            raise ValueError("Stump diameter is invalid for the wicket width.")
         if self.popping_crease_distance_m >= self.pitch_length_m / 2:
             raise ValueError("Popping crease distance is invalid.")
         return self
+
+    @computed_field
+    @property
+    def stump_lateral_positions_m(self) -> dict[str, float]:
+        outer_centre = (self.wicket_width_m - self.stump_diameter_m) / 2
+        return {
+            "left": -outer_centre,
+            "middle": 0.0,
+            "right": outer_centre,
+        }
 
 
 class CalibrationCoordinateSystem(BaseModel):
@@ -261,6 +300,7 @@ class CalibrationV2ConfirmRequest(BaseModel):
         "image_left_is_world_right",
     ]
     landmark_semantics_confirmed: bool = False
+    ground_reference_mode: Literal["use", "skip"] = "use"
     user_note: str | None = Field(default=None, max_length=1000)
 
 
@@ -418,10 +458,183 @@ class CalibrationV2Result(BaseModel):
     image_width: int = Field(gt=0)
     image_height: int = Field(gt=0)
     landmark_semantics_confirmed: bool = False
+    ground_reference_mode: Literal["use", "skip"] = "use"
+    ground_transform_reason: str | None = None
     created_at: datetime
     updated_at: datetime
     user_note: str | None = None
     future_camera_pose: CalibrationV2FutureCameraPoseFields
+    message: str
+
+
+WicketLandmarkVisibility = Literal[
+    "visible",
+    "uncertain",
+    "occluded",
+    "unavailable",
+]
+CameraIntrinsicsSource = Literal[
+    "calibrated_device_profile",
+    "metadata_estimated",
+    "heuristic_estimated",
+    "manually_provided",
+]
+CameraPoseStatus = Literal[
+    "ready",
+    "usable",
+    "weak",
+    "unstable",
+    "insufficient_landmarks",
+    "solver_failed",
+    "implausible_pose",
+]
+
+
+class WicketPoseLandmarkInput(StrictGeometryModel):
+    id: str = Field(min_length=1, max_length=100)
+    label: str = Field(min_length=1, max_length=120)
+    wicket_end: Literal["bowler", "striker"]
+    stump_position: Literal["left", "middle", "right"]
+    point_type: Literal["base", "top"]
+    normalized_x: float = Field(ge=0, le=1)
+    normalized_y: float = Field(ge=0, le=1)
+    source: CalibrationLandmarkSource
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    visibility: WicketLandmarkVisibility = "visible"
+
+
+class WicketPoseLandmark(WicketPoseLandmarkInput):
+    pixel_x: float = Field(ge=0)
+    pixel_y: float = Field(ge=0)
+    world_x_m: float
+    world_y_m: float
+    world_z_m: float
+
+
+class CameraIntrinsics(StrictGeometryModel):
+    image_width: int = Field(gt=0)
+    image_height: int = Field(gt=0)
+    fx: float = Field(gt=0)
+    fy: float = Field(gt=0)
+    cx: float
+    cy: float
+    intrinsic_matrix: list[list[float]]
+    distortion_coefficients: list[float] = Field(min_length=4, max_length=14)
+    source: CameraIntrinsicsSource
+    quality: Literal["calibrated", "estimated", "low"]
+    device_profile_id: str | None = None
+    camera_model: str | None = None
+    lens_mode: str | None = None
+    resolution_label: str | None = None
+    assumed_horizontal_fov_degrees: float | None = Field(
+        default=None,
+        gt=1,
+        lt=179,
+    )
+    distortion_model_source: Literal["calibrated", "not_calibrated"]
+    assumptions: list[str] = Field(default_factory=list)
+
+
+class CameraPoseReprojectionDiagnostic(StrictGeometryModel):
+    landmark_id: str
+    observed_pixel_x: float = Field(ge=0)
+    observed_pixel_y: float = Field(ge=0)
+    projected_pixel_x: float
+    projected_pixel_y: float
+    residual_px: float = Field(ge=0)
+    camera_depth_m: float
+    ransac_inlier: bool
+
+
+class CameraPoseQualityComponents(StrictGeometryModel):
+    landmark_quality: float = Field(ge=0, le=1)
+    landmark_coverage: float = Field(ge=0, le=1)
+    reprojection_quality: float = Field(ge=0, le=1)
+    intrinsics_quality: float = Field(ge=0, le=1)
+    geometry_condition: float = Field(ge=0, le=1)
+    pose_plausibility: float = Field(ge=0, le=1)
+    overall_pose_quality: float = Field(ge=0, le=1)
+
+
+class CameraPoseSolution(StrictGeometryModel):
+    solved: bool
+    accepted: bool
+    solver_method: str
+    refinement_method: str | None = None
+    rotation_vector: list[float] | None = None
+    rotation_matrix: list[list[float]] | None = None
+    translation_vector: list[float] | None = None
+    camera_position_world: list[float] | None = None
+    camera_forward_direction_world: list[float] | None = None
+    camera_height_m: float | None = None
+    landmark_count: int = Field(ge=0)
+    used_landmark_ids: list[str] = Field(default_factory=list)
+    unavailable_landmark_ids: list[str] = Field(default_factory=list)
+    ransac_inlier_ids: list[str] = Field(default_factory=list)
+    ransac_outlier_ids: list[str] = Field(default_factory=list)
+    reprojection_rmse_px: float | None = Field(default=None, ge=0)
+    reprojection_median_px: float | None = Field(default=None, ge=0)
+    reprojection_max_px: float | None = Field(default=None, ge=0)
+    normalized_reprojection_rmse: float | None = Field(default=None, ge=0)
+    reprojection_diagnostics: list[CameraPoseReprojectionDiagnostic] = Field(
+        default_factory=list
+    )
+    positive_depth_for_all_used_landmarks: bool | None = None
+    both_wickets_in_front: bool | None = None
+    camera_faces_pitch: bool | None = None
+    wicket_order_plausible: bool | None = None
+    warnings: list[str] = Field(default_factory=list)
+    rejection_reasons: list[str] = Field(default_factory=list)
+
+
+class WicketCameraPoseInitialiseResponse(BaseModel):
+    success: Literal[True]
+    status: Literal["initialised"]
+    analysis_id: str
+    reference_frame_url: str
+    image_width: int = Field(gt=0)
+    image_height: int = Field(gt=0)
+    pitch_geometry: CricketPitchGeometry
+    landmarks: list[WicketPoseLandmark] = Field(min_length=12, max_length=12)
+    camera_intrinsics: CameraIntrinsics
+    warnings: list[str] = Field(default_factory=list)
+    message: str
+
+
+class WicketCameraPoseSolveRequest(BaseModel):
+    analysis_id: str
+    landmarks: list[WicketPoseLandmarkInput] = Field(
+        min_length=12,
+        max_length=12,
+    )
+    pitch_geometry: CricketPitchGeometry
+    camera_intrinsics: CameraIntrinsics
+    landmark_semantics_confirmed: bool = False
+    user_note: str | None = Field(default=None, max_length=1000)
+
+
+class WicketCameraPoseResult(BaseModel):
+    success: bool
+    status: CameraPoseStatus
+    schema_version: Literal["2.2"]
+    analysis_id: str
+    calibration_mode: Literal["wicket_camera_pose"]
+    coordinate_system: CalibrationCoordinateSystem
+    pitch_geometry: CricketPitchGeometry
+    stump_top_definition: Literal["top_of_stump_body_excluding_bails"]
+    landmarks: list[WicketPoseLandmark] = Field(min_length=12, max_length=12)
+    camera_intrinsics: CameraIntrinsics
+    camera_pose: CameraPoseSolution
+    quality: CameraPoseQualityComponents
+    camera_pose_url: str
+    camera_pose_overlay_url: str
+    reference_frame_url: str
+    image_width: int = Field(gt=0)
+    image_height: int = Field(gt=0)
+    landmark_semantics_confirmed: bool = False
+    created_at: datetime
+    updated_at: datetime
+    user_note: str | None = None
     message: str
 
 

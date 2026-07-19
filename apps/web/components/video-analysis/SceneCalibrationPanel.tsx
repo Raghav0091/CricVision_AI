@@ -11,6 +11,7 @@ import {
   type CalibrationV2Result,
   type ConfirmedVideoCalibrationResponse,
   type VideoAnalysisPreparedResponse,
+  type WicketCameraPoseResult,
   type WicketCalibration
 } from "@/lib/api";
 
@@ -21,6 +22,7 @@ import {
   wicketFromBox
 } from "./CalibrationCanvas";
 import { CalibrationV2Panel } from "./CalibrationV2Panel";
+import { CalibrationV2BPanel } from "./CalibrationV2BPanel";
 
 
 type CalibrationPhase = "idle" | "detecting" | "editing" | "saving" | "saved";
@@ -34,15 +36,19 @@ export function SceneCalibrationPanel({
   analysis,
   initialCalibration,
   initialCalibrationV2,
+  initialCameraPose,
   onCalibrated,
   onCalibratedV2,
+  onCameraPoseSolved,
   onDirty
 }: {
   analysis: VideoAnalysisPreparedResponse;
   initialCalibration: ConfirmedVideoCalibrationResponse | null;
   initialCalibrationV2: CalibrationV2Result | null;
+  initialCameraPose: WicketCameraPoseResult | null;
   onCalibrated: (calibration: ConfirmedVideoCalibrationResponse) => void;
   onCalibratedV2: (calibration: CalibrationV2Result) => void;
+  onCameraPoseSolved: (result: WicketCameraPoseResult) => void;
   onDirty: () => void;
 }) {
   const [phase, setPhase] = useState<CalibrationPhase>(
@@ -438,6 +444,11 @@ export function SceneCalibrationPanel({
         analysis={analysis}
         initialCalibration={initialCalibrationV2}
         onCalibrated={onCalibratedV2}
+      />
+      <CalibrationV2BPanel
+        analysis={analysis}
+        initialCameraPose={initialCameraPose}
+        onSolved={onCameraPoseSolved}
       />
     </Card>
   );

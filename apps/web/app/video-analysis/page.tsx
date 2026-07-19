@@ -12,6 +12,7 @@ import {
   getVideoAnalysis,
   getVideoAnalysisCalibration,
   getVideoAnalysisCalibrationV2,
+  getWicketCameraPose,
   getVideoBallDetectionResult,
   getVideoBallTrackingResult,
   prepareVideoAnalysis,
@@ -19,7 +20,8 @@ import {
   type ConfirmedVideoCalibrationResponse,
   type VideoAnalysisPreparedResponse,
   type VideoBallDetectionResultResponse,
-  type VideoBallTrackingResultResponse
+  type VideoBallTrackingResultResponse,
+  type WicketCameraPoseResult
 } from "@/lib/api";
 
 
@@ -131,6 +133,9 @@ export default function VideoAnalysisPage() {
   const [calibrationV2, setCalibrationV2] = useState<
     CalibrationV2Result | null
   >(null);
+  const [cameraPose, setCameraPose] = useState<WicketCameraPoseResult | null>(
+    null
+  );
   const [ballDetectionResult, setBallDetectionResult] = useState<
     VideoBallDetectionResultResponse | null
   >(null);
@@ -159,6 +164,7 @@ export default function VideoAnalysisPage() {
     setAnalysis(null);
     setConfirmedCalibration(null);
     setCalibrationV2(null);
+    setCameraPose(null);
     setBallDetectionResult(null);
     setBallTrackingResult(null);
     setActiveStage("upload");
@@ -186,6 +192,7 @@ export default function VideoAnalysisPage() {
     setAnalysis(null);
     setConfirmedCalibration(null);
     setCalibrationV2(null);
+    setCameraPose(null);
     setBallDetectionResult(null);
     setBallTrackingResult(null);
     setError(null);
@@ -214,6 +221,7 @@ export default function VideoAnalysisPage() {
       setAnalysis(prepared);
       setConfirmedCalibration(null);
       setCalibrationV2(null);
+      setCameraPose(null);
       setBallDetectionResult(null);
       setBallTrackingResult(null);
       setWorkspaceState("prepared");
@@ -239,6 +247,7 @@ export default function VideoAnalysisPage() {
       getVideoAnalysis(analysisId),
       getVideoAnalysisCalibration(analysisId),
       getVideoAnalysisCalibrationV2(analysisId),
+      getWicketCameraPose(analysisId),
       getVideoBallDetectionResult(analysisId),
       getVideoBallTrackingResult(analysisId)
     ])
@@ -246,6 +255,7 @@ export default function VideoAnalysisPage() {
         restored,
         calibration,
         restoredCalibrationV2,
+        restoredCameraPose,
         detectionResult,
         trackingResult
       ]) => {
@@ -253,6 +263,7 @@ export default function VideoAnalysisPage() {
         setAnalysis(restored);
         setConfirmedCalibration(calibration);
         setCalibrationV2(restoredCalibrationV2);
+        setCameraPose(restoredCameraPose);
         setBallDetectionResult(detectionResult);
         setBallTrackingResult(trackingResult);
         setWorkspaceState("prepared");
@@ -287,9 +298,14 @@ export default function VideoAnalysisPage() {
     calibrationV2?.status === "ready"
     || calibrationV2?.status === "confirmed"
   );
+  const cameraPoseComplete = (
+    cameraPose?.status === "ready"
+    || cameraPose?.status === "usable"
+  );
   const calibrationComplete = (
     confirmedCalibration !== null
     || calibrationV2Complete
+    || cameraPoseComplete
   );
   const calibrationActive = uploadComplete && activeStage === "calibration";
   const ballDetectionActive = uploadComplete && activeStage === "ball_detection";
@@ -312,10 +328,12 @@ export default function VideoAnalysisPage() {
         <WorkflowStage
           index={2}
           title="Scene Calibration"
-          state={calibrationV2Complete ? "complete" : calibrationActive ? "active" : uploadComplete ? "available" : "locked"}
+          state={cameraPoseComplete || calibrationV2Complete ? "complete" : calibrationActive ? "active" : uploadComplete ? "available" : "locked"}
           note={
-            calibrationV2Complete
-              ? "Calibration v2A.1"
+            cameraPoseComplete
+              ? "Calibration v2B"
+              : calibrationV2Complete
+                ? "Calibration v2A.1"
               : calibrationV2?.status === "weak"
                 ? "Ground transform weak"
                 : (
@@ -455,6 +473,7 @@ export default function VideoAnalysisPage() {
               analysis={analysis}
               initialCalibration={confirmedCalibration}
               initialCalibrationV2={calibrationV2}
+              initialCameraPose={cameraPose}
               onDirty={() => setConfirmedCalibration(null)}
               onCalibrated={(calibration) => {
                 setConfirmedCalibration(calibration);
@@ -479,6 +498,22 @@ export default function VideoAnalysisPage() {
                     calibration.quality.reprojection_rmse_px
                   ),
                   updated_at: calibration.updated_at
+                } : current);
+              }}
+              onCameraPoseSolved={(result) => {
+                setCameraPose(result);
+                setAnalysis((current) => current ? {
+                  ...current,
+                  camera_pose_status: result.status,
+                  camera_pose_quality: result.quality.overall_pose_quality,
+                  camera_pose_url: result.camera_pose_url,
+                  camera_pose_overlay_url: result.camera_pose_overlay_url,
+                  camera_intrinsics_source: result.camera_intrinsics.source,
+                  camera_pose_reprojection_rmse_px: (
+                    result.camera_pose.reprojection_rmse_px
+                  ),
+                  calibration_mode_used: result.calibration_mode,
+                  updated_at: result.updated_at
                 } : current);
               }}
             />

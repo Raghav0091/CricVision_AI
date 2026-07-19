@@ -2,13 +2,25 @@
 
 import { useRef, type PointerEvent as ReactPointerEvent } from "react";
 
-import type { CalibrationLandmarkInput } from "@/lib/api";
+import type {
+  CalibrationLandmarkInput,
+  WicketPoseLandmarkInput
+} from "@/lib/api";
 
 
-const END_COLORS = {
-  bowler: "#50dcff",
-  striker: "#ffca68"
-} as const;
+const BASE_COLOR = "#50dcff";
+const TOP_COLOR = "#ffca68";
+
+
+type EditableLandmark =
+  | CalibrationLandmarkInput
+  | WicketPoseLandmarkInput;
+
+
+function pointType(landmark: EditableLandmark): "base" | "top" | "ground" {
+  if ("point_type" in landmark) return landmark.point_type;
+  return landmark.landmark_type === "ground_control" ? "ground" : "base";
+}
 
 
 function clamp(value: number): number {
@@ -28,7 +40,7 @@ export function CalibrationV2LandmarkEditor({
   imageUrl: string;
   imageWidth: number;
   imageHeight: number;
-  landmarks: CalibrationLandmarkInput[];
+  landmarks: EditableLandmark[];
   disabled?: boolean;
   showLabels?: boolean;
   onLandmarkChange: (
@@ -95,9 +107,7 @@ export function CalibrationV2LandmarkEditor({
     }
   }
 
-  const primary = landmarks.filter(
-    (landmark) => landmark.landmark_type === "stump_base"
-  );
+  const primary = landmarks.filter((landmark) => pointType(landmark) !== "ground");
 
   return (
     <div
@@ -115,7 +125,7 @@ export function CalibrationV2LandmarkEditor({
       <img
         className="pointer-events-none absolute inset-0 h-full w-full object-fill"
         src={imageUrl}
-        alt="Calibration v2 stump-base landmark editor"
+        alt="Calibration v2 semantic wicket landmark editor"
         draggable={false}
       />
 
@@ -125,34 +135,66 @@ export function CalibrationV2LandmarkEditor({
         viewBox="0 0 100 100"
         preserveAspectRatio="none"
       >
-        {(["bowler", "striker"] as const).map((wicketEnd) => {
-          const points = primary
-            .filter((landmark) => landmark.wicket_end === wicketEnd)
-            .map((landmark) => (
-              `${landmark.normalized_x * 100},${landmark.normalized_y * 100}`
-            ))
-            .join(" ");
-          return points ? (
-            <polyline
-              key={wicketEnd}
-              points={points}
-              fill="none"
-              stroke={END_COLORS[wicketEnd]}
-              strokeWidth="0.35"
-              strokeDasharray="1 0.7"
-              vectorEffect="non-scaling-stroke"
-            />
-          ) : null;
-        })}
+        {(["bowler", "striker"] as const).flatMap((wicketEnd) => (
+          (["base", "top"] as const).map((kind) => {
+            const points = primary
+              .filter((landmark) => (
+                landmark.wicket_end === wicketEnd
+                && pointType(landmark) === kind
+              ))
+              .map((landmark) => (
+                `${landmark.normalized_x * 100},${landmark.normalized_y * 100}`
+              ))
+              .join(" ");
+            return points ? (
+              <polyline
+                key={`${wicketEnd}-${kind}`}
+                points={points}
+                fill="none"
+                stroke={kind === "base" ? BASE_COLOR : TOP_COLOR}
+                strokeWidth="0.35"
+                strokeDasharray="1 0.7"
+                vectorEffect="non-scaling-stroke"
+              />
+            ) : null;
+          })
+        ))}
+        {primary
+          .filter((landmark): landmark is WicketPoseLandmarkInput => (
+            "point_type" in landmark && landmark.point_type === "base"
+          ))
+          .map((base) => {
+            const top = primary.find((candidate) => (
+              "point_type" in candidate
+              && candidate.point_type === "top"
+              && candidate.wicket_end === base.wicket_end
+              && candidate.stump_position === base.stump_position
+            ));
+            return top ? (
+              <line
+                key={`${base.id}-vertical`}
+                x1={base.normalized_x * 100}
+                y1={base.normalized_y * 100}
+                x2={top.normalized_x * 100}
+                y2={top.normalized_y * 100}
+                stroke="#ffffff"
+                strokeOpacity="0.65"
+                strokeWidth="0.25"
+                strokeDasharray="0.7 0.6"
+                vectorEffect="non-scaling-stroke"
+              />
+            ) : null;
+          })}
       </svg>
 
       {landmarks.map((landmark) => {
-        const groundReference = landmark.landmark_type === "ground_control";
+        const kind = pointType(landmark);
+        const groundReference = kind === "ground";
         const color = groundReference
           ? "#ff5ebe"
-          : END_COLORS[
-              landmark.wicket_end === "striker" ? "striker" : "bowler"
-            ];
+          : kind === "top"
+            ? TOP_COLOR
+            : BASE_COLOR;
         const sideLabel = landmark.id.includes("_left_")
           ? "L"
           : landmark.id.includes("_middle_")
@@ -160,21 +202,28 @@ export function CalibrationV2LandmarkEditor({
             : "R";
         const shortLabel = groundReference
           ? `${landmark.id.startsWith("bowler_") ? "B" : "S"}${sideLabel}`
-          : sideLabel;
+          : "point_type" in landmark
+            ? `${kind === "top" ? "T" : "B"}-${sideLabel}`
+            : sideLabel;
+        const unavailable = (
+          "visibility" in landmark
+          && ["occluded", "unavailable"].includes(landmark.visibility)
+        );
         return (
           <button
             key={landmark.id}
             type="button"
-            disabled={disabled}
+            disabled={disabled || unavailable}
             aria-label={`Move ${landmark.label}`}
-            data-landmark-kind={landmark.landmark_type}
+            data-landmark-kind={kind}
             className={`group absolute h-8 w-8 -translate-x-1/2 -translate-y-1/2 cursor-grab border-2 border-black/80 text-[10px] font-black text-black shadow-[0_0_0_2px_rgba(255,255,255,.75)] active:cursor-grabbing disabled:cursor-default disabled:opacity-60 ${
-              groundReference ? "rounded-md" : "rounded-full"
+              groundReference || kind === "top" ? "rounded-md" : "rounded-full"
             }`}
             style={{
               left: `${landmark.normalized_x * 100}%`,
               top: `${landmark.normalized_y * 100}%`,
               backgroundColor: color,
+              opacity: unavailable ? 0.35 : 1,
               touchAction: "none"
             }}
             onPointerDown={(event) => startDrag(event, landmark.id)}

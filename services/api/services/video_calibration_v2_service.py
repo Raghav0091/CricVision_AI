@@ -211,6 +211,8 @@ def confirm_video_calibration_v2(
         request.landmarks,
         request.image_left_right_convention,
     )
+    if request.ground_reference_mode == "skip":
+        optional_inputs = []
     world_points = stump_base_world_points(geometry)
     primary_landmarks = [
         _confirmed_primary_landmark(
@@ -325,6 +327,12 @@ def confirm_video_calibration_v2(
         image_width=image_width,
         image_height=image_height,
         landmark_semantics_confirmed=request.landmark_semantics_confirmed,
+        ground_reference_mode=request.ground_reference_mode,
+        ground_transform_reason=(
+            "trusted_metric_ground_references_not_available"
+            if request.ground_reference_mode == "skip"
+            else None
+        ),
         created_at=created_at,
         updated_at=now,
         user_note=request.user_note,
@@ -761,6 +769,11 @@ def _calculate_ground_homography(
     ]
     inlier_count = len(inlier_ids)
     inlier_ratio = inlier_count / len(landmarks)
+    diagnostics = _reprojection_diagnostics(
+        landmarks,
+        ground_to_image,
+        dict(zip(used_landmark_ids, inlier_flags, strict=True)),
+    )
     if use_ransac and (
         inlier_count < 4 or inlier_ratio < MIN_RANSAC_INLIER_RATIO
     ):
@@ -770,7 +783,19 @@ def _calculate_ground_homography(
                 f"({inlier_count}/{len(landmarks)} inliers)."
             )
         )
-        return _unavailable_homography(), _quality_without_transform(
+        outlier_ids = [
+            landmark.id
+            for landmark, is_inlier in zip(
+                landmarks,
+                inlier_flags,
+                strict=True,
+            )
+            if not is_inlier
+        ]
+        return _rejected_ransac_homography(
+            condition_number,
+            inlier_ids,
+        ), _quality_without_transform(
             landmark_coverage,
             len(landmarks),
             len(optional_landmarks),
@@ -782,15 +807,12 @@ def _calculate_ground_homography(
             "unstable",
             warnings,
             primary_landmarks,
-            used_landmark_ids,
+            inlier_ids,
             landmark_sources,
+            diagnostics=diagnostics,
+            ignored_landmark_ids=outlier_ids,
         )
 
-    diagnostics = _reprojection_diagnostics(
-        landmarks,
-        ground_to_image,
-        dict(zip(used_landmark_ids, inlier_flags, strict=True)),
-    )
     errors = [
         diagnostic.error_px
         for diagnostic in diagnostics
@@ -968,7 +990,16 @@ def _quality_without_transform(
     primary_landmarks: list[CalibrationLandmark],
     used_landmark_ids: list[str],
     landmark_sources: dict[str, int],
+    diagnostics: list[ReprojectionDiagnostic] | None = None,
+    ignored_landmark_ids: list[str] | None = None,
 ) -> CalibrationQualityV2:
+    diagnostics = diagnostics or []
+    errors = [diagnostic.error_px for diagnostic in diagnostics]
+    rmse = (
+        math.sqrt(sum(error * error for error in errors) / len(errors))
+        if errors
+        else None
+    )
     return CalibrationQualityV2(
         landmark_coverage=landmark_coverage,
         usable_landmarks=usable_landmarks,
@@ -978,9 +1009,15 @@ def _quality_without_transform(
         ),
         landmark_spread_score=round(landmark_spread_score, 6),
         world_coverage=round(world_coverage, 6),
-        reprojection_rmse_px=None,
-        max_reprojection_error_px=None,
-        median_reprojection_error_px=None,
+        reprojection_rmse_px=round(rmse, 6) if rmse is not None else None,
+        max_reprojection_error_px=(
+            round(max(errors), 6) if errors else None
+        ),
+        median_reprojection_error_px=(
+            round(float(np.median(np.asarray(errors))), 6)
+            if errors
+            else None
+        ),
         normalized_reprojection_rmse=None,
         geometry_condition=(
             geometry_condition
@@ -1002,12 +1039,12 @@ def _quality_without_transform(
             for landmark in primary_landmarks
         ),
         used_landmark_ids=used_landmark_ids,
-        ignored_landmark_ids=[],
+        ignored_landmark_ids=ignored_landmark_ids or [],
         landmark_sources=landmark_sources,
         warnings=_deduplicate(warnings),
         quality_grade="insufficient_geometry",
         overall_confidence=0.0,
-        reprojection_diagnostics=[],
+        reprojection_diagnostics=diagnostics,
     )
 
 
@@ -1551,6 +1588,7 @@ def _shared_geometry(
         pitch_length_m=geometry.pitch_length_m,
         wicket_width_m=geometry.wicket_width_m,
         wicket_height_m=geometry.wicket_height_m,
+        stump_diameter_m=geometry.stump_diameter_m,
         pitch_width_m=geometry.pitch_width_m,
         popping_crease_distance_m=geometry.popping_crease_distance_m,
     )
@@ -1722,6 +1760,30 @@ def _unavailable_homography() -> GroundHomographyResult:
         ground_to_image_homography=None,
         determinant=None,
         condition_number=None,
+        image_convention="pixel_uv",
+        ground_convention="pitch_xy_metres_z0",
+    )
+
+
+def _rejected_ransac_homography(
+    condition_number: float,
+    inlier_ids: list[str],
+) -> GroundHomographyResult:
+    """Keep RANSAC evidence while withholding the rejected transform."""
+    return GroundHomographyResult(
+        transform_available=False,
+        image_to_ground_homography=None,
+        ground_to_image_homography=None,
+        determinant=None,
+        condition_number=(
+            round(condition_number, 6)
+            if math.isfinite(condition_number)
+            else None
+        ),
+        estimation_method="ransac",
+        ransac_reprojection_threshold_px=RANSAC_REPROJECTION_THRESHOLD_PX,
+        ransac_inlier_count=len(inlier_ids),
+        ransac_inlier_landmark_ids=inlier_ids,
         image_convention="pixel_uv",
         ground_convention="pitch_xy_metres_z0",
     )
