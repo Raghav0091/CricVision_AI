@@ -189,11 +189,21 @@ export type VideoAnalysisPreparedResponse = {
   height: number;
   codec?: string | null;
   reference_frame_index: number;
+  reference_frame_selection?: {
+    strategy?: string;
+    window_scanned?: number;
+    window_limit?: number;
+    selected_index?: number;
+    score?: number;
+    reason?: string;
+  } | null;
   original_video_url: string;
   reference_frame_url: string;
   calibration_status?: "confirmed" | null;
   calibration_url?: string | null;
   calibration_overlay_url?: string | null;
+  visual_calibration_quality?: "READY" | "WEAK" | "FAILED" | null;
+  visual_calibration_mode?: "automatic_visual" | null;
   calibration_v2_status?:
     | "confirmed"
     | "ready"
@@ -315,6 +325,7 @@ export type WicketCalibration = {
   box: NormalizedBox;
   center: NormalizedPoint;
   bottom_center: NormalizedPoint;
+  approximate_wicket_base_reference?: NormalizedPoint | null;
 };
 
 
@@ -329,10 +340,19 @@ export type PitchGeometry = {
 };
 
 
+export type VisualCalibrationQuality = "READY" | "WEAK" | "FAILED";
+
+
 export type VideoCalibrationDetectionResponse = {
   success: boolean;
-  status: "candidates_ready" | "manual_required" | "stump_detector_missing" | "stump_detector_error";
+  status:
+    | "candidates_ready"
+    | "manual_required"
+    | "detection_incomplete"
+    | "stump_detector_missing"
+    | "stump_detector_error";
   analysis_id: string;
+  reference_frame_index: number;
   reference_frame_url: string;
   image_width: number;
   image_height: number;
@@ -341,6 +361,10 @@ export type VideoCalibrationDetectionResponse = {
   provisional_non_striker_wicket?: WicketCalibration | null;
   pitch_geometry?: PitchGeometry | null;
   model_path_used: string;
+  mode?: "automatic_visual";
+  quality?: VisualCalibrationQuality;
+  quality_reasons?: string[];
+  assignment_warning?: string | null;
   warning?: string | null;
   message: string;
 };
@@ -368,6 +392,10 @@ export type ConfirmedVideoCalibrationResponse = {
   image_width: number;
   image_height: number;
   model_path_used?: string | null;
+  mode?: "automatic_visual";
+  quality?: VisualCalibrationQuality;
+  quality_reasons?: string[];
+  assignment_warning?: string | null;
   striker_wicket: WicketCalibration;
   non_striker_wicket: WicketCalibration;
   pitch_geometry: PitchGeometry;
@@ -822,10 +850,14 @@ function withBrowserSafeCameraPoseUrls(
 
 
 export async function detectVideoAnalysisCalibration(
-  analysisId: string
+  analysisId: string,
+  options?: { refreshEarlyReference?: boolean }
 ): Promise<VideoCalibrationDetectionResponse> {
+  const params = options?.refreshEarlyReference
+    ? "?refresh_early_reference=true"
+    : "";
   const response = await fetch(
-    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/calibration/detect`,
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/calibration/detect${params}`,
     { method: "POST" }
   );
   if (!response.ok) {

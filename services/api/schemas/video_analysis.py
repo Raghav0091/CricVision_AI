@@ -46,6 +46,8 @@ class WicketCalibration(StrictGeometryModel):
     box: NormalizedBox
     center: NormalizedPoint
     bottom_center: NormalizedPoint
+    # Honest alias for the approximate bbox bottom-centre used as a soft base.
+    approximate_wicket_base_reference: NormalizedPoint | None = None
 
 
 class WicketCalibrationInput(StrictGeometryModel):
@@ -65,6 +67,10 @@ class PitchGeometry(StrictGeometryModel):
     corridor_width_multiplier: float = Field(ge=0.7, le=1.5)
 
 
+VisualCalibrationQuality = Literal["READY", "WEAK", "FAILED"]
+VisualCalibrationMode = Literal["automatic_visual"]
+
+
 class VideoAnalysisPreparedResponse(BaseModel):
     success: bool
     analysis_id: str
@@ -81,11 +87,14 @@ class VideoAnalysisPreparedResponse(BaseModel):
     height: int
     codec: str | None = None
     reference_frame_index: int
+    reference_frame_selection: dict[str, object] | None = None
     original_video_url: str
     reference_frame_url: str
     calibration_status: Literal["confirmed"] | None = None
     calibration_url: str | None = None
     calibration_overlay_url: str | None = None
+    visual_calibration_quality: VisualCalibrationQuality | None = None
+    visual_calibration_mode: VisualCalibrationMode | None = None
     calibration_v2_status: Literal[
         "confirmed",
         "ready",
@@ -161,10 +170,12 @@ class VideoCalibrationDetectionResponse(BaseModel):
     status: Literal[
         "candidates_ready",
         "manual_required",
+        "detection_incomplete",
         "stump_detector_missing",
         "stump_detector_error",
     ]
     analysis_id: str
+    reference_frame_index: int
     reference_frame_url: str
     image_width: int
     image_height: int
@@ -173,6 +184,10 @@ class VideoCalibrationDetectionResponse(BaseModel):
     provisional_non_striker_wicket: WicketCalibration | None = None
     pitch_geometry: PitchGeometry | None = None
     model_path_used: str
+    mode: VisualCalibrationMode = "automatic_visual"
+    quality: VisualCalibrationQuality = "FAILED"
+    quality_reasons: list[str] = Field(default_factory=list)
+    assignment_warning: str | None = None
     warning: str | None = None
     message: str
 
@@ -198,6 +213,10 @@ class ConfirmedVideoCalibrationResponse(BaseModel):
     image_width: int
     image_height: int
     model_path_used: str | None = None
+    mode: VisualCalibrationMode = "automatic_visual"
+    quality: VisualCalibrationQuality = "READY"
+    quality_reasons: list[str] = Field(default_factory=list)
+    assignment_warning: str | None = None
     striker_wicket: WicketCalibration
     non_striker_wicket: WicketCalibration
     pitch_geometry: PitchGeometry

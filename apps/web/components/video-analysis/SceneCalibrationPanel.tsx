@@ -8,10 +8,9 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import {
   confirmVideoAnalysisCalibration,
   detectVideoAnalysisCalibration,
-  type CalibrationV2Result,
   type ConfirmedVideoCalibrationResponse,
   type VideoAnalysisPreparedResponse,
-  type WicketCameraPoseResult,
+  type VisualCalibrationQuality,
   type WicketCalibration
 } from "@/lib/api";
 
@@ -21,38 +20,31 @@ import {
   wicketDistanceWarning,
   wicketFromBox
 } from "./CalibrationCanvas";
-import { CalibrationV2Panel } from "./CalibrationV2Panel";
-import { CalibrationV2BPanel } from "./CalibrationV2BPanel";
 
 
-type CalibrationPhase = "idle" | "detecting" | "editing" | "saving" | "saved";
-type DetectedPositions = {
-  striker: WicketCalibration | null;
-  nonStriker: WicketCalibration | null;
-};
+type CalibrationPhase =
+  | "detecting"
+  | "review"
+  | "saving"
+  | "accepted"
+  | "failed";
 
 
 export function SceneCalibrationPanel({
   analysis,
   initialCalibration,
-  initialCalibrationV2,
-  initialCameraPose,
   onCalibrated,
-  onCalibratedV2,
-  onCameraPoseSolved,
-  onDirty
+  onDirty,
+  onReferenceFrameUpdated
 }: {
   analysis: VideoAnalysisPreparedResponse;
   initialCalibration: ConfirmedVideoCalibrationResponse | null;
-  initialCalibrationV2: CalibrationV2Result | null;
-  initialCameraPose: WicketCameraPoseResult | null;
   onCalibrated: (calibration: ConfirmedVideoCalibrationResponse) => void;
-  onCalibratedV2: (calibration: CalibrationV2Result) => void;
-  onCameraPoseSolved: (result: WicketCameraPoseResult) => void;
   onDirty: () => void;
+  onReferenceFrameUpdated?: (referenceFrameIndex: number, referenceFrameUrl: string) => void;
 }) {
   const [phase, setPhase] = useState<CalibrationPhase>(
-    initialCalibration ? "saved" : "idle"
+    initialCalibration ? "accepted" : "detecting"
   );
   const [striker, setStriker] = useState<WicketCalibration | null>(
     initialCalibration?.striker_wicket ?? null
@@ -60,19 +52,20 @@ export function SceneCalibrationPanel({
   const [nonStriker, setNonStriker] = useState<WicketCalibration | null>(
     initialCalibration?.non_striker_wicket ?? null
   );
-  const [detectedPositions, setDetectedPositions] = useState<DetectedPositions>({
-    striker: null,
-    nonStriker: null
-  });
-  const [corridorWidth, setCorridorWidth] = useState(
-    initialCalibration?.pitch_geometry.corridor_width_multiplier ?? 1
-  );
   const [message, setMessage] = useState(
     initialCalibration?.message
-      ?? "Run stump detection or place both wicket boxes manually."
+      ?? "Detecting wickets on the early reference frame…"
   );
   const [error, setError] = useState<string | null>(null);
-  const [backendWarning, setBackendWarning] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(
+    initialCalibration?.assignment_warning ?? null
+  );
+  const [quality, setQuality] = useState<VisualCalibrationQuality | null>(
+    initialCalibration?.quality ?? null
+  );
+  const [qualityReasons, setQualityReasons] = useState<string[]>(
+    initialCalibration?.quality_reasons ?? []
+  );
   const [candidateCount, setCandidateCount] = useState(0);
   const [modelPath, setModelPath] = useState<string | null>(
     initialCalibration?.model_path_used ?? null
@@ -86,88 +79,100 @@ export function SceneCalibrationPanel({
   const [referenceUrl, setReferenceUrl] = useState(
     initialCalibration?.reference_frame_url ?? analysis.reference_frame_url
   );
+  const [referenceFrameIndex, setReferenceFrameIndex] = useState(
+    initialCalibration?.reference_frame_index ?? analysis.reference_frame_index
+  );
   const [savedCalibration, setSavedCalibration] = useState(initialCalibration);
-  const [userNote, setUserNote] = useState(initialCalibration?.user_note ?? "");
+
+  const pitchGeometry = useMemo(
+    () => calculateApproximatePitchGeometry(striker, nonStriker, 1),
+    [striker, nonStriker]
+  );
+  const proximityWarning = wicketDistanceWarning(striker, nonStriker);
+  const displayWarning = proximityWarning ?? warning;
+  const bothWicketsReady = striker !== null && nonStriker !== null;
+  const canAccept = bothWicketsReady && quality !== "FAILED" && !proximityWarning;
+
+  useEffect(() => {
+    if (initialCalibration) {
+      setPhase("accepted");
+      setStriker(initialCalibration.striker_wicket);
+      setNonStriker(initialCalibration.non_striker_wicket);
+      setMessage(initialCalibration.message);
+      setQuality(initialCalibration.quality ?? "READY");
+      setQualityReasons(initialCalibration.quality_reasons ?? []);
+      setWarning(initialCalibration.assignment_warning ?? null);
+      setModelPath(initialCalibration.model_path_used ?? null);
+      setImageWidth(initialCalibration.image_width);
+      setImageHeight(initialCalibration.image_height);
+      setReferenceUrl(initialCalibration.reference_frame_url);
+      setReferenceFrameIndex(initialCalibration.reference_frame_index);
+      setSavedCalibration(initialCalibration);
+      return;
+    }
+    // Auto-detect only for a fresh prepared analysis (no accepted calibration yet).
+    void runDetection(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [analysis.analysis_id]);
 
   useEffect(() => {
     if (!initialCalibration) return;
-    setPhase("saved");
+    setPhase("accepted");
     setStriker(initialCalibration.striker_wicket);
     setNonStriker(initialCalibration.non_striker_wicket);
-    setCorridorWidth(
-      initialCalibration.pitch_geometry.corridor_width_multiplier
-    );
     setMessage(initialCalibration.message);
+    setQuality(initialCalibration.quality ?? "READY");
+    setQualityReasons(initialCalibration.quality_reasons ?? []);
+    setWarning(initialCalibration.assignment_warning ?? null);
     setModelPath(initialCalibration.model_path_used ?? null);
     setImageWidth(initialCalibration.image_width);
     setImageHeight(initialCalibration.image_height);
     setReferenceUrl(initialCalibration.reference_frame_url);
+    setReferenceFrameIndex(initialCalibration.reference_frame_index);
     setSavedCalibration(initialCalibration);
-    setUserNote(initialCalibration.user_note ?? "");
   }, [initialCalibration]);
 
-  const pitchGeometry = useMemo(
-    () => calculateApproximatePitchGeometry(striker, nonStriker, corridorWidth),
-    [striker, nonStriker, corridorWidth]
-  );
-  const proximityWarning = wicketDistanceWarning(striker, nonStriker);
-  const warning = proximityWarning ?? backendWarning;
-  const bothWicketsReady = striker !== null && nonStriker !== null;
-
-  async function runDetection() {
+  async function runDetection(refreshEarlyReference: boolean) {
     setPhase("detecting");
     setError(null);
-    setBackendWarning(null);
+    setWarning(null);
+    setSavedCalibration(null);
+    onDirty();
     try {
-      const result = await detectVideoAnalysisCalibration(analysis.analysis_id);
+      const result = await detectVideoAnalysisCalibration(
+        analysis.analysis_id,
+        { refreshEarlyReference }
+      );
       const nextStriker = result.provisional_striker_wicket ?? null;
       const nextNonStriker = result.provisional_non_striker_wicket ?? null;
       setStriker(nextStriker);
       setNonStriker(nextNonStriker);
-      setDetectedPositions({
-        striker: nextStriker,
-        nonStriker: nextNonStriker
-      });
       setCandidateCount(result.candidates.length);
       setModelPath(result.model_path_used);
       setImageWidth(result.image_width);
       setImageHeight(result.image_height);
-      setReferenceUrl(result.reference_frame_url);
+      setReferenceUrl(
+        `${result.reference_frame_url}${result.reference_frame_url.includes("?") ? "&" : "?"}v=${result.reference_frame_index}-${Date.now()}`
+      );
+      setReferenceFrameIndex(result.reference_frame_index);
+      onReferenceFrameUpdated?.(
+        result.reference_frame_index,
+        result.reference_frame_url
+      );
       setMessage(result.message);
-      setBackendWarning(result.warning ?? null);
-      setSavedCalibration(null);
-      onDirty();
-      setPhase("editing");
+      setWarning(result.assignment_warning ?? result.warning ?? null);
+      setQuality(result.quality ?? "FAILED");
+      setQualityReasons(result.quality_reasons ?? []);
+      setPhase(
+        nextStriker && nextNonStriker && result.quality !== "FAILED"
+          ? "review"
+          : "failed"
+      );
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Stump detection failed.");
-      setPhase("editing");
+      setError(caught instanceof Error ? caught.message : "Wicket detection failed.");
+      setQuality("FAILED");
+      setPhase("failed");
     }
-  }
-
-  function addManualWicket(label: "striker" | "non_striker") {
-    const box = label === "striker"
-      ? { x: 0.46, y: 0.28, width: 0.08, height: 0.18 }
-      : { x: 0.39, y: 0.62, width: 0.18, height: 0.28 };
-    const wicket = wicketFromBox(label, "manual", null, box);
-    if (label === "striker") setStriker(wicket);
-    else setNonStriker(wicket);
-    setBackendWarning(null);
-    setMessage("Manual wicket box added. Move and resize it around the complete wicket set.");
-    setSavedCalibration(null);
-    onDirty();
-    setPhase("editing");
-  }
-
-  function changeWicket(
-    label: "striker" | "non_striker",
-    wicket: WicketCalibration
-  ) {
-    if (label === "striker") setStriker(wicket);
-    else setNonStriker(wicket);
-    setBackendWarning(null);
-    setSavedCalibration(null);
-    onDirty();
-    if (phase === "saved") setPhase("editing");
   }
 
   function swapWicketEnds() {
@@ -186,34 +191,21 @@ export function SceneCalibrationPanel({
     ));
     setSavedCalibration(null);
     onDirty();
-    setPhase("editing");
+    setPhase("review");
+    setMessage("Wicket ends swapped. Review the overlay, then Accept.");
   }
 
-  function resetDetectedPositions() {
-    setStriker(detectedPositions.striker);
-    setNonStriker(detectedPositions.nonStriker);
-    setCorridorWidth(1);
-    setBackendWarning(null);
-    setSavedCalibration(null);
-    onDirty();
-    setPhase("editing");
-  }
-
-  function changeCorridorWidth(value: number) {
-    const nextValue = Math.max(0.7, Math.min(1.5, Math.round(value * 20) / 20));
-    setCorridorWidth(nextValue);
-    setSavedCalibration(null);
-    onDirty();
-    if (phase === "saved") setPhase("editing");
-  }
-
-  async function confirmCalibration() {
+  async function acceptCalibration() {
     if (!striker || !nonStriker) {
-      setError("Place both wicket boxes before confirming calibration.");
+      setError("Both wickets must be detected before accepting calibration.");
       return;
     }
     if (proximityWarning) {
       setError(proximityWarning);
+      return;
+    }
+    if (quality === "FAILED") {
+      setError("Calibration quality is FAILED. Press Redetect first.");
       return;
     }
     setPhase("saving");
@@ -235,46 +227,57 @@ export function SceneCalibrationPanel({
             confidence: nonStriker.confidence ?? null,
             box: nonStriker.box
           },
-          corridor_width_multiplier: corridorWidth,
-          user_note: userNote.trim() || null
+          corridor_width_multiplier: 1
         }
       );
       setStriker(confirmed.striker_wicket);
       setNonStriker(confirmed.non_striker_wicket);
-      setCorridorWidth(confirmed.pitch_geometry.corridor_width_multiplier);
       setMessage(confirmed.message);
+      setQuality(confirmed.quality ?? "READY");
+      setQualityReasons(confirmed.quality_reasons ?? []);
+      setWarning(confirmed.assignment_warning ?? null);
       setSavedCalibration(confirmed);
-      setPhase("saved");
+      setPhase("accepted");
       onCalibrated(confirmed);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Calibration could not be saved.");
-      setPhase("editing");
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Calibration could not be accepted."
+      );
+      setPhase("review");
     }
   }
 
-  const hasDetectedReset = detectedPositions.striker !== null
-    || detectedPositions.nonStriker !== null;
+  const qualityTone = quality === "READY"
+    ? "good"
+    : quality === "WEAK"
+      ? "warn"
+      : "warn";
 
   return (
     <Card className="border-[#ffca68]/25">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <StatusBadge
-            label={phase === "saved" ? "Calibration Confirmed" : "Scene Calibration"}
-            tone={phase === "saved" ? "good" : "neutral"}
+            label={
+              phase === "accepted"
+                ? "Calibration Accepted"
+                : phase === "detecting"
+                  ? "Detecting Wickets"
+                  : "Calibration Detected"
+            }
+            tone={phase === "accepted" ? "good" : "neutral"}
           />
-          <h2 className="mt-4 text-2xl font-black">Calibrate both wicket ends</h2>
+          <h2 className="mt-4 text-2xl font-black">Automatic Visual Calibration</h2>
           <p className="mt-3 max-w-3xl text-sm leading-6 text-white/55">
-            Place one box around each complete wicket set. Adjust the boxes so they tightly contain the three stumps and bails.
+            Approximate 2D scene calibration from an early reference frame.
+            Soft pitch context only — not precise metric 3D / DRS / Hawk-Eye.
           </p>
         </div>
-        <Button
-          variant="secondary"
-          disabled={phase === "detecting" || phase === "saving"}
-          onClick={() => void runDetection()}
-        >
-          {phase === "detecting" ? "Running Stump Detection..." : "Run Stump Detection"}
-        </Button>
+        {quality && (
+          <StatusBadge label={`Quality ${quality}`} tone={qualityTone} />
+        )}
       </div>
 
       {error && (
@@ -285,13 +288,21 @@ export function SceneCalibrationPanel({
       <div className="mt-5 rounded-xl border border-white/10 bg-black/20 p-4">
         <p className="text-sm leading-6 text-white/65">{message}</p>
         <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs text-white/35">
+          <span>Reference frame {referenceFrameIndex}</span>
           <span>{candidateCount} detector candidate{candidateCount === 1 ? "" : "s"}</span>
           {modelPath && <span>Model: {modelPath}</span>}
         </div>
+        {qualityReasons.length > 0 && (
+          <ul className="mt-3 list-disc space-y-1 pl-5 text-xs text-white/45">
+            {qualityReasons.map((reason) => (
+              <li key={reason}>{reason}</li>
+            ))}
+          </ul>
+        )}
       </div>
-      {warning && (
+      {displayWarning && (
         <p className="mt-4 rounded-xl border border-[#ffca68]/35 bg-[#ffca68]/10 p-4 text-sm text-[#ffe0a3]">
-          {warning}
+          {displayWarning}
         </p>
       )}
 
@@ -303,123 +314,46 @@ export function SceneCalibrationPanel({
           striker={striker}
           nonStriker={nonStriker}
           pitchGeometry={pitchGeometry}
+          readOnly
           disabled={phase === "detecting" || phase === "saving"}
-          onWicketChange={changeWicket}
         />
       </div>
 
-      <div className="mt-6 grid gap-4 lg:grid-cols-[1fr_18rem]">
-        <div className="grid gap-3 sm:grid-cols-2">
-          <WicketSummary
-            title="Striker Wicket"
-            wicket={striker}
-            color="#ffca68"
-            onAdd={() => addManualWicket("striker")}
-          />
-          <WicketSummary
-            title="Non-Striker Wicket"
-            wicket={nonStriker}
-            color="#50dcff"
-            onAdd={() => addManualWicket("non_striker")}
-          />
-        </div>
-        <div className="rounded-xl border border-white/10 bg-black/20 p-4">
-          <label htmlFor="corridor-width" className="text-sm font-bold">
-            Pitch Corridor Width
-          </label>
-          <div className="mt-3 flex items-center gap-3">
-            <button
-              type="button"
-              aria-label="Decrease Pitch Corridor Width"
-              className="h-9 w-9 shrink-0 rounded-lg border border-white/15 bg-white/5 text-lg font-black hover:bg-white/10 disabled:opacity-40"
-              disabled={!bothWicketsReady || phase === "saving" || corridorWidth <= 0.7}
-              onClick={() => changeCorridorWidth(corridorWidth - 0.05)}
-            >
-              −
-            </button>
-            <input
-              id="corridor-width"
-              className="w-full accent-[#d5ff6b]"
-              type="range"
-              min="0.7"
-              max="1.5"
-              step="0.05"
-              value={corridorWidth}
-              disabled={!bothWicketsReady || phase === "saving"}
-              onChange={(event) => changeCorridorWidth(Number(event.target.value))}
-            />
-            <button
-              type="button"
-              aria-label="Increase Pitch Corridor Width"
-              className="h-9 w-9 shrink-0 rounded-lg border border-white/15 bg-white/5 text-lg font-black hover:bg-white/10 disabled:opacity-40"
-              disabled={!bothWicketsReady || phase === "saving" || corridorWidth >= 1.5}
-              onClick={() => changeCorridorWidth(corridorWidth + 0.05)}
-            >
-              +
-            </button>
-            <strong className="w-12 text-right text-sm text-lime">
-              {corridorWidth.toFixed(2)}×
-            </strong>
-          </div>
-          <p className="mt-3 text-xs leading-5 text-white/35">
-            Approximate 2D geometry only. Confirm that the trapezoid visually covers the pitch.
-          </p>
-        </div>
-      </div>
-
-      <div className="mt-5 grid gap-3 sm:grid-cols-2">
+      <div className="mt-6 grid gap-3 sm:grid-cols-3">
+        <Button
+          disabled={!canAccept || phase === "detecting" || phase === "saving"}
+          onClick={() => void acceptCalibration()}
+        >
+          {phase === "saving"
+            ? "Accepting…"
+            : phase === "accepted"
+              ? "Accepted"
+              : "Accept"}
+        </Button>
         <Button
           variant="secondary"
-          disabled={!bothWicketsReady || phase === "saving"}
+          disabled={phase === "detecting" || phase === "saving"}
+          onClick={() => void runDetection(true)}
+        >
+          {phase === "detecting" ? "Detecting…" : "Redetect"}
+        </Button>
+        <Button
+          variant="secondary"
+          disabled={!bothWicketsReady || phase === "detecting" || phase === "saving"}
           onClick={swapWicketEnds}
         >
           Swap Wicket Ends
         </Button>
-        <Button
-          variant="secondary"
-          disabled={!hasDetectedReset || phase === "saving"}
-          onClick={resetDetectedPositions}
-        >
-          Reset to Detected Positions
-        </Button>
       </div>
-
-      <label htmlFor="calibration-note" className="mt-6 block text-sm font-bold">
-        Calibration note <span className="font-normal text-white/35">(optional)</span>
-      </label>
-      <textarea
-        id="calibration-note"
-        className="mt-2 min-h-20 w-full rounded-xl border border-white/10 bg-black/25 p-3 text-sm outline-none transition focus:border-lime/40"
-        maxLength={1000}
-        value={userNote}
-        placeholder="Record any manual adjustment or camera setup detail."
-        onChange={(event) => {
-          setUserNote(event.target.value);
-          setSavedCalibration(null);
-          onDirty();
-          if (phase === "saved") setPhase("editing");
-        }}
-      />
-
-      <Button
-        className="mt-5 w-full sm:w-auto"
-        disabled={!bothWicketsReady || Boolean(proximityWarning) || phase === "saving"}
-        onClick={() => void confirmCalibration()}
-      >
-        {phase === "saving"
-          ? "Saving Scene Calibration..."
-          : phase === "saved"
-            ? "Save Calibration Changes"
-            : "Confirm Scene Calibration"}
-      </Button>
 
       {savedCalibration && (
         <div className="mt-7 rounded-xl border border-lime/20 bg-lime/[0.04] p-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <p className="font-black text-lime">Scene calibration confirmed</p>
+              <p className="font-black text-lime">Automatic visual calibration accepted</p>
               <p className="mt-1 text-xs text-white/40">
-                Axis uses the bottom-centre of both wicket boxes.
+                Approximate wicket base references use bbox bottom-centres.
+                Soft scene context for later tracking — not a hard ball-rejection boundary.
               </p>
             </div>
             <a
@@ -435,57 +369,10 @@ export function SceneCalibrationPanel({
           <img
             className="mt-4 h-auto w-full rounded-lg bg-black object-contain"
             src={`${savedCalibration.calibration_overlay_url}?v=${encodeURIComponent(savedCalibration.updated_at)}`}
-            alt="Confirmed approximate 2D calibration overlay"
+            alt="Accepted automatic visual calibration overlay"
           />
         </div>
       )}
-
-      <CalibrationV2Panel
-        analysis={analysis}
-        initialCalibration={initialCalibrationV2}
-        onCalibrated={onCalibratedV2}
-      />
-      <CalibrationV2BPanel
-        analysis={analysis}
-        initialCameraPose={initialCameraPose}
-        onSolved={onCameraPoseSolved}
-      />
     </Card>
-  );
-}
-
-
-function WicketSummary({
-  title,
-  wicket,
-  color,
-  onAdd
-}: {
-  title: string;
-  wicket: WicketCalibration | null;
-  color: string;
-  onAdd: () => void;
-}) {
-  return (
-    <div className="rounded-xl border border-white/10 bg-black/20 p-4">
-      <p className="font-black" style={{ color }}>{title}</p>
-      {wicket ? (
-        <>
-          <p className="mt-2 text-xs uppercase tracking-[0.1em] text-white/35">
-            {wicket.source}
-            {wicket.confidence != null && ` · ${(wicket.confidence * 100).toFixed(1)}% confidence`}
-          </p>
-          <p className="mt-3 font-mono text-[11px] leading-5 text-white/45">
-            x {wicket.box.x.toFixed(3)} · y {wicket.box.y.toFixed(3)}
-            <br />
-            w {wicket.box.width.toFixed(3)} · h {wicket.box.height.toFixed(3)}
-          </p>
-        </>
-      ) : (
-        <Button className="mt-3 w-full" variant="secondary" onClick={onAdd}>
-          Add {title} Box
-        </Button>
-      )}
-    </div>
   );
 }

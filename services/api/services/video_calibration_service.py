@@ -17,6 +17,7 @@ from ..schemas.video_analysis import (
     PitchGeometry,
     VideoCalibrationConfirmationRequest,
     VideoCalibrationDetectionResponse,
+    VisualCalibrationQuality,
     WicketCalibration,
     WicketCalibrationInput,
     WicketCandidate,
@@ -27,9 +28,12 @@ from .stump_detector_service import (
     detect_stump_candidates,
 )
 from .video_analysis_service import (
+    EARLY_REFERENCE_WINDOW,
     VIDEO_ANALYSIS_ROOT,
     VideoAnalysisServiceError,
     load_video_analysis,
+    replace_reference_frame,
+    _reference_frame_quality,
 )
 
 
@@ -42,8 +46,14 @@ WICKET_PROXIMITY_WARNING = (
 
 def detect_video_calibration(
     analysis_id: str,
+    *,
+    refresh_early_reference: bool = False,
 ) -> VideoCalibrationDetectionResponse:
     analysis = load_video_analysis(analysis_id)
+    if refresh_early_reference:
+        _try_refresh_early_reference(analysis_id, analysis)
+        analysis = load_video_analysis(analysis_id)
+
     reference_path = _reference_path(analysis_id)
     image = _open_reference_image(reference_path)
     image_width, image_height = image.size
@@ -65,10 +75,13 @@ def detect_video_calibration(
 
     striker: WicketCalibration | None = None
     non_striker: WicketCalibration | None = None
+    assignment_warning: str | None = None
     if len(candidates) >= 2:
         pair = _choose_provisional_pair(candidates)
         if pair is not None:
-            striker, non_striker = _assign_provisional_ends(*pair)
+            striker, non_striker, assignment_warning = _assign_provisional_ends(
+                *pair
+            )
     elif len(candidates) == 1:
         only = candidates[0]
         if _near_score(only) >= 0.65:
@@ -81,36 +94,45 @@ def detect_video_calibration(
         if striker is not None and non_striker is not None
         else None
     )
-    warning = (
+    proximity_warning = (
         _wicket_proximity_warning(striker, non_striker)
         if striker is not None and non_striker is not None
         else None
+    )
+    quality, quality_reasons = assess_visual_calibration_quality(
+        striker=striker,
+        non_striker=non_striker,
+        pitch_geometry=pitch_geometry,
+        assignment_warning=assignment_warning,
+        proximity_warning=proximity_warning,
+        detector_success=bool(detection_result.get("success")),
     )
 
     if not detection_result["success"]:
         status = detection_result["status"]
         message = detection_result["message"]
         success = False
-    elif not candidates:
-        status = "manual_required"
-        message = "No wicket detections found. Place both wicket boxes manually."
-        success = True
     elif striker is None or non_striker is None:
-        status = "manual_required"
+        status = "detection_incomplete"
         message = (
-            "Only one usable wicket location was found. "
-            "Place the missing wicket box manually."
+            "Automatic visual calibration could not lock both wickets on the "
+            "early reference frame. Press Redetect to try again."
         )
         success = True
     else:
         status = "candidates_ready"
-        message = "Review and adjust both wicket locations before confirming."
+        message = (
+            "Automatic visual calibration detected both wickets. "
+            "Review the overlay, then Accept, Redetect, or Swap Wicket Ends."
+        )
         success = True
 
+    warning = proximity_warning or assignment_warning
     return VideoCalibrationDetectionResponse(
         success=success,
         status=status,
         analysis_id=analysis_id,
+        reference_frame_index=analysis.reference_frame_index,
         reference_frame_url=analysis.reference_frame_url,
         image_width=image_width,
         image_height=image_height,
@@ -119,6 +141,10 @@ def detect_video_calibration(
         provisional_non_striker_wicket=non_striker,
         pitch_geometry=pitch_geometry,
         model_path_used=STUMP_MODEL_RELATIVE_PATH,
+        mode="automatic_visual",
+        quality=quality,
+        quality_reasons=quality_reasons,
+        assignment_warning=assignment_warning,
         warning=warning,
         message=message,
     )
@@ -152,6 +178,22 @@ def confirm_video_calibration(
         non_striker,
         request.corridor_width_multiplier,
     )
+    assignment_warning = _assignment_uncertainty_warning(striker, non_striker)
+    quality, quality_reasons = assess_visual_calibration_quality(
+        striker=striker,
+        non_striker=non_striker,
+        pitch_geometry=pitch_geometry,
+        assignment_warning=assignment_warning,
+        proximity_warning=None,
+        detector_success=True,
+    )
+    if quality == "FAILED":
+        raise VideoAnalysisServiceError(
+            "Automatic visual calibration quality is FAILED. "
+            "Redetect before accepting.",
+            status_code=422,
+        )
+
     analysis_dir = VIDEO_ANALYSIS_ROOT / analysis_id
     calibration_dir = analysis_dir / "calibration"
     calibration_path = calibration_dir / CALIBRATION_FILENAME
@@ -188,11 +230,18 @@ def confirm_video_calibration(
         image_width=image_width,
         image_height=image_height,
         model_path_used=model_path_used,
+        mode="automatic_visual",
+        quality=quality,
+        quality_reasons=quality_reasons,
+        assignment_warning=assignment_warning,
         striker_wicket=striker,
         non_striker_wicket=non_striker,
         pitch_geometry=pitch_geometry,
         user_note=request.user_note,
-        message="Scene calibration confirmed.",
+        message=(
+            "Automatic visual calibration accepted. "
+            "Approximate 2D scene context only — not metric 3D."
+        ),
     )
 
     _save_calibration_overlay(image, confirmed, overlay_path)
@@ -202,6 +251,7 @@ def confirm_video_calibration(
         updated_at=now,
         calibration_url=calibration_url,
         overlay_url=overlay_url,
+        quality=quality,
     )
     return confirmed
 
@@ -402,17 +452,31 @@ def _choose_provisional_pair(
 def _assign_provisional_ends(
     first: WicketCandidate,
     second: WicketCandidate,
-) -> tuple[WicketCalibration, WicketCalibration]:
+) -> tuple[WicketCalibration, WicketCalibration, str | None]:
+    near_first = _near_score(first)
+    near_second = _near_score(second)
     near, far = (
         (first, second)
-        if _near_score(first) >= _near_score(second)
+        if near_first >= near_second
         else (second, first)
     )
-    # ponytail: the Video Analysis camera convention follows the existing
-    # behind-non-striker setup; labels remain explicitly swappable in the UI.
+    # ponytail: rear-camera heuristic — larger/lower ≈ non-striker (near),
+    # smaller/upper ≈ striker (far). Soft only; UI can swap ends.
+    warning = None
+    score_gap = abs(near_first - near_second)
+    size_ratio = max(first.box.width, second.box.width) / max(
+        min(first.box.width, second.box.width),
+        0.000001,
+    )
+    if score_gap < 0.08 or size_ratio < 1.12:
+        warning = (
+            "Wicket-end assignment is uncertain for this camera view. "
+            "Use Swap Wicket Ends if striker/non-striker labels look reversed."
+        )
     return (
         _calibration_from_candidate(far, "striker"),
         _calibration_from_candidate(near, "non_striker"),
+        warning,
     )
 
 
@@ -427,6 +491,7 @@ def _calibration_from_candidate(
         box=candidate.box,
         center=candidate.center,
         bottom_center=candidate.bottom_center,
+        approximate_wicket_base_reference=candidate.bottom_center,
     )
 
 
@@ -447,6 +512,7 @@ def _calibration_from_input(
         box=wicket.box,
         center=center,
         bottom_center=bottom_center,
+        approximate_wicket_base_reference=bottom_center,
     )
 
 
@@ -464,6 +530,140 @@ def _box_points(
             y=_clamp(box.y + box.height),
         ),
     )
+
+
+def assess_visual_calibration_quality(
+    *,
+    striker: WicketCalibration | None,
+    non_striker: WicketCalibration | None,
+    pitch_geometry: PitchGeometry | None,
+    assignment_warning: str | None,
+    proximity_warning: str | None,
+    detector_success: bool,
+) -> tuple[VisualCalibrationQuality, list[str]]:
+    reasons: list[str] = []
+    if not detector_success:
+        return "FAILED", ["Stump detector did not succeed."]
+    if striker is None or non_striker is None:
+        return "FAILED", ["Both striker and non-striker wickets are required."]
+    if pitch_geometry is None:
+        return "FAILED", ["Approximate pitch corridor could not be built."]
+
+    distance = math.hypot(
+        striker.bottom_center.x - non_striker.bottom_center.x,
+        striker.bottom_center.y - non_striker.bottom_center.y,
+    )
+    if distance < 0.055:
+        reasons.append("Wicket separation is too small.")
+    if _intersection_over_union(striker.box, non_striker.box) > 0.3:
+        reasons.append("Wicket boxes overlap too much.")
+    if proximity_warning:
+        reasons.append(proximity_warning)
+
+    for wicket, name in (
+        (striker, "striker"),
+        (non_striker, "non_striker"),
+    ):
+        if wicket.box.width < 0.012 or wicket.box.height < 0.02:
+            reasons.append(f"{name} wicket box is unusually small.")
+        if (
+            wicket.box.x <= 0.005
+            or wicket.box.y <= 0.005
+            or wicket.box.x + wicket.box.width >= 0.995
+            or wicket.box.y + wicket.box.height >= 0.995
+        ):
+            reasons.append(f"{name} wicket is clipped near the frame edge.")
+        if wicket.confidence is not None and wicket.confidence < 0.25:
+            reasons.append(f"{name} detection confidence is low.")
+
+    # Corridor inverted / collapsed: near end should be larger than far end.
+    near = (
+        striker
+        if pitch_geometry.near_end_label == "striker"
+        else non_striker
+    )
+    far = (
+        non_striker
+        if pitch_geometry.near_end_label == "striker"
+        else striker
+    )
+    if near.box.width + near.box.height < far.box.width + far.box.height:
+        reasons.append(
+            "Perspective ordering looks inverted for a rear-camera view."
+        )
+
+    if any(
+        "too small" in reason.lower()
+        or "overlap" in reason.lower()
+        or "separation" in reason.lower()
+        for reason in reasons
+    ):
+        return "FAILED", reasons
+
+    if assignment_warning:
+        reasons.append(assignment_warning)
+    if reasons:
+        return "WEAK", reasons
+    return "READY", ["Both wickets detected with usable approximate geometry."]
+
+
+def _assignment_uncertainty_warning(
+    striker: WicketCalibration,
+    non_striker: WicketCalibration,
+) -> str | None:
+    score_gap = abs(_near_score(striker) - _near_score(non_striker))
+    size_ratio = max(striker.box.width, non_striker.box.width) / max(
+        min(striker.box.width, non_striker.box.width),
+        0.000001,
+    )
+    if score_gap < 0.08 or size_ratio < 1.12:
+        return (
+            "Wicket-end assignment is uncertain for this camera view. "
+            "Use Swap Wicket Ends if striker/non-striker labels look reversed."
+        )
+    return None
+
+
+def _try_refresh_early_reference(analysis_id: str, analysis: Any) -> None:
+    """On Redetect, try another early clean frame if the current one is weak."""
+    import cv2
+
+    analysis_dir = VIDEO_ANALYSIS_ROOT / analysis_id
+    video_path = analysis_dir / "raw" / analysis.stored_filename
+    if not video_path.is_file():
+        return
+
+    current_index = int(analysis.reference_frame_index)
+    window = max(1, min(EARLY_REFERENCE_WINDOW, int(analysis.frame_count)))
+    capture = cv2.VideoCapture(str(video_path))
+    try:
+        if not capture.isOpened():
+            return
+        for index in range(window):
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                break
+            if index == current_index:
+                continue
+            usable, score = _reference_frame_quality(frame)
+            if not usable:
+                continue
+            replace_reference_frame(
+                analysis_id,
+                frame_index=index,
+                frame=frame,
+                selection={
+                    "strategy": "earliest_clean_stable",
+                    "window_scanned": index + 1,
+                    "window_limit": window,
+                    "selected_index": index,
+                    "score": round(float(score), 3),
+                    "reason": "redetect_early_alternate",
+                },
+            )
+            return
+    finally:
+        capture.release()
 
 
 def _near_score(wicket: WicketCandidate | WicketCalibration) -> float:
@@ -587,10 +787,10 @@ def _save_calibration_overlay(
                 outline=(0, 0, 0, 255),
             )
 
-        draw.rectangle((12, 12, 205, 36), fill=(8, 12, 16, 210))
+        draw.rectangle((12, 12, 265, 36), fill=(8, 12, 16, 210))
         draw.text(
             (18, 18),
-            "Approximate 2D calibration",
+            "Automatic visual calibration",
             fill=(255, 255, 255, 255),
         )
         composed = Image.alpha_composite(image.convert("RGBA"), overlay)
@@ -618,6 +818,7 @@ def _update_analysis_metadata(
     updated_at: datetime,
     calibration_url: str,
     overlay_url: str,
+    quality: VisualCalibrationQuality,
 ) -> None:
     metadata_path = analysis_dir / "reports" / "analysis_metadata.json"
     try:
@@ -633,6 +834,8 @@ def _update_analysis_metadata(
             "calibration_status": "confirmed",
             "calibration_url": calibration_url,
             "calibration_overlay_url": overlay_url,
+            "visual_calibration_mode": "automatic_visual",
+            "visual_calibration_quality": quality,
             "updated_at": updated_at.isoformat().replace("+00:00", "Z"),
         }
     )

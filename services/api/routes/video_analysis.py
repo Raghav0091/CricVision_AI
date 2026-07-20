@@ -396,9 +396,13 @@ def get_analysis_camera_pose(
 )
 def detect_analysis_calibration(
     analysis_id: str,
+    refresh_early_reference: bool = False,
 ) -> VideoCalibrationDetectionResponse:
     try:
-        return detect_video_calibration(analysis_id)
+        return detect_video_calibration(
+            analysis_id,
+            refresh_early_reference=refresh_early_reference,
+        )
     except VideoAnalysisServiceError as exc:
         logger.warning(
             "Video calibration detection rejected for %s: %s",

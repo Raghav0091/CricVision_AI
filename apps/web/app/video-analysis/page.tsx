@@ -11,17 +11,13 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import {
   getVideoAnalysis,
   getVideoAnalysisCalibration,
-  getVideoAnalysisCalibrationV2,
-  getWicketCameraPose,
   getVideoBallDetectionResult,
   getVideoBallTrackingResult,
   prepareVideoAnalysis,
-  type CalibrationV2Result,
   type ConfirmedVideoCalibrationResponse,
   type VideoAnalysisPreparedResponse,
   type VideoBallDetectionResultResponse,
-  type VideoBallTrackingResultResponse,
-  type WicketCameraPoseResult
+  type VideoBallTrackingResultResponse
 } from "@/lib/api";
 
 
@@ -98,6 +94,7 @@ function WorkflowStage({
 
 
 function MetadataGrid({ analysis }: { analysis: VideoAnalysisPreparedResponse }) {
+  const selectionReason = analysis.reference_frame_selection?.reason;
   const values = [
     ["File size", formatBytes(analysis.file_size_bytes)],
     ["Duration", formatDuration(analysis.duration_seconds)],
@@ -105,7 +102,8 @@ function MetadataGrid({ analysis }: { analysis: VideoAnalysisPreparedResponse })
     ["Resolution", `${analysis.width} × ${analysis.height}`],
     ["Total frames", analysis.frame_count.toLocaleString()],
     ["Codec", analysis.codec ?? "Unavailable"],
-    ["Reference frame", analysis.reference_frame_index.toLocaleString()]
+    ["Reference frame", analysis.reference_frame_index.toLocaleString()],
+    ["Frame strategy", selectionReason ?? "earliest_clean_stable"]
   ];
   return (
     <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
@@ -130,12 +128,6 @@ export default function VideoAnalysisPage() {
   const [confirmedCalibration, setConfirmedCalibration] = useState<
     ConfirmedVideoCalibrationResponse | null
   >(null);
-  const [calibrationV2, setCalibrationV2] = useState<
-    CalibrationV2Result | null
-  >(null);
-  const [cameraPose, setCameraPose] = useState<WicketCameraPoseResult | null>(
-    null
-  );
   const [ballDetectionResult, setBallDetectionResult] = useState<
     VideoBallDetectionResultResponse | null
   >(null);
@@ -163,8 +155,6 @@ export default function VideoAnalysisPage() {
     setSelectedFile(file);
     setAnalysis(null);
     setConfirmedCalibration(null);
-    setCalibrationV2(null);
-    setCameraPose(null);
     setBallDetectionResult(null);
     setBallTrackingResult(null);
     setActiveStage("upload");
@@ -191,8 +181,6 @@ export default function VideoAnalysisPage() {
     setSelectedFile(null);
     setAnalysis(null);
     setConfirmedCalibration(null);
-    setCalibrationV2(null);
-    setCameraPose(null);
     setBallDetectionResult(null);
     setBallTrackingResult(null);
     setError(null);
@@ -220,12 +208,10 @@ export default function VideoAnalysisPage() {
       const prepared = await prepareVideoAnalysis(selectedFile);
       setAnalysis(prepared);
       setConfirmedCalibration(null);
-      setCalibrationV2(null);
-      setCameraPose(null);
       setBallDetectionResult(null);
       setBallTrackingResult(null);
       setWorkspaceState("prepared");
-      setActiveStage("ball_detection");
+      setActiveStage("calibration");
       window.history.replaceState(
         null,
         "",
@@ -246,24 +232,18 @@ export default function VideoAnalysisPage() {
     void Promise.all([
       getVideoAnalysis(analysisId),
       getVideoAnalysisCalibration(analysisId),
-      getVideoAnalysisCalibrationV2(analysisId),
-      getWicketCameraPose(analysisId),
       getVideoBallDetectionResult(analysisId),
       getVideoBallTrackingResult(analysisId)
     ])
       .then(([
         restored,
         calibration,
-        restoredCalibrationV2,
-        restoredCameraPose,
         detectionResult,
         trackingResult
       ]) => {
         if (cancelled) return;
         setAnalysis(restored);
         setConfirmedCalibration(calibration);
-        setCalibrationV2(restoredCalibrationV2);
-        setCameraPose(restoredCameraPose);
         setBallDetectionResult(detectionResult);
         setBallTrackingResult(trackingResult);
         setWorkspaceState("prepared");
@@ -272,7 +252,12 @@ export default function VideoAnalysisPage() {
           || restored.tracking_status === "tracking_queued"
           || restored.tracking_status === "tracking_ball"
             ? "ball_tracking"
-            : "ball_detection"
+            : detectionResult
+              || restored.ball_detection_status === "detection_queued"
+              || restored.ball_detection_status === "detecting_ball"
+              || restored.ball_detection_status === "detection_complete"
+                ? "ball_detection"
+                : "calibration"
         );
         setError(null);
       })
@@ -294,21 +279,13 @@ export default function VideoAnalysisPage() {
   }, []);
 
   const uploadComplete = workspaceState === "prepared" && analysis !== null;
-  const calibrationV2Complete = (
-    calibrationV2?.status === "ready"
-    || calibrationV2?.status === "confirmed"
-  );
-  const cameraPoseComplete = (
-    cameraPose?.status === "ready"
-    || cameraPose?.status === "usable"
-  );
-  const calibrationComplete = (
-    confirmedCalibration !== null
-    || calibrationV2Complete
-    || cameraPoseComplete
-  );
+  const calibrationComplete = confirmedCalibration !== null;
   const calibrationActive = uploadComplete && activeStage === "calibration";
-  const ballDetectionActive = uploadComplete && activeStage === "ball_detection";
+  const ballDetectionActive = (
+    uploadComplete
+    && activeStage === "ball_detection"
+    && calibrationComplete
+  );
   const ballTrackingActive = (
     uploadComplete
     && activeStage === "ball_tracking"
@@ -320,39 +297,33 @@ export default function VideoAnalysisPage() {
       <StatusBadge label="Video Analysis" tone="good" />
       <div className="mt-5 max-w-3xl">
         <h1 className="text-4xl font-black tracking-tight sm:text-5xl">Upload and prepare a cricket video.</h1>
-        <p className="mt-4 leading-7 text-white/50">Create a persistent analysis workspace, inspect the source metadata, and extract a clean calibration reference frame.</p>
+        <p className="mt-4 leading-7 text-white/50">
+          Create a persistent analysis workspace, extract an early calibration reference frame,
+          and run automatic visual scene calibration before ball detection.
+        </p>
       </div>
 
       <div className="mt-8 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
         <WorkflowStage index={1} title="Upload Video" state={uploadComplete ? "complete" : "active"} note={uploadComplete ? "Completed" : "Active"} />
         <WorkflowStage
           index={2}
-          title="Scene Calibration"
-          state={cameraPoseComplete || calibrationV2Complete ? "complete" : calibrationActive ? "active" : uploadComplete ? "available" : "locked"}
+          title="Automatic Visual Calibration"
+          state={calibrationComplete ? "complete" : calibrationActive ? "active" : uploadComplete ? "available" : "locked"}
           note={
-            cameraPoseComplete
-              ? "Calibration v2B"
-              : calibrationV2Complete
-                ? "Calibration v2A.1"
-              : calibrationV2?.status === "weak"
-                ? "Ground transform weak"
-                : (
-                    calibrationV2?.status === "insufficient_geometry"
-                    || calibrationV2?.status === "unstable"
-                  )
-                  ? "Needs geometry"
-                : calibrationActive
-                  ? "Active"
-                  : uploadComplete
-                    ? "Available"
-                    : "Locked"
+            calibrationComplete
+              ? confirmedCalibration?.quality ?? "Accepted"
+              : calibrationActive
+                ? "Active"
+                : uploadComplete
+                  ? "Available"
+                  : "Locked"
           }
         />
         <WorkflowStage
           index={3}
           title="Ball Detection"
-          state={ballDetectionResult ? "complete" : ballDetectionActive ? "active" : uploadComplete ? "available" : "locked"}
-          note={ballDetectionResult ? "Completed" : ballDetectionActive ? "Active" : uploadComplete ? "Available" : "Locked"}
+          state={ballDetectionResult ? "complete" : ballDetectionActive ? "active" : calibrationComplete ? "available" : "locked"}
+          note={ballDetectionResult ? "Completed" : ballDetectionActive ? "Active" : calibrationComplete ? "Available" : "Locked"}
         />
         <WorkflowStage
           index={4}
@@ -420,25 +391,8 @@ export default function VideoAnalysisPage() {
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div>
                 <StatusBadge
-                  label={
-                    calibrationV2?.status === "weak"
-                      ? "Ground Mapping Weak"
-                      : (
-                          calibrationV2?.status === "unstable"
-                          || calibrationV2?.status === "insufficient_geometry"
-                        )
-                        ? "Ground Mapping Needed"
-                        : calibrationComplete
-                          ? "Calibrated"
-                          : "Prepared"
-                  }
-                  tone={
-                    calibrationV2?.status === "weak"
-                    || calibrationV2?.status === "unstable"
-                    || calibrationV2?.status === "insufficient_geometry"
-                      ? "warn"
-                      : "good"
-                  }
+                  label={calibrationComplete ? "Calibrated" : "Prepared"}
+                  tone="good"
                 />
                 <h2 className="mt-4 text-2xl font-black">Video prepared</h2>
                 <p className="mt-2 break-all font-mono text-xs text-white/40">{analysis.analysis_id}</p>
@@ -459,22 +413,28 @@ export default function VideoAnalysisPage() {
               <p className="text-xs font-bold uppercase tracking-[0.15em] text-white/40">Calibration reference frame</p>
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img className="mt-4 h-auto w-full rounded-xl bg-black object-contain" src={analysis.reference_frame_url} alt={`Calibration reference frame ${analysis.reference_frame_index}`} />
-              <p className="mt-3 text-xs text-white/45">Middle frame · index {analysis.reference_frame_index}</p>
+              <p className="mt-3 text-xs text-white/45">
+                Early clean frame · index {analysis.reference_frame_index}
+                {analysis.reference_frame_selection?.reason
+                  ? ` · ${analysis.reference_frame_selection.reason}`
+                  : ""}
+              </p>
             </Card>
           </div>
-
-          {!calibrationActive && !ballDetectionActive && !ballTrackingActive && (
-            <Button onClick={() => setActiveStage("calibration")}>Continue to Scene Calibration</Button>
-          )}
 
           {calibrationActive && (
             <SceneCalibrationPanel
               key={analysis.analysis_id}
               analysis={analysis}
               initialCalibration={confirmedCalibration}
-              initialCalibrationV2={calibrationV2}
-              initialCameraPose={cameraPose}
               onDirty={() => setConfirmedCalibration(null)}
+              onReferenceFrameUpdated={(referenceFrameIndex, referenceFrameUrl) => {
+                setAnalysis((current) => current ? {
+                  ...current,
+                  reference_frame_index: referenceFrameIndex,
+                  reference_frame_url: referenceFrameUrl
+                } : current);
+              }}
               onCalibrated={(calibration) => {
                 setConfirmedCalibration(calibration);
                 setAnalysis((current) => current ? {
@@ -483,37 +443,10 @@ export default function VideoAnalysisPage() {
                   calibration_status: "confirmed",
                   calibration_url: calibration.calibration_url,
                   calibration_overlay_url: calibration.calibration_overlay_url,
+                  visual_calibration_mode: calibration.mode ?? "automatic_visual",
+                  visual_calibration_quality: calibration.quality ?? null,
+                  reference_frame_index: calibration.reference_frame_index,
                   updated_at: calibration.updated_at
-                } : current);
-              }}
-              onCalibratedV2={(calibration) => {
-                setCalibrationV2(calibration);
-                setAnalysis((current) => current ? {
-                  ...current,
-                  calibration_v2_status: calibration.status,
-                  calibration_v2_url: calibration.calibration_v2_url,
-                  calibration_v2_overlay_url: calibration.calibration_v2_overlay_url,
-                  calibration_v2_quality_grade: calibration.quality.quality_grade,
-                  calibration_v2_reprojection_rmse_px: (
-                    calibration.quality.reprojection_rmse_px
-                  ),
-                  updated_at: calibration.updated_at
-                } : current);
-              }}
-              onCameraPoseSolved={(result) => {
-                setCameraPose(result);
-                setAnalysis((current) => current ? {
-                  ...current,
-                  camera_pose_status: result.status,
-                  camera_pose_quality: result.quality.overall_pose_quality,
-                  camera_pose_url: result.camera_pose_url,
-                  camera_pose_overlay_url: result.camera_pose_overlay_url,
-                  camera_intrinsics_source: result.camera_intrinsics.source,
-                  camera_pose_reprojection_rmse_px: (
-                    result.camera_pose.reprojection_rmse_px
-                  ),
-                  calibration_mode_used: result.calibration_mode,
-                  updated_at: result.updated_at
                 } : current);
               }}
             />
@@ -522,12 +455,6 @@ export default function VideoAnalysisPage() {
           {calibrationActive && calibrationComplete && (
             <Button onClick={() => setActiveStage("ball_detection")}>
               Continue to Ball Detection
-            </Button>
-          )}
-
-          {calibrationActive && !calibrationComplete && (
-            <Button onClick={() => setActiveStage("ball_detection")}>
-              Skip Optional Calibration and Continue
             </Button>
           )}
 
@@ -550,7 +477,7 @@ export default function VideoAnalysisPage() {
                   </Button>
                 )}
                 <Button variant="secondary" onClick={() => setActiveStage("calibration")}>
-                  {calibrationComplete ? "Review Scene Calibration" : "Open Optional Scene Calibration"}
+                  Review Automatic Visual Calibration
                 </Button>
               </div>
             </>

@@ -33,6 +33,10 @@ export function wicketFromBox(
   box: NormalizedBox
 ): WicketCalibration {
   const centerX = clamp(box.x + box.width / 2);
+  const bottomCenter = {
+    x: centerX,
+    y: clamp(box.y + box.height)
+  };
   return {
     label,
     source,
@@ -42,10 +46,8 @@ export function wicketFromBox(
       x: centerX,
       y: clamp(box.y + box.height / 2)
     },
-    bottom_center: {
-      x: centerX,
-      y: clamp(box.y + box.height)
-    }
+    bottom_center: bottomCenter,
+    approximate_wicket_base_reference: bottomCenter
   };
 }
 
@@ -118,6 +120,7 @@ export function CalibrationCanvas({
   nonStriker,
   pitchGeometry,
   disabled = false,
+  readOnly = false,
   onWicketChange
 }: {
   imageUrl: string;
@@ -127,10 +130,12 @@ export function CalibrationCanvas({
   nonStriker: WicketCalibration | null;
   pitchGeometry: PitchGeometry | null;
   disabled?: boolean;
-  onWicketChange: (label: WicketLabel, wicket: WicketCalibration) => void;
+  readOnly?: boolean;
+  onWicketChange?: (label: WicketLabel, wicket: WicketCalibration) => void;
 }) {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const operationRef = useRef<PointerOperation | null>(null);
+  const editingLocked = disabled || readOnly || !onWicketChange;
 
   function startOperation(
     event: ReactPointerEvent<HTMLElement>,
@@ -139,7 +144,7 @@ export function CalibrationCanvas({
     mode: PointerOperation["mode"],
     corner?: ResizeCorner
   ) {
-    if (disabled) return;
+    if (editingLocked) return;
     event.preventDefault();
     event.stopPropagation();
     const wrapper = wrapperRef.current;
@@ -158,6 +163,7 @@ export function CalibrationCanvas({
   }
 
   function moveOperation(event: ReactPointerEvent<HTMLDivElement>) {
+    if (editingLocked || !onWicketChange) return;
     const operation = operationRef.current;
     const wrapper = wrapperRef.current;
     if (!operation || !wrapper || event.pointerId !== operation.pointerId) return;
@@ -207,22 +213,18 @@ export function CalibrationCanvas({
           boxShadow: `0 0 0 1px rgba(0,0,0,.7), 0 0 18px ${color}44`
         }}
       >
-        <button
-          type="button"
-          disabled={disabled}
-          aria-label={`Move ${title}`}
-          className="absolute -top-7 left-0 max-w-[12rem] cursor-move whitespace-nowrap rounded-t-md bg-ink/90 px-2 py-1 text-[10px] font-black uppercase tracking-[0.08em] disabled:cursor-default"
-          style={{ color, touchAction: "none" }}
-          onPointerDown={(event) => startOperation(event, label, wicket, "move")}
+        <div
+          className="absolute -top-7 left-0 max-w-[12rem] whitespace-nowrap rounded-t-md bg-ink/90 px-2 py-1 text-[10px] font-black uppercase tracking-[0.08em]"
+          style={{ color }}
         >
           {title}
           {wicket.confidence != null && ` ${(wicket.confidence * 100).toFixed(0)}%`}
-        </button>
-        {(["nw", "ne", "sw", "se"] as ResizeCorner[]).map((corner) => (
+        </div>
+        {!readOnly && (["nw", "ne", "sw", "se"] as ResizeCorner[]).map((corner) => (
           <button
             key={corner}
             type="button"
-            disabled={disabled}
+            disabled={editingLocked}
             aria-label={`Resize ${title} from ${corner}`}
             className={`absolute h-4 w-4 rounded-sm border-2 border-ink disabled:cursor-default ${
               corner.includes("n") ? "-top-2" : "-bottom-2"
@@ -253,7 +255,7 @@ export function CalibrationCanvas({
       className="relative w-full select-none overflow-hidden rounded-xl bg-black"
       style={{
         aspectRatio: `${imageWidth} / ${imageHeight}`,
-        touchAction: "none"
+        touchAction: readOnly ? "auto" : "none"
       }}
       onPointerMove={moveOperation}
       onPointerUp={endOperation}
@@ -263,7 +265,7 @@ export function CalibrationCanvas({
       <img
         className="absolute inset-0 h-full w-full object-contain"
         src={imageUrl}
-        alt="Scene calibration reference"
+        alt="Automatic visual calibration reference"
         draggable={false}
       />
       {pitchGeometry && (
@@ -291,8 +293,8 @@ export function CalibrationCanvas({
           {[striker, nonStriker].map((wicket) => wicket && (
             <circle
               key={wicket.label}
-              cx={wicket.bottom_center.x}
-              cy={wicket.bottom_center.y}
+              cx={(wicket.approximate_wicket_base_reference ?? wicket.bottom_center).x}
+              cy={(wicket.approximate_wicket_base_reference ?? wicket.bottom_center).y}
               r="0.009"
               fill={wicket.label === "striker" ? "#ffca68" : "#50dcff"}
               stroke="#080c10"
@@ -305,7 +307,7 @@ export function CalibrationCanvas({
       {renderWicket(nonStriker, "non_striker")}
       {pitchGeometry && (
         <span className="pointer-events-none absolute bottom-3 left-3 rounded-md bg-ink/85 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.1em] text-white/80">
-          Approximate pitch axis · 2D corridor
+          Automatic visual · approximate 2D corridor
         </span>
       )}
     </div>

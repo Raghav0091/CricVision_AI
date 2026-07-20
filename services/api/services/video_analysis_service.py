@@ -8,10 +8,11 @@ import math
 from pathlib import Path
 import re
 import shutil
-from typing import BinaryIO, NoReturn
+from typing import Any, BinaryIO, NoReturn
 from uuid import uuid4
 
 import cv2
+import numpy as np
 
 from ..schemas.video_analysis import VideoAnalysisPreparedResponse
 
@@ -31,6 +32,12 @@ ANALYSIS_DIRECTORIES = (
     "reports",
 )
 ANALYSIS_ID_PATTERN = re.compile(r"^analysis_\d{8}_\d{6}_[0-9a-f]{6}$")
+# ponytail: prefer the earliest readable frame; only scan a small early window
+# when frame 0 is black/blurry/corrupt. Never jump to the middle of the clip.
+EARLY_REFERENCE_WINDOW = 24
+MIN_MEAN_BRIGHTNESS = 14.0
+MAX_MEAN_BRIGHTNESS = 246.0
+MIN_LAPLACIAN_VARIANCE = 18.0
 
 
 class VideoAnalysisServiceError(Exception):
@@ -185,8 +192,11 @@ def _read_video_metadata(video_path: Path, reference_path: Path) -> dict[str, ob
     if width <= 0 or height <= 0:
         _fail("The uploaded video has invalid dimensions.")
 
-    reference_frame_index = frame_count // 2
-    _extract_reference_frame(video_path, reference_path, reference_frame_index)
+    selection = select_early_reference_frame(
+        video_path,
+        reference_path,
+        frame_count=frame_count,
+    )
     return {
         "duration_seconds": round(frame_count / fps, 3),
         "fps": round(fps, 3),
@@ -194,41 +204,57 @@ def _read_video_metadata(video_path: Path, reference_path: Path) -> dict[str, ob
         "width": width,
         "height": height,
         "codec": _decode_fourcc(fourcc),
-        "reference_frame_index": reference_frame_index,
+        "reference_frame_index": selection["reference_frame_index"],
+        "reference_frame_selection": selection["reference_frame_selection"],
     }
 
 
-def _extract_reference_frame(
+def select_early_reference_frame(
     video_path: Path,
     destination: Path,
-    frame_index: int,
-) -> None:
+    *,
+    frame_count: int,
+) -> dict[str, Any]:
+    """Pick the earliest clean stable frame from a small early window."""
+    window = max(1, min(EARLY_REFERENCE_WINDOW, frame_count))
+    best_usable: tuple[int, float, Any] | None = None
+    first_decoded: tuple[int, Any] | None = None
+    scanned = 0
+
     capture = cv2.VideoCapture(str(video_path))
-    frame = None
     try:
-        if capture.isOpened():
-            capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-            ok, candidate = capture.read()
-            if ok:
-                frame = candidate
+        if not capture.isOpened():
+            _fail("Could not open the video while selecting a reference frame.")
+        for index in range(window):
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                break
+            scanned += 1
+            if first_decoded is None:
+                first_decoded = (index, frame)
+            usable, score = _reference_frame_quality(frame)
+            if usable and (best_usable is None or index < best_usable[0]):
+                best_usable = (index, score, frame)
+                # Earliest usable frame wins; stop as soon as frame 0 (or first
+                # later usable candidate) is accepted.
+                break
     finally:
         capture.release()
 
-    if frame is None:
-        capture = cv2.VideoCapture(str(video_path))
-        try:
-            if capture.isOpened():
-                for index in range(frame_index + 1):
-                    ok, candidate = capture.read()
-                    if not ok:
-                        break
-                    if index == frame_index:
-                        frame = candidate
-        finally:
-            capture.release()
+    if best_usable is not None:
+        frame_index, score, frame = best_usable
+        reason = (
+            "frame_0_usable"
+            if frame_index == 0
+            else "earliest_early_window_fallback"
+        )
+    elif first_decoded is not None:
+        frame_index, frame = first_decoded
+        score = _laplacian_variance(frame)
+        reason = "earliest_decoded_fallback"
+    else:
+        _fail("Could not extract an early calibration reference frame.")
 
-    if frame is None:
-        _fail("Could not extract the middle calibration reference frame.")
     saved = cv2.imwrite(
         str(destination),
         frame,
@@ -236,6 +262,93 @@ def _extract_reference_frame(
     )
     if not saved:
         _fail("Could not save the calibration reference frame.")
+
+    selection = {
+        "strategy": "earliest_clean_stable",
+        "window_scanned": scanned,
+        "window_limit": window,
+        "selected_index": frame_index,
+        "score": round(float(score), 3),
+        "reason": reason,
+    }
+    return {
+        "reference_frame_index": frame_index,
+        "reference_frame_selection": selection,
+    }
+
+
+def replace_reference_frame(
+    analysis_id: str,
+    *,
+    frame_index: int,
+    frame: Any,
+    selection: dict[str, Any] | None = None,
+) -> int:
+    """Overwrite the stored reference JPEG and persist the new index."""
+    load_video_analysis(analysis_id)
+    analysis_dir = VIDEO_ANALYSIS_ROOT / analysis_id
+    reference_path = analysis_dir / "calibration" / "reference_frame.jpg"
+    saved = cv2.imwrite(
+        str(reference_path),
+        frame,
+        [cv2.IMWRITE_JPEG_QUALITY, 95],
+    )
+    if not saved:
+        raise VideoAnalysisServiceError(
+            "Could not save the refreshed calibration reference frame.",
+            status_code=500,
+        )
+
+    metadata_path = analysis_dir / "reports" / "analysis_metadata.json"
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise VideoAnalysisServiceError(
+            "Analysis metadata could not be updated.",
+            status_code=500,
+        ) from exc
+    metadata["reference_frame_index"] = int(frame_index)
+    if selection is not None:
+        metadata["reference_frame_selection"] = selection
+    metadata["updated_at"] = (
+        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    )
+    try:
+        metadata_path.write_text(
+            json.dumps(metadata, indent=2),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        raise VideoAnalysisServiceError(
+            "Analysis metadata could not be saved.",
+            status_code=500,
+        ) from exc
+    return int(frame_index)
+
+
+def _reference_frame_quality(frame: Any) -> tuple[bool, float]:
+    if frame is None or getattr(frame, "size", 0) == 0:
+        return False, 0.0
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    mean_brightness = float(np.mean(gray))
+    if (
+        mean_brightness < MIN_MEAN_BRIGHTNESS
+        or mean_brightness > MAX_MEAN_BRIGHTNESS
+    ):
+        return False, mean_brightness
+    sharpness = _laplacian_variance(gray)
+    if sharpness < MIN_LAPLACIAN_VARIANCE:
+        return False, sharpness
+    # Prefer brighter-but-sharp early frames only as a soft score.
+    return True, sharpness + (mean_brightness / 255.0)
+
+
+def _laplacian_variance(frame_or_gray: Any) -> float:
+    if len(frame_or_gray.shape) == 3:
+        gray = cv2.cvtColor(frame_or_gray, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = frame_or_gray
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
 def _decode_fourcc(value: int) -> str | None:
