@@ -30,6 +30,9 @@ class NormalizedBox(StrictGeometryModel):
         return self
 
 
+WicketDetectionPass = Literal["full_frame", "far_roi", "near_roi"]
+
+
 class WicketCandidate(StrictGeometryModel):
     candidate_id: str
     confidence: float = Field(ge=0, le=1)
@@ -37,6 +40,7 @@ class WicketCandidate(StrictGeometryModel):
     box: NormalizedBox
     center: NormalizedPoint
     bottom_center: NormalizedPoint
+    detection_pass: WicketDetectionPass | None = None
 
 
 class WicketCalibration(StrictGeometryModel):
@@ -48,6 +52,8 @@ class WicketCalibration(StrictGeometryModel):
     bottom_center: NormalizedPoint
     # Honest alias for the approximate bbox bottom-centre used as a soft base.
     approximate_wicket_base_reference: NormalizedPoint | None = None
+    # Which robust detector pass produced this box (not user edit source).
+    detection_pass: WicketDetectionPass | None = None
 
 
 class WicketCalibrationInput(StrictGeometryModel):
@@ -55,6 +61,7 @@ class WicketCalibrationInput(StrictGeometryModel):
     source: Literal["detected", "adjusted", "manual"]
     confidence: float | None = Field(default=None, ge=0, le=1)
     box: NormalizedBox
+    detection_pass: WicketDetectionPass | None = None
 
 
 class PitchGeometry(StrictGeometryModel):
@@ -165,6 +172,18 @@ class VideoAnalysisPreparedResponse(BaseModel):
     message: str
 
 
+class VisualCalibrationDetectionDebug(BaseModel):
+    """Developer-only diagnostics for robust two-wicket detection."""
+
+    pass_count: int = 0
+    passes: list[dict[str, object]] = Field(default_factory=list)
+    rejected: list[dict[str, object]] = Field(default_factory=list)
+    rois: dict[str, NormalizedBox] = Field(default_factory=dict)
+    selected: dict[str, object] | None = None
+    debug_overlay_url: str | None = None
+    debug_json_url: str | None = None
+
+
 class VideoCalibrationDetectionResponse(BaseModel):
     success: bool
     status: Literal[
@@ -190,6 +209,7 @@ class VideoCalibrationDetectionResponse(BaseModel):
     assignment_warning: str | None = None
     warning: str | None = None
     message: str
+    detection_debug: VisualCalibrationDetectionDebug | None = None
 
 
 class VideoCalibrationConfirmationRequest(BaseModel):

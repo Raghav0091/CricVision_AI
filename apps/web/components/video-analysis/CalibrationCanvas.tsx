@@ -30,7 +30,8 @@ export function wicketFromBox(
   label: WicketLabel,
   source: WicketCalibration["source"],
   confidence: number | null,
-  box: NormalizedBox
+  box: NormalizedBox,
+  detectionPass: WicketCalibration["detection_pass"] = null
 ): WicketCalibration {
   const centerX = clamp(box.x + box.width / 2);
   const bottomCenter = {
@@ -47,7 +48,8 @@ export function wicketFromBox(
       y: clamp(box.y + box.height / 2)
     },
     bottom_center: bottomCenter,
-    approximate_wicket_base_reference: bottomCenter
+    approximate_wicket_base_reference: bottomCenter,
+    detection_pass: detectionPass ?? null
   };
 }
 

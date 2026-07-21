@@ -17,6 +17,7 @@ from ..schemas.video_analysis import (
     PitchGeometry,
     VideoCalibrationConfirmationRequest,
     VideoCalibrationDetectionResponse,
+    VisualCalibrationDetectionDebug,
     VisualCalibrationQuality,
     WicketCalibration,
     WicketCalibrationInput,
@@ -25,7 +26,8 @@ from ..schemas.video_analysis import (
 from .stump_detector_service import (
     STUMP_MODEL_PATH,
     STUMP_MODEL_RELATIVE_PATH,
-    detect_stump_candidates,
+    detect_wickets_robust,
+    save_robust_detection_overlay,
 )
 from .video_analysis_service import (
     EARLY_REFERENCE_WINDOW,
@@ -39,6 +41,9 @@ from .video_analysis_service import (
 
 CALIBRATION_FILENAME = "calibration.json"
 CALIBRATION_OVERLAY_FILENAME = "calibration_overlay.jpg"
+DETECTION_DEBUG_JSON = "wicket_detection_debug.json"
+DETECTION_DEBUG_OVERLAY = "wicket_detection_debug.jpg"
+EARLY_FALLBACK_ATTEMPTS = 3
 WICKET_PROXIMITY_WARNING = (
     "The two wicket locations appear too close together. Check the calibration."
 )
@@ -54,10 +59,28 @@ def detect_video_calibration(
         _try_refresh_early_reference(analysis_id, analysis)
         analysis = load_video_analysis(analysis_id)
 
+    response = _detect_on_current_reference(analysis_id, analysis)
+    if (
+        response.provisional_striker_wicket is not None
+        and response.provisional_non_striker_wicket is not None
+    ):
+        return response
+
+    # Preserve early-window preference; try a few other early clean frames only.
+    if _try_early_frame_fallback(analysis_id, analysis):
+        analysis = load_video_analysis(analysis_id)
+        return _detect_on_current_reference(analysis_id, analysis)
+    return response
+
+
+def _detect_on_current_reference(
+    analysis_id: str,
+    analysis: Any,
+) -> VideoCalibrationDetectionResponse:
     reference_path = _reference_path(analysis_id)
     image = _open_reference_image(reference_path)
     image_width, image_height = image.size
-    detection_result = detect_stump_candidates(image)
+    detection_result = detect_wickets_robust(image, enable_roi=True)
     raw_candidates = detection_result.get("candidates") or []
     candidates: list[WicketCandidate] = []
     for index, candidate in enumerate(raw_candidates, start=1):
@@ -76,11 +99,23 @@ def detect_video_calibration(
     striker: WicketCalibration | None = None
     non_striker: WicketCalibration | None = None
     assignment_warning: str | None = None
-    if len(candidates) >= 2:
-        pair = _choose_provisional_pair(candidates)
-        if pair is not None:
-            striker, non_striker, assignment_warning = _assign_provisional_ends(
-                *pair
+    selected = detection_result.get("selected") or {}
+    selected_striker = selected.get("striker")
+    selected_non_striker = selected.get("non_striker")
+    if selected_striker is not None and selected_non_striker is not None:
+        striker_candidate = _match_selected_candidate(
+            candidates, selected_striker, image_width, image_height
+        )
+        non_striker_candidate = _match_selected_candidate(
+            candidates, selected_non_striker, image_width, image_height
+        )
+        if striker_candidate is not None and non_striker_candidate is not None:
+            striker = _calibration_from_candidate(striker_candidate, "striker")
+            non_striker = _calibration_from_candidate(
+                non_striker_candidate, "non_striker"
+            )
+            assignment_warning = _assignment_uncertainty_warning(
+                striker, non_striker
             )
     elif len(candidates) == 1:
         only = candidates[0]
@@ -108,6 +143,12 @@ def detect_video_calibration(
         detector_success=bool(detection_result.get("success")),
     )
 
+    detection_debug = _persist_detection_debug(
+        analysis_id,
+        image=image,
+        detection_result=detection_result,
+    )
+
     if not detection_result["success"]:
         status = detection_result["status"]
         message = detection_result["message"]
@@ -116,7 +157,8 @@ def detect_video_calibration(
         status = "detection_incomplete"
         message = (
             "Automatic visual calibration could not lock both wickets on the "
-            "early reference frame. Press Redetect to try again."
+            "early reference frame after full-frame and ROI passes. "
+            "Press Redetect to try another early frame."
         )
         success = True
     else:
@@ -147,6 +189,7 @@ def detect_video_calibration(
         assignment_warning=assignment_warning,
         warning=warning,
         message=message,
+        detection_debug=detection_debug,
     )
 
 
@@ -413,6 +456,9 @@ def _candidate_from_detection(
         height=max(0.000001, bottom - y),
     )
     center, bottom_center = _box_points(box)
+    detection_pass = candidate.get("source")
+    if detection_pass not in {"full_frame", "far_roi", "near_roi"}:
+        detection_pass = None
     return WicketCandidate(
         candidate_id=f"wicket_{index}",
         confidence=float(candidate["confidence"]),
@@ -420,64 +466,51 @@ def _candidate_from_detection(
         box=box,
         center=center,
         bottom_center=bottom_center,
+        detection_pass=detection_pass,
     )
 
 
-def _choose_provisional_pair(
+def _match_selected_candidate(
     candidates: list[WicketCandidate],
-) -> tuple[WicketCandidate, WicketCandidate] | None:
-    best_pair: tuple[WicketCandidate, WicketCandidate] | None = None
-    best_score = -1.0
-    for index, first in enumerate(candidates):
-        for second in candidates[index + 1 :]:
-            if _intersection_over_union(first.box, second.box) > 0.45:
-                continue
-            separation = math.hypot(
-                first.bottom_center.x - second.bottom_center.x,
-                first.bottom_center.y - second.bottom_center.y,
-            )
-            if separation < 0.04:
-                continue
-            score = (
-                first.confidence
-                + second.confidence
-                + min(separation, 0.5)
-            )
-            if score > best_score:
-                best_pair = (first, second)
-                best_score = score
-    return best_pair
-
-
-def _assign_provisional_ends(
-    first: WicketCandidate,
-    second: WicketCandidate,
-) -> tuple[WicketCalibration, WicketCalibration, str | None]:
-    near_first = _near_score(first)
-    near_second = _near_score(second)
-    near, far = (
-        (first, second)
-        if near_first >= near_second
-        else (second, first)
-    )
-    # ponytail: rear-camera heuristic — larger/lower ≈ non-striker (near),
-    # smaller/upper ≈ striker (far). Soft only; UI can swap ends.
-    warning = None
-    score_gap = abs(near_first - near_second)
-    size_ratio = max(first.box.width, second.box.width) / max(
-        min(first.box.width, second.box.width),
-        0.000001,
-    )
-    if score_gap < 0.08 or size_ratio < 1.12:
-        warning = (
-            "Wicket-end assignment is uncertain for this camera view. "
-            "Use Swap Wicket Ends if striker/non-striker labels look reversed."
+    selected: dict[str, Any],
+    image_width: int,
+    image_height: int,
+) -> WicketCandidate | None:
+    selected_bbox = selected.get("bbox") or {}
+    try:
+        target = NormalizedBox(
+            x=_clamp(float(selected_bbox["x"]) / image_width),
+            y=_clamp(float(selected_bbox["y"]) / image_height),
+            width=max(
+                0.000001,
+                _clamp(
+                    (float(selected_bbox["x"]) + float(selected_bbox["width"]))
+                    / image_width
+                )
+                - _clamp(float(selected_bbox["x"]) / image_width),
+            ),
+            height=max(
+                0.000001,
+                _clamp(
+                    (
+                        float(selected_bbox["y"])
+                        + float(selected_bbox["height"])
+                    )
+                    / image_height
+                )
+                - _clamp(float(selected_bbox["y"]) / image_height),
+            ),
         )
-    return (
-        _calibration_from_candidate(far, "striker"),
-        _calibration_from_candidate(near, "non_striker"),
-        warning,
-    )
+    except (KeyError, TypeError, ValueError):
+        return None
+    best: WicketCandidate | None = None
+    best_iou = 0.0
+    for candidate in candidates:
+        iou = _intersection_over_union(candidate.box, target)
+        if iou > best_iou:
+            best = candidate
+            best_iou = iou
+    return best if best_iou >= 0.2 else None
 
 
 def _calibration_from_candidate(
@@ -492,6 +525,7 @@ def _calibration_from_candidate(
         center=candidate.center,
         bottom_center=candidate.bottom_center,
         approximate_wicket_base_reference=candidate.bottom_center,
+        detection_pass=candidate.detection_pass,
     )
 
 
@@ -513,7 +547,139 @@ def _calibration_from_input(
         center=center,
         bottom_center=bottom_center,
         approximate_wicket_base_reference=bottom_center,
+        detection_pass=wicket.detection_pass,
     )
+
+
+def _persist_detection_debug(
+    analysis_id: str,
+    *,
+    image: Image.Image,
+    detection_result: dict[str, Any],
+) -> VisualCalibrationDetectionDebug | None:
+    calibration_dir = VIDEO_ANALYSIS_ROOT / analysis_id / "calibration"
+    diagnostics = detection_result.get("diagnostics") or {}
+    rois_raw = detection_result.get("rois") or {}
+    rois: dict[str, NormalizedBox] = {}
+    for name, roi in rois_raw.items():
+        try:
+            rois[name] = NormalizedBox(
+                x=float(roi["x"]),
+                y=float(roi["y"]),
+                width=float(roi["width"]),
+                height=float(roi["height"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    overlay_path = calibration_dir / DETECTION_DEBUG_OVERLAY
+    json_path = calibration_dir / DETECTION_DEBUG_JSON
+    try:
+        save_robust_detection_overlay(
+            image,
+            candidates=detection_result.get("candidates") or [],
+            selected=detection_result.get("selected") or {},
+            rois=rois_raw,
+            output_path=overlay_path,
+        )
+        payload = {
+            "analysis_id": analysis_id,
+            "diagnostics": diagnostics,
+            "rois": rois_raw,
+            "selected": detection_result.get("selected"),
+            "candidates": [
+                {
+                    "confidence": item.get("confidence"),
+                    "class_name": item.get("class_name"),
+                    "source": item.get("source"),
+                    "bbox": item.get("bbox"),
+                }
+                for item in (detection_result.get("candidates") or [])
+            ],
+        }
+        _write_json(json_path, payload)
+    except Exception:
+        # ponytail: debug artefacts must never block calibration.
+        return VisualCalibrationDetectionDebug(
+            pass_count=int(diagnostics.get("pass_count") or 0),
+            passes=list(diagnostics.get("passes") or []),
+            rejected=list(diagnostics.get("rejected") or []),
+            rois=rois,
+            selected=diagnostics.get("selected"),
+            debug_overlay_url=None,
+            debug_json_url=None,
+        )
+
+    return VisualCalibrationDetectionDebug(
+        pass_count=int(diagnostics.get("pass_count") or 0),
+        passes=list(diagnostics.get("passes") or []),
+        rejected=list(diagnostics.get("rejected") or []),
+        rois=rois,
+        selected=diagnostics.get("selected"),
+        debug_overlay_url=(
+            f"/static/video-analysis/{analysis_id}/calibration/"
+            f"{DETECTION_DEBUG_OVERLAY}"
+        ),
+        debug_json_url=(
+            f"/static/video-analysis/{analysis_id}/calibration/"
+            f"{DETECTION_DEBUG_JSON}"
+        ),
+    )
+
+
+def _try_early_frame_fallback(analysis_id: str, analysis: Any) -> bool:
+    """If current early frame fails two-wicket lock, try a few other early ones."""
+    import cv2
+
+    analysis_dir = VIDEO_ANALYSIS_ROOT / analysis_id
+    video_path = analysis_dir / "raw" / analysis.stored_filename
+    if not video_path.is_file():
+        return False
+
+    current_index = int(analysis.reference_frame_index)
+    window = max(1, min(EARLY_REFERENCE_WINDOW, int(analysis.frame_count)))
+    capture = cv2.VideoCapture(str(video_path))
+    tried = 0
+    try:
+        if not capture.isOpened():
+            return False
+        for index in range(window):
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                break
+            if index == current_index:
+                continue
+            usable, score = _reference_frame_quality(frame)
+            if not usable:
+                continue
+            # Quick robust check before replacing the stored reference.
+            rgb = Image.fromarray(
+                cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            )
+            probe = detect_wickets_robust(rgb, enable_roi=True)
+            selected = probe.get("selected") or {}
+            if selected.get("striker") is None or selected.get("non_striker") is None:
+                tried += 1
+                if tried >= EARLY_FALLBACK_ATTEMPTS:
+                    return False
+                continue
+            replace_reference_frame(
+                analysis_id,
+                frame_index=index,
+                frame=frame,
+                selection={
+                    "strategy": "earliest_clean_stable",
+                    "window_scanned": index + 1,
+                    "window_limit": window,
+                    "selected_index": index,
+                    "score": round(float(score), 3),
+                    "reason": "two_wicket_early_fallback",
+                },
+            )
+            return True
+    finally:
+        capture.release()
+    return False
 
 
 def _box_points(

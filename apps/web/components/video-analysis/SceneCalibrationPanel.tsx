@@ -10,6 +10,7 @@ import {
   detectVideoAnalysisCalibration,
   type ConfirmedVideoCalibrationResponse,
   type VideoAnalysisPreparedResponse,
+  type VisualCalibrationDetectionDebug,
   type VisualCalibrationQuality,
   type WicketCalibration
 } from "@/lib/api";
@@ -83,6 +84,7 @@ export function SceneCalibrationPanel({
     initialCalibration?.reference_frame_index ?? analysis.reference_frame_index
   );
   const [savedCalibration, setSavedCalibration] = useState(initialCalibration);
+  const [detectionDebug, setDetectionDebug] = useState<VisualCalibrationDetectionDebug | null>(null);
 
   const pitchGeometry = useMemo(
     () => calculateApproximatePitchGeometry(striker, nonStriker, 1),
@@ -163,6 +165,7 @@ export function SceneCalibrationPanel({
       setWarning(result.assignment_warning ?? result.warning ?? null);
       setQuality(result.quality ?? "FAILED");
       setQualityReasons(result.quality_reasons ?? []);
+      setDetectionDebug(result.detection_debug ?? null);
       setPhase(
         nextStriker && nextNonStriker && result.quality !== "FAILED"
           ? "review"
@@ -181,13 +184,15 @@ export function SceneCalibrationPanel({
       "striker",
       nonStriker.source,
       nonStriker.confidence ?? null,
-      nonStriker.box
+      nonStriker.box,
+      nonStriker.detection_pass
     ));
     setNonStriker(wicketFromBox(
       "non_striker",
       striker.source,
       striker.confidence ?? null,
-      striker.box
+      striker.box,
+      striker.detection_pass
     ));
     setSavedCalibration(null);
     onDirty();
@@ -219,13 +224,15 @@ export function SceneCalibrationPanel({
             label: "striker",
             source: striker.source,
             confidence: striker.confidence ?? null,
-            box: striker.box
+            box: striker.box,
+            detection_pass: striker.detection_pass ?? null
           },
           non_striker_wicket: {
             label: "non_striker",
             source: nonStriker.source,
             confidence: nonStriker.confidence ?? null,
-            box: nonStriker.box
+            box: nonStriker.box,
+            detection_pass: nonStriker.detection_pass ?? null
           },
           corridor_width_multiplier: 1
         }
@@ -287,6 +294,14 @@ export function SceneCalibrationPanel({
       )}
       <div className="mt-5 rounded-xl border border-white/10 bg-black/20 p-4">
         <p className="text-sm leading-6 text-white/65">{message}</p>
+        <div className="mt-3 flex flex-wrap gap-3 text-sm font-semibold">
+          <span className={striker ? "text-lime" : "text-white/35"}>
+            Striker {striker ? "✅" : phase === "detecting" ? "…" : "—"}
+          </span>
+          <span className={nonStriker ? "text-lime" : "text-white/35"}>
+            Non-Striker {nonStriker ? "✅" : phase === "detecting" ? "…" : "—"}
+          </span>
+        </div>
         <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs text-white/35">
           <span>Reference frame {referenceFrameIndex}</span>
           <span>{candidateCount} detector candidate{candidateCount === 1 ? "" : "s"}</span>
@@ -298,6 +313,38 @@ export function SceneCalibrationPanel({
               <li key={reason}>{reason}</li>
             ))}
           </ul>
+        )}
+        {detectionDebug && (
+          <details className="mt-4 rounded-lg border border-white/10 bg-black/30 p-3 text-xs text-white/45">
+            <summary className="cursor-pointer font-semibold text-white/55">
+              Developer detection debug ({detectionDebug.pass_count} passes)
+            </summary>
+            <div className="mt-3 space-y-2">
+              <p>
+                Striker source: {striker?.detection_pass ?? "—"}
+                {" · "}
+                Non-striker source: {nonStriker?.detection_pass ?? "—"}
+              </p>
+              {detectionDebug.debug_overlay_url && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  className="mt-2 h-auto w-full rounded-md bg-black object-contain"
+                  src={detectionDebug.debug_overlay_url}
+                  alt="Wicket detection debug overlay"
+                />
+              )}
+              {detectionDebug.debug_json_url && (
+                <a
+                  className="inline-block text-lime underline"
+                  href={detectionDebug.debug_json_url}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Open detection debug JSON
+                </a>
+              )}
+            </div>
+          </details>
         )}
       </div>
       {displayWarning && (

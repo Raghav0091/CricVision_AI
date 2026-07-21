@@ -308,6 +308,9 @@ export type NormalizedBox = {
 };
 
 
+export type WicketDetectionPass = "full_frame" | "far_roi" | "near_roi";
+
+
 export type WicketCandidate = {
   candidate_id: string;
   confidence: number;
@@ -315,6 +318,7 @@ export type WicketCandidate = {
   box: NormalizedBox;
   center: NormalizedPoint;
   bottom_center: NormalizedPoint;
+  detection_pass?: WicketDetectionPass | null;
 };
 
 
@@ -326,6 +330,7 @@ export type WicketCalibration = {
   center: NormalizedPoint;
   bottom_center: NormalizedPoint;
   approximate_wicket_base_reference?: NormalizedPoint | null;
+  detection_pass?: WicketDetectionPass | null;
 };
 
 
@@ -341,6 +346,17 @@ export type PitchGeometry = {
 
 
 export type VisualCalibrationQuality = "READY" | "WEAK" | "FAILED";
+
+
+export type VisualCalibrationDetectionDebug = {
+  pass_count: number;
+  passes: Array<Record<string, unknown>>;
+  rejected: Array<Record<string, unknown>>;
+  rois: Record<string, NormalizedBox>;
+  selected?: Record<string, unknown> | null;
+  debug_overlay_url?: string | null;
+  debug_json_url?: string | null;
+};
 
 
 export type VideoCalibrationDetectionResponse = {
@@ -367,13 +383,20 @@ export type VideoCalibrationDetectionResponse = {
   assignment_warning?: string | null;
   warning?: string | null;
   message: string;
+  detection_debug?: VisualCalibrationDetectionDebug | null;
 };
 
 
 export type VideoCalibrationConfirmationRequest = {
   analysis_id: string;
-  striker_wicket: Pick<WicketCalibration, "label" | "source" | "confidence" | "box">;
-  non_striker_wicket: Pick<WicketCalibration, "label" | "source" | "confidence" | "box">;
+  striker_wicket: Pick<
+    WicketCalibration,
+    "label" | "source" | "confidence" | "box" | "detection_pass"
+  >;
+  non_striker_wicket: Pick<
+    WicketCalibration,
+    "label" | "source" | "confidence" | "box" | "detection_pass"
+  >;
   corridor_width_multiplier: number;
   user_note?: string | null;
 };
@@ -778,9 +801,17 @@ export type WicketCameraPoseResult = {
 function withBrowserSafeDetectionUrls(
   result: VideoCalibrationDetectionResponse
 ): VideoCalibrationDetectionResponse {
+  const debug = result.detection_debug;
   return {
     ...result,
-    reference_frame_url: resolveApiUrl(result.reference_frame_url) ?? result.reference_frame_url
+    reference_frame_url: resolveApiUrl(result.reference_frame_url) ?? result.reference_frame_url,
+    detection_debug: debug
+      ? {
+          ...debug,
+          debug_overlay_url: resolveApiUrl(debug.debug_overlay_url) ?? debug.debug_overlay_url,
+          debug_json_url: resolveApiUrl(debug.debug_json_url) ?? debug.debug_json_url
+        }
+      : debug
   };
 }
 

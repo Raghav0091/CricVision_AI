@@ -1,4 +1,4 @@
-"""Lazy, box-cropped stump detection for live calibration."""
+"""Lazy stump detection for live box-crop calibration and video auto-cal."""
 
 from __future__ import annotations
 
@@ -13,6 +13,24 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 STUMP_MODEL_PATH = PROJECT_ROOT / "Models" / "stump_detector" / "best.pt"
 STUMP_MODEL_RELATIVE_PATH = "Models/stump_detector/best.pt"
 STUMP_CLASS_FRAGMENTS = ("stump", "wicket")
+
+# ponytail: rear-camera nets — far stump sits mid-upper; near stump is large
+# lower-centre and often touches the bottom. Broader than Live alignment boxes.
+FAR_WICKET_ROI = {"x": 0.18, "y": 0.15, "width": 0.64, "height": 0.50}
+NEAR_WICKET_ROI = {"x": 0.05, "y": 0.45, "width": 0.90, "height": 0.55}
+ROI_LAYOUTS = {
+    "far_roi": FAR_WICKET_ROI,
+    "near_roi": NEAR_WICKET_ROI,
+}
+# Keep Ultralytics default-ish floor; do not globally drop conf to near-zero.
+DEFAULT_DETECT_CONF = 0.25
+ROI_DETECT_CONF = 0.20
+ROI_HIGHRES_IMGSZ = 960
+DEDUPE_IOU = 0.45
+MIN_BOX_PX = 4.0
+# Reject flat junk (e.g. crease lines) — not large/bottom/plastic near wickets.
+MIN_ASPECT_HEIGHT_OVER_WIDTH = 0.35
+MAX_AREA_FRACTION = 0.55
 
 
 def solve_stump_calibration(
@@ -146,6 +164,32 @@ def _load_model(model_path: str):
 
 def detect_stump_candidates(image: Image.Image) -> dict[str, Any]:
     """Run the shared cached stump model once over a complete reference frame."""
+    result = detect_wickets_robust(image, enable_roi=False)
+    return {
+        "success": result["success"],
+        "status": result["status"],
+        "message": result["message"],
+        "candidates": [
+            {
+                "confidence": item["confidence"],
+                "class_name": item["class_name"],
+                "bbox": item["bbox"],
+            }
+            for item in result.get("candidates") or []
+        ],
+    }
+
+
+def detect_wickets_robust(
+    image: Image.Image,
+    *,
+    enable_roi: bool = True,
+) -> dict[str, Any]:
+    """Multi-pass stump detection: full frame, then far/near ROI if needed.
+
+    Shared service for Video Analysis auto-cal (and future Live Session reuse).
+    Does not invent wickets — only returns detector boxes with pass metadata.
+    """
     if not STUMP_MODEL_PATH.is_file():
         return {
             "success": False,
@@ -155,21 +199,226 @@ def detect_stump_candidates(image: Image.Image) -> dict[str, Any]:
                 f"{STUMP_MODEL_RELATIVE_PATH}"
             ),
             "candidates": [],
+            "selected": {"striker": None, "non_striker": None},
+            "rois": dict(ROI_LAYOUTS),
+            "diagnostics": {
+                "passes": [],
+                "rejected": [],
+                "selected": None,
+                "pass_count": 0,
+            },
         }
 
     try:
         model = _load_model(str(STUMP_MODEL_PATH))
-        results = model.predict(source=image, verbose=False)
     except Exception as exc:
         return {
             "success": False,
             "status": "stump_detector_error",
-            "message": f"Stump detector inference failed: {type(exc).__name__}.",
+            "message": f"Stump detector could not be loaded: {type(exc).__name__}.",
             "candidates": [],
+            "selected": {"striker": None, "non_striker": None},
+            "rois": dict(ROI_LAYOUTS),
+            "diagnostics": {
+                "passes": [],
+                "rejected": [],
+                "selected": None,
+                "pass_count": 0,
+            },
         }
 
     frame_width, frame_height = image.size
-    candidates: list[dict[str, Any]] = []
+    diagnostics: dict[str, Any] = {
+        "passes": [],
+        "rejected": [],
+        "selected": None,
+        "pass_count": 0,
+        "frame_width": frame_width,
+        "frame_height": frame_height,
+    }
+    merged: list[dict[str, Any]] = []
+
+    full_raw, full_rejected = _run_detection_pass(
+        model,
+        image,
+        source="full_frame",
+        offset_x=0.0,
+        offset_y=0.0,
+        frame_width=frame_width,
+        frame_height=frame_height,
+        conf=DEFAULT_DETECT_CONF,
+        imgsz=None,
+    )
+    diagnostics["passes"].append(
+        _pass_summary("full_frame", full_raw, full_rejected)
+    )
+    diagnostics["rejected"].extend(full_rejected)
+    merged = _merge_candidates(merged, full_raw)
+
+    need_roi = enable_roi and not _has_two_plausible_ends(
+        merged, frame_width, frame_height
+    )
+    if need_roi:
+        for source, roi in ROI_LAYOUTS.items():
+            crop_bounds = _normalized_box_to_pixels(
+                roi, frame_width, frame_height
+            )
+            crop = image.crop(crop_bounds)
+            raw, rejected = _run_detection_pass(
+                model,
+                crop,
+                source=source,
+                offset_x=float(crop_bounds[0]),
+                offset_y=float(crop_bounds[1]),
+                frame_width=frame_width,
+                frame_height=frame_height,
+                conf=ROI_DETECT_CONF,
+                imgsz=None,
+            )
+            diagnostics["passes"].append(
+                _pass_summary(source, raw, rejected, roi=roi)
+            )
+            diagnostics["rejected"].extend(rejected)
+            merged = _merge_candidates(merged, raw)
+
+    # Optional higher-res on the missing end only (max two extra predicts).
+    if enable_roi and not _has_two_plausible_ends(
+        merged, frame_width, frame_height
+    ):
+        missing = _missing_end_sources(merged, frame_width, frame_height)
+        for source in missing:
+            roi = ROI_LAYOUTS[source]
+            crop_bounds = _normalized_box_to_pixels(
+                roi, frame_width, frame_height
+            )
+            crop = image.crop(crop_bounds)
+            pass_name = f"{source}_imgsz{ROI_HIGHRES_IMGSZ}"
+            raw, rejected = _run_detection_pass(
+                model,
+                crop,
+                source=source,
+                offset_x=float(crop_bounds[0]),
+                offset_y=float(crop_bounds[1]),
+                frame_width=frame_width,
+                frame_height=frame_height,
+                conf=ROI_DETECT_CONF,
+                imgsz=ROI_HIGHRES_IMGSZ,
+            )
+            diagnostics["passes"].append(
+                _pass_summary(pass_name, raw, rejected, roi=roi)
+            )
+            diagnostics["rejected"].extend(rejected)
+            merged = _merge_candidates(merged, raw)
+
+    diagnostics["pass_count"] = len(diagnostics["passes"])
+    selected = _select_far_near_ends(merged, frame_width, frame_height)
+    diagnostics["selected"] = {
+        "striker": _candidate_debug(selected["striker"]),
+        "non_striker": _candidate_debug(selected["non_striker"]),
+    }
+    merged.sort(key=lambda item: item["confidence"], reverse=True)
+    both = selected["striker"] is not None and selected["non_striker"] is not None
+    return {
+        "success": True,
+        "status": "candidates_ready" if both else "detection_incomplete",
+        "message": (
+            "Robust stump detection found both wickets."
+            if both
+            else "Robust stump detection could not lock both wickets."
+        ),
+        "candidates": merged,
+        "selected": selected,
+        "rois": dict(ROI_LAYOUTS),
+        "diagnostics": diagnostics,
+    }
+
+
+def save_robust_detection_overlay(
+    image: Image.Image,
+    *,
+    candidates: list[dict[str, Any]],
+    selected: dict[str, dict[str, Any] | None],
+    rois: dict[str, dict[str, float]],
+    output_path: Path,
+) -> Path:
+    """Developer debug overlay: raw boxes, ROI bounds, selected ends."""
+    debug = image.copy().convert("RGBA")
+    draw = ImageDraw.Draw(debug, "RGBA")
+    width, height = debug.size
+
+    for source, roi in rois.items():
+        x1, y1, x2, y2 = _normalized_box_to_pixels(roi, width, height)
+        color = (255, 170, 40, 220) if source == "far_roi" else (120, 200, 255, 220)
+        draw.rectangle((x1, y1, x2, y2), outline=color, width=3)
+        draw.text((x1 + 4, y1 + 4), source, fill=color)
+
+    for candidate in candidates:
+        bbox = candidate["bbox"]
+        x1 = round(bbox["x"])
+        y1 = round(bbox["y"])
+        x2 = round(bbox["x"] + bbox["width"])
+        y2 = round(bbox["y"] + bbox["height"])
+        draw.rectangle((x1, y1, x2, y2), outline=(220, 220, 220, 200), width=2)
+        draw.text(
+            (x1 + 3, max(0, y1 - 14)),
+            f"{candidate.get('source', '?')} {candidate['confidence']:.2f}",
+            fill=(230, 230, 230, 230),
+        )
+
+    for end, color, label in (
+        ("striker", (255, 190, 70, 255), "SELECTED STRIKER"),
+        ("non_striker", (80, 220, 255, 255), "SELECTED NON-STRIKER"),
+    ):
+        item = selected.get(end)
+        if not item:
+            continue
+        bbox = item["bbox"]
+        x1 = round(bbox["x"])
+        y1 = round(bbox["y"])
+        x2 = round(bbox["x"] + bbox["width"])
+        y2 = round(bbox["y"] + bbox["height"])
+        draw.rectangle((x1, y1, x2, y2), outline=color, width=4)
+        draw.text((x1 + 4, max(0, y1 - 16)), label, fill=color)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    debug.convert("RGB").save(output_path, format="JPEG", quality=92)
+    return output_path
+
+
+def _run_detection_pass(
+    model,
+    image: Image.Image,
+    *,
+    source: str,
+    offset_x: float,
+    offset_y: float,
+    frame_width: int,
+    frame_height: int,
+    conf: float,
+    imgsz: int | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    predict_kwargs: dict[str, Any] = {
+        "source": image,
+        "verbose": False,
+        "conf": conf,
+    }
+    if imgsz is not None:
+        predict_kwargs["imgsz"] = imgsz
+    try:
+        results = model.predict(**predict_kwargs)
+    except Exception:
+        return [], [
+            {
+                "source": source,
+                "reason": "inference_error",
+                "confidence": None,
+                "class_name": None,
+                "bbox": None,
+            }
+        ]
+
+    accepted: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
     try:
         for result in results or []:
             names = getattr(result, "names", None) or getattr(model, "names", {})
@@ -180,47 +429,324 @@ def detect_stump_candidates(image: Image.Image) -> dict[str, Any]:
             confidences = _to_list(getattr(boxes, "conf", []))
             coordinates = _to_list(getattr(boxes, "xyxy", []))
             for class_id, confidence, xyxy in zip(
-                classes,
-                confidences,
-                coordinates,
+                classes, confidences, coordinates
             ):
                 class_name = _class_name(names, int(class_id))
                 if not _is_stump_class(class_name, names):
+                    rejected.append(
+                        {
+                            "source": source,
+                            "reason": f"class_filtered:{class_name}",
+                            "confidence": round(float(confidence), 4),
+                            "class_name": class_name,
+                            "bbox": None,
+                        }
+                    )
                     continue
                 x1, y1, x2, y2 = (float(value) for value in xyxy[:4])
-                x1 = max(0.0, min(float(frame_width), x1))
-                y1 = max(0.0, min(float(frame_height), y1))
-                x2 = max(x1, min(float(frame_width), x2))
-                y2 = max(y1, min(float(frame_height), y2))
-                if x2 - x1 < 1 or y2 - y1 < 1:
+                full_x1 = max(0.0, min(float(frame_width), offset_x + x1))
+                full_y1 = max(0.0, min(float(frame_height), offset_y + y1))
+                full_x2 = max(full_x1, min(float(frame_width), offset_x + x2))
+                full_y2 = max(full_y1, min(float(frame_height), offset_y + y2))
+                width = full_x2 - full_x1
+                height = full_y2 - full_y1
+                bbox = {
+                    "x": full_x1,
+                    "y": full_y1,
+                    "width": width,
+                    "height": height,
+                }
+                reason = _reject_reason(
+                    bbox, frame_width=frame_width, frame_height=frame_height
+                )
+                if reason is not None:
+                    rejected.append(
+                        {
+                            "source": source,
+                            "reason": reason,
+                            "confidence": round(float(confidence), 4),
+                            "class_name": class_name,
+                            "bbox": {
+                                "x": round(full_x1, 2),
+                                "y": round(full_y1, 2),
+                                "width": round(width, 2),
+                                "height": round(height, 2),
+                            },
+                        }
+                    )
                     continue
-                candidates.append(
+                accepted.append(
                     {
                         "confidence": round(float(confidence), 4),
                         "class_name": class_name,
-                        "bbox": {
-                            "x": x1,
-                            "y": y1,
-                            "width": x2 - x1,
-                            "height": y2 - y1,
-                        },
+                        "source": source,
+                        "bbox": bbox,
                     }
                 )
-    except Exception as exc:
-        return {
-            "success": False,
-            "status": "stump_detector_error",
-            "message": f"Stump detector results could not be read: {type(exc).__name__}.",
-            "candidates": [],
-        }
+    except Exception:
+        return [], [
+            {
+                "source": source,
+                "reason": "result_parse_error",
+                "confidence": None,
+                "class_name": None,
+                "bbox": None,
+            }
+        ]
+    accepted.sort(key=lambda item: item["confidence"], reverse=True)
+    return accepted, rejected
 
-    candidates.sort(key=lambda candidate: candidate["confidence"], reverse=True)
+
+def _reject_reason(
+    bbox: dict[str, float],
+    *,
+    frame_width: int,
+    frame_height: int,
+) -> str | None:
+    width = float(bbox["width"])
+    height = float(bbox["height"])
+    if width < MIN_BOX_PX or height < MIN_BOX_PX:
+        return "too_small_px"
+    if height / max(width, 1e-6) < MIN_ASPECT_HEIGHT_OVER_WIDTH:
+        return "aspect_too_flat"
+    area_fraction = (width * height) / max(frame_width * frame_height, 1)
+    if area_fraction > MAX_AREA_FRACTION:
+        return "area_too_large"
+    # Explicit non-rejects for near purple / edge cases (documented in diagnostics).
+    return None
+
+
+def _merge_candidates(
+    existing: list[dict[str, Any]],
+    incoming: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged = list(existing)
+    for candidate in incoming:
+        duplicate_index = None
+        for index, other in enumerate(merged):
+            if _bbox_iou(candidate["bbox"], other["bbox"]) < DEDUPE_IOU:
+                continue
+            duplicate_index = index
+            break
+        if duplicate_index is None:
+            merged.append(candidate)
+            continue
+        # Keep higher confidence; prefer keeping original source metadata when tied.
+        current = merged[duplicate_index]
+        if candidate["confidence"] > current["confidence"]:
+            merged[duplicate_index] = candidate
+    return merged
+
+
+def _has_two_plausible_ends(
+    candidates: list[dict[str, Any]],
+    frame_width: int,
+    frame_height: int,
+) -> bool:
+    selected = _select_far_near_ends(candidates, frame_width, frame_height)
+    return (
+        selected["striker"] is not None and selected["non_striker"] is not None
+    )
+
+
+def _missing_end_sources(
+    candidates: list[dict[str, Any]],
+    frame_width: int,
+    frame_height: int,
+) -> list[str]:
+    selected = _select_far_near_ends(candidates, frame_width, frame_height)
+    missing: list[str] = []
+    if selected["striker"] is None:
+        missing.append("far_roi")
+    if selected["non_striker"] is None:
+        missing.append("near_roi")
+    return missing
+
+
+def _select_far_near_ends(
+    candidates: list[dict[str, Any]],
+    frame_width: int,
+    frame_height: int,
+) -> dict[str, dict[str, Any] | None]:
+    """Pick FAR=higher/smaller and NEAR=lower/larger by explicit scores."""
+    if len(candidates) < 2:
+        only = candidates[0] if candidates else None
+        if only is None:
+            return {"striker": None, "non_striker": None}
+        if _near_affinity(only, frame_width, frame_height) >= 0.55:
+            return {"striker": None, "non_striker": only}
+        return {"striker": only, "non_striker": None}
+
+    best_pair: tuple[dict[str, Any], dict[str, Any]] | None = None
+    best_score = -1e9
+    for index, first in enumerate(candidates):
+        for second in candidates[index + 1 :]:
+            if _bbox_iou(first["bbox"], second["bbox"]) > DEDUPE_IOU:
+                continue
+            near, far = _order_near_far(
+                first, second, frame_width, frame_height
+            )
+            separation = _center_separation_norm(
+                near, far, frame_width, frame_height
+            )
+            if separation < 0.04:
+                continue
+            near_aff = _near_affinity(near, frame_width, frame_height)
+            far_aff = _far_affinity(far, frame_width, frame_height)
+            # Require complementary roles — avoid two near-ish or two far-ish.
+            if near_aff < 0.35 or far_aff < 0.25:
+                continue
+            score = (
+                near_aff
+                + far_aff
+                + min(separation, 0.55)
+                + 0.35 * (near["confidence"] + far["confidence"])
+            )
+            if score > best_score:
+                best_pair = (far, near)
+                best_score = score
+
+    if best_pair is None:
+        # Fallback: strongest vertical+size contrast pair without inventing boxes.
+        ranked = sorted(
+            candidates,
+            key=lambda item: _near_affinity(item, frame_width, frame_height),
+        )
+        far = ranked[0]
+        near = ranked[-1]
+        if (
+            far is near
+            or _bbox_iou(far["bbox"], near["bbox"]) > DEDUPE_IOU
+            or _center_separation_norm(near, far, frame_width, frame_height)
+            < 0.04
+        ):
+            return {"striker": None, "non_striker": None}
+        return {"striker": far, "non_striker": near}
+
+    far, near = best_pair
+    return {"striker": far, "non_striker": near}
+
+
+def _order_near_far(
+    first: dict[str, Any],
+    second: dict[str, Any],
+    frame_width: int,
+    frame_height: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if _near_affinity(first, frame_width, frame_height) >= _near_affinity(
+        second, frame_width, frame_height
+    ):
+        return first, second
+    return second, first
+
+
+def _near_affinity(
+    candidate: dict[str, Any],
+    frame_width: int,
+    frame_height: int,
+) -> float:
+    bbox = candidate["bbox"]
+    bottom_y = (bbox["y"] + bbox["height"]) / max(frame_height, 1)
+    area = (bbox["width"] * bbox["height"]) / max(
+        frame_width * frame_height, 1
+    )
+    # Lower + larger ≈ non-striker / near end for rear-camera views.
+    return (
+        0.55 * _clamp01(bottom_y)
+        + 0.30 * _clamp01(area / 0.12)
+        + 0.15 * _clamp01(candidate["confidence"])
+    )
+
+
+def _far_affinity(
+    candidate: dict[str, Any],
+    frame_width: int,
+    frame_height: int,
+) -> float:
+    bbox = candidate["bbox"]
+    center_y = (bbox["y"] + bbox["height"] / 2) / max(frame_height, 1)
+    area = (bbox["width"] * bbox["height"]) / max(
+        frame_width * frame_height, 1
+    )
+    # Higher + smaller ≈ striker / far end.
+    return (
+        0.55 * _clamp01(1.0 - center_y)
+        + 0.30 * _clamp01(1.0 - area / 0.08)
+        + 0.15 * _clamp01(candidate["confidence"])
+    )
+
+
+def _center_separation_norm(
+    first: dict[str, Any],
+    second: dict[str, Any],
+    frame_width: int,
+    frame_height: int,
+) -> float:
+    fx = first["bbox"]["x"] + first["bbox"]["width"] / 2
+    fy = first["bbox"]["y"] + first["bbox"]["height"]
+    sx = second["bbox"]["x"] + second["bbox"]["width"] / 2
+    sy = second["bbox"]["y"] + second["bbox"]["height"]
+    dx = (fx - sx) / max(frame_width, 1)
+    dy = (fy - sy) / max(frame_height, 1)
+    return (dx * dx + dy * dy) ** 0.5
+
+
+def _bbox_iou(first: dict[str, float], second: dict[str, float]) -> float:
+    left = max(first["x"], second["x"])
+    top = max(first["y"], second["y"])
+    right = min(
+        first["x"] + first["width"],
+        second["x"] + second["width"],
+    )
+    bottom = min(
+        first["y"] + first["height"],
+        second["y"] + second["height"],
+    )
+    intersection = max(0.0, right - left) * max(0.0, bottom - top)
+    if intersection <= 0:
+        return 0.0
+    first_area = first["width"] * first["height"]
+    second_area = second["width"] * second["height"]
+    return intersection / max(first_area + second_area - intersection, 1e-6)
+
+
+def _pass_summary(
+    name: str,
+    accepted: list[dict[str, Any]],
+    rejected: list[dict[str, Any]],
+    *,
+    roi: dict[str, float] | None = None,
+) -> dict[str, Any]:
     return {
-        "success": True,
-        "status": "candidates_ready",
-        "message": "Stump detection completed.",
-        "candidates": candidates,
+        "name": name,
+        "raw_count": len(accepted) + len(rejected),
+        "accepted_count": len(accepted),
+        "rejected_count": len(rejected),
+        "roi": roi,
+        "accepted": [_candidate_debug(item) for item in accepted],
+        "rejected_reasons": [item.get("reason") for item in rejected],
     }
+
+
+def _candidate_debug(candidate: dict[str, Any] | None) -> dict[str, Any] | None:
+    if candidate is None:
+        return None
+    bbox = candidate["bbox"]
+    return {
+        "confidence": candidate.get("confidence"),
+        "class_name": candidate.get("class_name"),
+        "source": candidate.get("source"),
+        "bbox": {
+            "x": round(float(bbox["x"]), 2),
+            "y": round(float(bbox["y"]), 2),
+            "width": round(float(bbox["width"]), 2),
+            "height": round(float(bbox["height"]), 2),
+        },
+    }
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
 
 
 def _detect_end(
