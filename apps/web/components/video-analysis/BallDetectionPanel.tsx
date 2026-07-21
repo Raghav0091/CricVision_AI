@@ -14,6 +14,8 @@ import {
   type VideoBallDetectionResultResponse
 } from "@/lib/api";
 
+import { MEDIA_FIT_CLASS } from "./AnalysisMediaStage";
+
 
 type JobView = {
   jobId: string;
@@ -128,48 +130,68 @@ function DetectionResult({
   ];
 
   return (
-    <div className="mt-6 space-y-6">
-      <div className="grid gap-5 xl:grid-cols-2">
-        <div className="rounded-xl border border-white/10 bg-black/20 p-4">
-          <p className="text-xs font-bold uppercase tracking-[0.15em] text-white/40">Original Video</p>
-          <video className="mt-3 aspect-video w-full rounded-lg bg-black object-contain" controls preload="metadata" src={analysis.original_video_url} />
+    <div className="mt-4 space-y-4">
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(15rem,20rem)]">
+        <div className="min-w-0 rounded-xl border border-lime/20 bg-lime/[0.03] p-3">
+          <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-lime">Raw Detection Video</p>
+          <div className="mt-2 flex max-h-[min(42dvh,calc(100dvh-16rem))] min-h-[8rem] items-center justify-center overflow-hidden rounded-xl bg-[#050a08] sm:max-h-[min(52dvh,calc(100dvh-14rem))]">
+            <video className={MEDIA_FIT_CLASS} controls preload="metadata" src={summary.processed_video_url} />
+          </div>
+          <p className="mt-2 text-xs text-white/40">Every-frame overlay · raw candidates only</p>
         </div>
-        <div className="rounded-xl border border-lime/20 bg-lime/[0.03] p-4">
-          <p className="text-xs font-bold uppercase tracking-[0.15em] text-lime">Raw Detection Video</p>
-          <video className="mt-3 aspect-video w-full rounded-lg bg-black object-contain" controls preload="metadata" src={summary.processed_video_url} />
-          <p className="mt-2 text-xs text-white/40">Complete every-frame overlay. Raw candidates only; no tracking.</p>
-        </div>
+        <aside className="flex min-w-0 flex-col gap-3 xl:sticky xl:top-4 xl:max-h-[calc(100dvh-5rem)] xl:self-start xl:overflow-y-auto">
+          <div className="grid grid-cols-2 gap-2">
+            {stats.slice(0, 6).map(([label, value]) => (
+              <div key={label} className="rounded-lg bg-black/25 p-2.5">
+                <span className="block text-[10px] text-white/35">{label}</span>
+                <strong className="mt-0.5 block text-sm">{value}</strong>
+              </div>
+            ))}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {links.map(([label, url]) => (
+              <a
+                key={label}
+                className="rounded-lg border border-white/15 bg-white/5 px-2.5 py-1.5 text-[11px] font-bold text-lime hover:bg-white/10"
+                href={url}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {label}
+              </a>
+            ))}
+          </div>
+        </aside>
       </div>
 
-      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
-        {stats.map(([label, value]) => (
-          <div key={label} className="rounded-xl bg-black/20 p-3">
-            <span className="block text-xs text-white/35">{label}</span>
-            <strong className="mt-1 block text-lg">{value}</strong>
+      <details className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+        <summary className="cursor-pointer text-sm font-bold text-white/55">Original video &amp; details</summary>
+        <div className="mt-3 space-y-3">
+          <div className="flex min-h-[8rem] items-center justify-center overflow-hidden rounded-xl bg-[#050a08]">
+            <video className={MEDIA_FIT_CLASS} controls preload="metadata" src={analysis.original_video_url} />
           </div>
-        ))}
-      </div>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+            {stats.slice(6).map(([label, value]) => (
+              <div key={label} className="rounded-lg bg-black/25 p-2.5">
+                <span className="block text-[10px] text-white/35">{label}</span>
+                <strong className="mt-0.5 block text-sm">{value}</strong>
+              </div>
+            ))}
+          </div>
+          <div className="grid gap-3 rounded-lg border border-white/10 bg-black/20 p-3 sm:grid-cols-2 xl:grid-cols-4">
+            <div><span className="block text-[10px] text-white/35">Model</span><strong className="mt-0.5 block break-all text-xs">{summary.model_path_used}</strong></div>
+            <div><span className="block text-[10px] text-white/35">Device</span><strong className="mt-0.5 block text-xs">{summary.device_used}</strong></div>
+            <div><span className="block text-[10px] text-white/35">Settings</span><strong className="mt-0.5 block text-xs">{summary.imgsz}px · conf {summary.confidence_threshold} · stride {summary.frame_stride}</strong></div>
+            <div><span className="block text-[10px] text-white/35">Duration</span><strong className="mt-0.5 block text-xs">{summary.processing_duration_seconds.toFixed(2)}s</strong></div>
+          </div>
+        </div>
+      </details>
 
       <DetectionCoverageTimeline counts={result.frame_candidate_counts} />
 
-      <div className="grid gap-4 rounded-xl border border-white/10 bg-black/20 p-4 sm:grid-cols-2 xl:grid-cols-4">
-        <div><span className="block text-xs text-white/35">Model used</span><strong className="mt-1 block break-all text-sm">{summary.model_path_used}</strong></div>
-        <div><span className="block text-xs text-white/35">Processing device</span><strong className="mt-1 block text-sm">{summary.device_used}</strong></div>
-        <div><span className="block text-xs text-white/35">Inference settings</span><strong className="mt-1 block text-sm">{summary.imgsz}px · conf {summary.confidence_threshold} · stride {summary.frame_stride}</strong></div>
-        <div><span className="block text-xs text-white/35">Processing duration</span><strong className="mt-1 block text-sm">{summary.processing_duration_seconds.toFixed(2)}s</strong></div>
-      </div>
-
       {summary.model_warning && (
-        <p className="rounded-xl border border-[#ffca68]/30 bg-[#ffca68]/[0.05] p-4 text-sm text-[#ffdc9a]">{summary.model_warning}</p>
+        <p className="rounded-lg border border-[#ffca68]/30 bg-[#ffca68]/[0.05] px-3 py-2 text-sm text-[#ffdc9a]">{summary.model_warning}</p>
       )}
-
-      <div className="flex flex-wrap gap-2">
-        {links.map(([label, url]) => (
-          <a key={label} className="rounded-lg border border-white/15 bg-white/5 px-3 py-2 text-xs font-bold text-lime hover:bg-white/10" href={url} target="_blank" rel="noreferrer">
-            {label}
-          </a>
-        ))}
-      </div>
     </div>
   );
 }
@@ -286,56 +308,43 @@ export function BallDetectionPanel({
   const progress = job?.progress ?? (result ? 100 : 0);
 
   return (
-    <Card className="border-lime/20">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <StatusBadge
-            label={result ? "Ball Detection — Ready" : job ? `Ball Detection — ${statusLabel(job.status)}` : "Ball Detection — Available"}
-            tone={error ? "warn" : result ? "good" : "neutral"}
-          />
-          <h2 className="mt-4 text-2xl font-black">Every-Frame Ball Detection</h2>
-          <p className="mt-2 max-w-3xl text-sm leading-6 text-white/50">
-            Run the trained ball detector on every original frame and preserve every raw ball candidate. This stage does not track, connect, or interpolate detections.
+    <Card className="border-lime/20 p-4 sm:p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-lg font-black tracking-tight sm:text-xl">Ball Detection</h2>
+            <StatusBadge
+              label={error ? "Failed" : result ? "Ready" : isActive ? "Processing" : "Ready"}
+              tone={error ? "warn" : result ? "good" : "neutral"}
+            />
+          </div>
+          <p className="mt-1 text-sm text-white/45">
+            Every-frame raw candidates · no tracking yet
+            {job ? ` · ${statusLabel(job.status)}` : ""}
           </p>
         </div>
         <Button disabled={isActive} onClick={() => void runDetection()}>
-          {starting ? "Starting…" : isActive ? "Detection running…" : result ? "Run Ball Detection Again" : "Run Ball Detection"}
+          {starting ? "Starting…" : isActive ? "Detection running…" : result ? "Run Again" : "Run Detection"}
         </Button>
       </div>
 
-      <div className="mt-5 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
-        {[
-          ["Model", "ball_only_E2_1280_baseline.pt"],
-          ["Image size", "960"],
-          ["Confidence", "0.15"],
-          ["Frame stride", "1"],
-          ["Coverage", "Every frame"]
-        ].map(([label, value]) => (
-          <div key={label} className="rounded-xl bg-black/20 p-3">
-            <span className="block text-xs text-white/35">{label}</span>
-            <strong className="mt-1 block break-all text-sm">{value}</strong>
-          </div>
-        ))}
-      </div>
-
       {job && (
-        <div className="mt-5 rounded-xl border border-lime/20 bg-lime/[0.04] p-4">
-          <div className="flex items-center justify-between gap-4">
-            <p className="font-bold text-lime">{job.message}</p>
+        <div className="mt-3 rounded-xl border border-lime/20 bg-lime/[0.04] p-3">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm font-bold text-lime">{job.message}</p>
             <span className="text-sm font-black">{progress}%</span>
           </div>
-          <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/10">
+          <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10">
             <div className="h-full rounded-full bg-lime transition-[width]" style={{ width: `${progress}%` }} />
           </div>
-          <div className="mt-2 flex flex-wrap justify-between gap-2 text-xs text-white/40">
-            <span>{statusLabel(job.status)}</span>
-            <span>Frame {job.currentFrame.toLocaleString()} of {job.totalFrames.toLocaleString()}</span>
-          </div>
+          <p className="mt-1.5 text-[11px] text-white/40">
+            Frame {job.currentFrame.toLocaleString()} / {job.totalFrames.toLocaleString()}
+          </p>
         </div>
       )}
 
       {error && (
-        <p className="mt-5 rounded-xl border border-signal/30 bg-signal/10 p-4 text-sm leading-6 text-[#ffaaa6]">{error}</p>
+        <p className="mt-3 rounded-lg border border-signal/30 bg-signal/10 px-3 py-2 text-sm leading-6 text-[#ffaaa6]">{error}</p>
       )}
 
       {result && <DetectionResult analysis={analysis} result={result} />}

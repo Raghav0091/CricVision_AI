@@ -4,6 +4,7 @@ import { type ChangeEvent, useEffect, useRef, useState } from "react";
 
 import { BallDetectionPanel } from "@/components/video-analysis/BallDetectionPanel";
 import { BallTrackingPanel } from "@/components/video-analysis/BallTrackingPanel";
+import { MEDIA_FIT_CLASS } from "@/components/video-analysis/AnalysisMediaStage";
 import { SceneCalibrationPanel } from "@/components/video-analysis/SceneCalibrationPanel";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
@@ -61,57 +62,93 @@ function validateVideo(file: File): string | null {
 }
 
 
-function WorkflowStage({
-  index,
-  title,
-  state,
-  note
+type StepState = "complete" | "current" | "future" | "failed";
+
+
+function WorkflowStepper({
+  steps,
+  onSelect
 }: {
-  index: number;
-  title: string;
-  state: "active" | "complete" | "available" | "locked" | "disabled";
-  note: string;
+  steps: Array<{ key: string; label: string; state: StepState; stage?: ActiveStage }>;
+  onSelect?: (stage: ActiveStage) => void;
 }) {
-  const stateStyles = {
-    active: "border-lime/40 bg-lime/[0.08]",
-    complete: "border-lime/20 bg-lime/[0.03]",
-    available: "border-[#ffca68]/30 bg-[#ffca68]/[0.04]",
-    locked: "border-white/10 bg-white/[0.02] opacity-65",
-    disabled: "border-white/10 bg-white/[0.02] opacity-55"
-  };
   return (
-    <div className={`rounded-xl border p-4 ${stateStyles[state]}`}>
-      <div className="flex items-center justify-between gap-3">
-        <span className={`text-xs font-black ${state === "disabled" ? "text-white/30" : "text-lime"}`}>0{index}</span>
-        <span className="text-[10px] font-bold uppercase tracking-[0.12em] text-white/35">
-          {state === "disabled" ? "Coming later" : note}
-        </span>
-      </div>
-      <p className="mt-5 text-sm font-black">{title}</p>
-    </div>
+    <nav aria-label="Analysis workflow" className="overflow-x-auto">
+      <ol className="flex min-w-0 items-center gap-1 sm:gap-2">
+        {steps.map((step, index) => {
+          const styles: Record<StepState, string> = {
+            complete: "border-lime/35 bg-lime/[0.08] text-lime",
+            current: "border-lime/50 bg-lime/[0.12] text-white",
+            future: "border-white/10 bg-white/[0.03] text-white/40",
+            failed: "border-signal/40 bg-signal/10 text-[#ffaaa6]"
+          };
+          const clickable =
+            Boolean(onSelect && step.stage)
+            && (step.state === "complete" || step.state === "current" || (
+              step.key === "detect" && steps.some((s) => s.key === "calibration" && s.state === "complete")
+            ) || (
+              step.key === "track" && steps.some((s) => s.key === "detect" && s.state === "complete")
+            ) || (
+              step.key === "calibration" && steps.some((s) => s.key === "upload" && s.state === "complete")
+            ));
+          const content = (
+            <>
+              <span className="tabular-nums opacity-70">{index + 1}</span>
+              {step.label}
+            </>
+          );
+          return (
+            <li key={step.key} className="flex min-w-0 items-center gap-1 sm:gap-2">
+              {index > 0 && (
+                <span
+                  className={`hidden h-px w-3 shrink-0 sm:block sm:w-5 ${
+                    step.state === "future" ? "bg-white/10" : "bg-lime/35"
+                  }`}
+                  aria-hidden
+                />
+              )}
+              {clickable && step.stage ? (
+                <button
+                  type="button"
+                  className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-bold uppercase tracking-[0.08em] sm:px-3 ${styles[step.state]}`}
+                  aria-current={step.state === "current" ? "step" : undefined}
+                  onClick={() => onSelect?.(step.stage!)}
+                >
+                  {content}
+                </button>
+              ) : (
+                <span
+                  className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-bold uppercase tracking-[0.08em] sm:px-3 ${styles[step.state]}`}
+                  aria-current={step.state === "current" ? "step" : undefined}
+                >
+                  {content}
+                </span>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </nav>
   );
 }
 
 
-function MetadataGrid({ analysis }: { analysis: VideoAnalysisPreparedResponse }) {
-  const selectionReason = analysis.reference_frame_selection?.reason;
-  const values = [
-    ["File size", formatBytes(analysis.file_size_bytes)],
-    ["Duration", formatDuration(analysis.duration_seconds)],
-    ["FPS", analysis.fps.toFixed(3).replace(/\.?0+$/, "")],
-    ["Resolution", `${analysis.width} × ${analysis.height}`],
-    ["Total frames", analysis.frame_count.toLocaleString()],
-    ["Codec", analysis.codec ?? "Unavailable"],
-    ["Reference frame", analysis.reference_frame_index.toLocaleString()],
-    ["Frame strategy", selectionReason ?? "earliest_clean_stable"]
+function CompactMeta({ analysis }: { analysis: VideoAnalysisPreparedResponse }) {
+  const items = [
+    `${analysis.width}×${analysis.height}`,
+    `${analysis.fps.toFixed(1).replace(/\.0$/, "")} fps`,
+    `${analysis.frame_count.toLocaleString()} frames`,
+    formatDuration(analysis.duration_seconds)
   ];
   return (
-    <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-      {values.map(([label, value]) => (
-        <div key={label} className="rounded-xl bg-black/20 p-3">
-          <span className="block text-xs text-white/35">{label}</span>
-          <strong className="mt-1 block text-sm">{value}</strong>
-        </div>
+    <div className="flex flex-wrap gap-1.5">
+      {items.map((item) => (
+        <span
+          key={item}
+          className="rounded-md border border-white/10 bg-black/25 px-2 py-0.5 text-[11px] font-semibold text-white/55"
+        >
+          {item}
+        </span>
       ))}
     </div>
   );
@@ -291,136 +328,266 @@ export default function VideoAnalysisPage() {
     && activeStage === "ball_tracking"
     && ballDetectionResult !== null
   );
+  const replayReady = Boolean(ballTrackingResult?.summary?.delivery_replay_url);
 
+  const workspaceTone: "neutral" | "good" | "warn" =
+    workspaceState === "failed"
+      ? "warn"
+      : uploadComplete
+        ? "good"
+        : workspaceState === "uploading"
+          ? "neutral"
+          : "neutral";
+
+  const workspaceLabel =
+    workspaceState === "uploading"
+      ? "Processing"
+      : workspaceState === "failed"
+        ? "Failed"
+        : uploadComplete
+          ? "Ready"
+          : selectedFile
+            ? "Ready"
+            : "Ready";
+
+  const workflowSteps: Array<{ key: string; label: string; state: StepState; stage?: ActiveStage }> = [
+    {
+      key: "upload",
+      label: "Upload",
+      stage: "upload",
+      state: workspaceState === "failed" && !uploadComplete
+        ? "failed"
+        : uploadComplete
+          ? "complete"
+          : "current"
+    },
+    {
+      key: "calibration",
+      label: "Scene Setup",
+      stage: "calibration",
+      state: !uploadComplete
+        ? "future"
+        : calibrationComplete && !calibrationActive
+          ? "complete"
+          : calibrationActive
+            ? "current"
+            : uploadComplete
+              ? "current"
+              : "future"
+    },
+    {
+      key: "detect",
+      label: "Detect",
+      stage: "ball_detection",
+      state: !calibrationComplete
+        ? "future"
+        : ballDetectionResult && !ballDetectionActive
+          ? "complete"
+          : ballDetectionActive
+            ? "current"
+            : "future"
+    },
+    {
+      key: "track",
+      label: "Track",
+      stage: "ball_tracking",
+      state: !ballDetectionResult
+        ? "future"
+        : ballTrackingResult && !ballTrackingActive
+          ? "complete"
+          : ballTrackingActive
+            ? "current"
+            : "future"
+    },
+    {
+      key: "replay",
+      label: "Replay",
+      state: replayReady
+        ? "complete"
+        : ballTrackingActive && ballTrackingResult
+          ? "current"
+          : "future"
+    }
+  ];
+
+  function selectWorkflowStage(stage: ActiveStage) {
+    if (stage === "upload") return;
+    if (stage === "calibration" && uploadComplete) {
+      setActiveStage("calibration");
+      return;
+    }
+    if (stage === "ball_detection" && calibrationComplete) {
+      setActiveStage("ball_detection");
+      return;
+    }
+    if (stage === "ball_tracking" && ballDetectionResult) {
+      setActiveStage("ball_tracking");
+    }
+  }
   return (
-    <div className="mx-auto max-w-7xl py-5">
-      <StatusBadge label="Video Analysis" tone="good" />
-      <div className="mt-5 max-w-3xl">
-        <h1 className="text-4xl font-black tracking-tight sm:text-5xl">Upload and prepare a cricket video.</h1>
-        <p className="mt-4 leading-7 text-white/50">
-          Create a persistent analysis workspace, extract an early calibration reference frame,
-          and run automatic visual scene calibration before ball detection.
-        </p>
-      </div>
-
-      <div className="mt-8 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
-        <WorkflowStage index={1} title="Upload Video" state={uploadComplete ? "complete" : "active"} note={uploadComplete ? "Completed" : "Active"} />
-        <WorkflowStage
-          index={2}
-          title="Automatic Visual Calibration"
-          state={calibrationComplete ? "complete" : calibrationActive ? "active" : uploadComplete ? "available" : "locked"}
-          note={
-            calibrationComplete
-              ? confirmedCalibration?.quality ?? "Accepted"
-              : calibrationActive
-                ? "Active"
-                : uploadComplete
-                  ? "Available"
-                  : "Locked"
-          }
-        />
-        <WorkflowStage
-          index={3}
-          title="Ball Detection"
-          state={ballDetectionResult ? "complete" : ballDetectionActive ? "active" : calibrationComplete ? "available" : "locked"}
-          note={ballDetectionResult ? "Completed" : ballDetectionActive ? "Active" : calibrationComplete ? "Available" : "Locked"}
-        />
-        <WorkflowStage
-          index={4}
-          title="Ball Tracking"
-          state={ballTrackingResult ? "complete" : ballTrackingActive ? "active" : ballDetectionResult ? "available" : "locked"}
-          note={ballTrackingResult ? "Completed" : ballTrackingActive ? "Active" : ballDetectionResult ? "Available" : "Locked"}
-        />
-        <WorkflowStage index={5} title="Physics" state="disabled" note="" />
-        <WorkflowStage index={6} title="3D Replay" state="disabled" note="" />
-      </div>
-
-      <Card className="mt-6">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <h2 className="text-xl font-black">Upload Video</h2>
-            <p className="mt-2 text-sm text-white/45">MP4, MOV, WebM, AVI, or MKV · maximum 500 MB</p>
+    <div className="mx-auto max-w-7xl py-3 sm:py-4">
+      <header className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 max-w-2xl">
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="text-2xl font-black tracking-tight sm:text-3xl">Video Analysis</h1>
+            <StatusBadge label={workspaceLabel} tone={workspaceTone} />
           </div>
-          <StatusBadge
-            label={workspaceState === "uploading" ? "Preparing" : uploadComplete ? "Prepared" : selectedFile ? "File selected" : "Waiting"}
-            tone={workspaceState === "failed" ? "warn" : uploadComplete ? "good" : "neutral"}
-          />
+          <p className="mt-1.5 text-sm leading-6 text-white/45">
+            Upload a cricket clip, calibrate the scene, then detect and track the ball.
+          </p>
+          {analysis && uploadComplete && (
+            <div className="mt-2.5">
+              <CompactMeta analysis={analysis} />
+              <p className="mt-1.5 truncate text-[11px] text-white/30" title={analysis.original_filename}>
+                {analysis.original_filename}
+              </p>
+            </div>
+          )}
         </div>
-
-        {error && <p className="mt-5 rounded-xl border border-signal/30 bg-signal/10 p-4 text-sm leading-6 text-[#ffaaa6]">{error}</p>}
-
-        {!selectedFile && !uploadComplete && !restoring && (
-          <label htmlFor="analysis-video" className="mt-6 block cursor-pointer rounded-2xl border border-dashed border-white/20 bg-white/[0.03] px-6 py-12 text-center transition hover:border-lime/40 hover:bg-lime/[0.03]">
-            <span className="block text-lg font-black">Choose one cricket video</span>
-            <span className="mt-2 block text-sm text-white/40">The file stays local until you press Upload and Prepare Analysis.</span>
+        {uploadComplete && (
+          <label
+            htmlFor="analysis-video"
+            className="cursor-pointer rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-xs font-bold hover:bg-white/10"
+          >
+            Prepare another
           </label>
         )}
-        <input id="analysis-video" className="sr-only" type="file" accept={ACCEPT_VALUE} onChange={handleFileSelection} />
+      </header>
 
-        {selectedFile && (
-          <div className="mt-6 grid gap-5 lg:grid-cols-[1fr_19rem]">
-            <video className="aspect-video w-full rounded-xl bg-black object-contain" controls preload="metadata" src={previewUrl ?? undefined} />
-            <div className="rounded-xl border border-white/10 bg-black/20 p-4">
-              <p className="break-all font-bold">{selectedFile.name}</p>
-              <p className="mt-2 text-sm text-white/45">{formatBytes(selectedFile.size)}</p>
-              <div className="mt-6 space-y-2">
-                <label htmlFor="analysis-video" className="block cursor-pointer rounded-xl border border-white/15 bg-white/5 px-4 py-3 text-center text-sm font-bold hover:bg-white/10">Change selected file</label>
-                <Button className="w-full" variant="danger" disabled={workspaceState === "uploading"} onClick={removeSelectedFile}>Remove selected file</Button>
-              </div>
+      <div className="mt-4">
+        <WorkflowStepper steps={workflowSteps} onSelect={selectWorkflowStage} />
+      </div>
+
+      {!uploadComplete && (
+        <Card className="mt-4 p-4 sm:p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="text-base font-black">Upload Video</h2>
+              <p className="mt-1 text-sm text-white/45">MP4, MOV, WebM, AVI, or MKV · max 500 MB</p>
             </div>
           </div>
-        )}
 
-        {workspaceState === "uploading" && (
-          <div className="mt-6 rounded-xl border border-lime/20 bg-lime/[0.04] p-4">
-            <p className="font-bold text-lime">{restoring ? "Restoring prepared analysis..." : "Uploading and preparing video..."}</p>
-            <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/10"><div className="h-full w-1/2 animate-pulse rounded-full bg-lime" /></div>
-          </div>
-        )}
+          {error && (
+            <p className="mt-3 rounded-lg border border-signal/30 bg-signal/10 px-3 py-2 text-sm leading-6 text-[#ffaaa6]">
+              {error}
+            </p>
+          )}
 
-        {selectedFile && workspaceState !== "prepared" && (
-          <Button className="mt-6 w-full sm:w-auto" disabled={workspaceState === "uploading"} onClick={() => void uploadAndPrepare()}>
-            {workspaceState === "uploading" ? "Uploading and preparing..." : "Upload and Prepare Analysis"}
-          </Button>
-        )}
-      </Card>
+          {!selectedFile && !restoring && (
+            <label
+              htmlFor="analysis-video"
+              className="mt-4 block cursor-pointer rounded-xl border border-dashed border-white/20 bg-white/[0.03] px-5 py-8 text-center transition hover:border-lime/40 hover:bg-lime/[0.03]"
+            >
+              <span className="block text-base font-black">Choose one cricket video</span>
+              <span className="mt-1 block text-sm text-white/40">
+                File stays local until you prepare analysis.
+              </span>
+            </label>
+          )}
+          <input
+            id="analysis-video"
+            className="sr-only"
+            type="file"
+            accept={ACCEPT_VALUE}
+            onChange={handleFileSelection}
+          />
+
+          {selectedFile && (
+            <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(14rem,17rem)]">
+              <div className="flex max-h-[min(42dvh,calc(100dvh-16rem))] min-h-[8rem] items-center justify-center overflow-hidden rounded-xl bg-[#050a08] sm:max-h-[min(52dvh,calc(100dvh-14rem))]">
+                <video
+                  className={MEDIA_FIT_CLASS}
+                  controls
+                  preload="metadata"
+                  src={previewUrl ?? undefined}
+                />
+              </div>
+              <aside className="rounded-xl border border-white/10 bg-black/20 p-3 lg:sticky lg:top-4 lg:self-start">
+                <p className="break-all text-sm font-bold">{selectedFile.name}</p>
+                <p className="mt-1 text-sm text-white/45">{formatBytes(selectedFile.size)}</p>
+                <div className="mt-4 space-y-2">
+                  <label
+                    htmlFor="analysis-video"
+                    className="block cursor-pointer rounded-xl border border-white/15 bg-white/5 px-4 py-2.5 text-center text-sm font-bold hover:bg-white/10"
+                  >
+                    Change file
+                  </label>
+                  <Button
+                    className="w-full"
+                    variant="danger"
+                    disabled={workspaceState === "uploading"}
+                    onClick={removeSelectedFile}
+                  >
+                    Remove
+                  </Button>
+                  <Button
+                    className="w-full"
+                    disabled={workspaceState === "uploading"}
+                    onClick={() => void uploadAndPrepare()}
+                  >
+                    {workspaceState === "uploading"
+                      ? "Preparing…"
+                      : "Upload and Prepare"}
+                  </Button>
+                </div>
+              </aside>
+            </div>
+          )}
+
+          {workspaceState === "uploading" && (
+            <div className="mt-4 rounded-xl border border-lime/20 bg-lime/[0.04] p-3">
+              <p className="text-sm font-bold text-lime">
+                {restoring ? "Restoring prepared analysis…" : "Uploading and preparing video…"}
+              </p>
+              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10">
+                <div className="h-full w-1/2 animate-pulse rounded-full bg-lime" />
+              </div>
+            </div>
+          )}
+        </Card>
+      )}
 
       {uploadComplete && analysis && (
-        <section className="mt-6 space-y-5">
-          <Card>
-            <div className="flex flex-wrap items-start justify-between gap-4">
-              <div>
-                <StatusBadge
-                  label={calibrationComplete ? "Calibrated" : "Prepared"}
-                  tone="good"
-                />
-                <h2 className="mt-4 text-2xl font-black">Video prepared</h2>
-                <p className="mt-2 break-all font-mono text-xs text-white/40">{analysis.analysis_id}</p>
-                <p className="mt-2 text-sm text-white/55">{analysis.original_filename}</p>
-              </div>
-              <label htmlFor="analysis-video" className="cursor-pointer rounded-xl border border-white/15 bg-white/5 px-4 py-3 text-sm font-bold hover:bg-white/10">Prepare another video</label>
-            </div>
-            <div className="mt-6"><MetadataGrid analysis={analysis} /></div>
-          </Card>
+        <section className="mt-4 space-y-4">
+          {error && (
+            <p className="rounded-lg border border-signal/30 bg-signal/10 px-3 py-2 text-sm leading-6 text-[#ffaaa6]">
+              {error}
+            </p>
+          )}
 
-          <div className="grid gap-5 xl:grid-cols-2">
-            <Card>
-              <p className="text-xs font-bold uppercase tracking-[0.15em] text-white/40">Original video</p>
-              <video className="mt-4 aspect-video w-full rounded-xl bg-black object-contain" controls preload="metadata" src={analysis.original_video_url} />
-              <a className="mt-3 inline-flex text-xs font-bold text-lime underline" href={analysis.original_video_url} target="_blank" rel="noreferrer">Open original video</a>
-            </Card>
-            <Card>
-              <p className="text-xs font-bold uppercase tracking-[0.15em] text-white/40">Calibration reference frame</p>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img className="mt-4 h-auto w-full rounded-xl bg-black object-contain" src={analysis.reference_frame_url} alt={`Calibration reference frame ${analysis.reference_frame_index}`} />
-              <p className="mt-3 text-xs text-white/45">
-                Early clean frame · index {analysis.reference_frame_index}
-                {analysis.reference_frame_selection?.reason
-                  ? ` · ${analysis.reference_frame_selection.reason}`
-                  : ""}
-              </p>
-            </Card>
-          </div>
+          <details className="rounded-xl border border-white/10 bg-panel/60 px-4 py-3">
+            <summary className="cursor-pointer text-sm font-bold text-white/60">
+              Source media &amp; reference frame
+            </summary>
+            <div className="mt-3 grid gap-4 md:grid-cols-2">
+              <div>
+                <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-white/35">
+                  Original video
+                </p>
+                <div className="mt-2 flex max-h-[min(42dvh,calc(100dvh-16rem))] min-h-[8rem] items-center justify-center overflow-hidden rounded-xl bg-[#050a08] sm:max-h-[min(52dvh,calc(100dvh-14rem))]">
+                  <video
+                    className={MEDIA_FIT_CLASS}
+                    controls
+                    preload="metadata"
+                    src={analysis.original_video_url}
+                  />
+                </div>
+              </div>
+              <div>
+                <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-white/35">
+                  Reference frame {analysis.reference_frame_index}
+                </p>
+                <div className="mt-2 flex max-h-[min(42dvh,calc(100dvh-16rem))] min-h-[8rem] items-center justify-center overflow-hidden rounded-xl bg-[#050a08] sm:max-h-[min(52dvh,calc(100dvh-14rem))]">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    className={MEDIA_FIT_CLASS}
+                    src={analysis.reference_frame_url}
+                    alt={`Calibration reference frame ${analysis.reference_frame_index}`}
+                  />
+                </div>
+              </div>
+            </div>
+          </details>
 
           {calibrationActive && (
             <SceneCalibrationPanel
@@ -470,14 +637,14 @@ export default function VideoAnalysisPage() {
                   if (!result) setBallTrackingResult(null);
                 }}
               />
-              <div className="flex flex-wrap gap-3">
+              <div className="flex flex-wrap gap-2">
                 {ballDetectionResult && (
                   <Button onClick={() => setActiveStage("ball_tracking")}>
                     Continue to Ball Tracking
                   </Button>
                 )}
                 <Button variant="secondary" onClick={() => setActiveStage("calibration")}>
-                  Review Automatic Visual Calibration
+                  Review Calibration
                 </Button>
               </div>
             </>
@@ -493,7 +660,7 @@ export default function VideoAnalysisPage() {
                 initialJobId={analysis.tracking_job_id}
               />
               <Button variant="secondary" onClick={() => setActiveStage("ball_detection")}>
-                Back to Raw Ball Detection
+                Back to Ball Detection
               </Button>
             </>
           )}

@@ -15,6 +15,8 @@ import {
   type VideoBallTrackingResultResponse
 } from "@/lib/api";
 
+import { MEDIA_FIT_CLASS } from "./AnalysisMediaStage";
+
 
 type JobView = {
   jobId: string;
@@ -103,120 +105,140 @@ function TrackingResult({
   }
 
   return (
-    <div className="mt-6 space-y-6">
+    <div className="mt-4 space-y-4">
       {result.status === "no_reliable_track" && (
-        <p className="rounded-xl border border-[#ffca68]/30 bg-[#ffca68]/[0.05] p-4 text-sm leading-6 text-[#ffdc9a]">
-          No coherent moving-ball track met the reliability threshold. Raw detection results remain available and unchanged.
+        <p className="rounded-lg border border-[#ffca68]/30 bg-[#ffca68]/[0.05] px-3 py-2 text-sm leading-6 text-[#ffdc9a]">
+          No coherent moving-ball track met the reliability threshold. Raw detection results remain available.
         </p>
       )}
 
       {summary.delivery_replay_url && (
-        <div className="rounded-xl border border-lime/25 bg-lime/[0.04] p-4">
-          <div className="flex flex-wrap items-end justify-between gap-3">
-            <div>
-              <p className="text-xs font-bold uppercase tracking-[0.15em] text-lime">Delivery Replay</p>
-              <p className="mt-1 text-sm text-white/55">
-                Clean original frames with ball highlight, short trail, and bounce marker. Track quality:{" "}
-                <strong className="capitalize text-white/80">{summary.track_quality}</strong>
-                {" · "}
-                Bounce: <strong className="text-white/80">{bounceLabel}</strong>
-              </p>
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(15rem,20rem)]">
+          <div className="min-w-0 rounded-xl border border-lime/25 bg-lime/[0.04] p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-lime">Delivery Replay</p>
+              <div className="flex gap-1.5">
+                {[0.25, 0.5, 1].map((rate) => (
+                  <button
+                    key={rate}
+                    type="button"
+                    className="rounded-lg border border-white/15 bg-white/5 px-2 py-1 text-[11px] font-bold text-white/70 hover:bg-white/10"
+                    onClick={() => setReplayRate(rate)}
+                  >
+                    {rate}x
+                  </button>
+                ))}
+              </div>
             </div>
-            <div className="flex gap-2">
-              {[0.25, 0.5, 1].map((rate) => (
-                <button
-                  key={rate}
-                  type="button"
-                  className="rounded-lg border border-white/15 bg-white/5 px-2.5 py-1 text-xs font-bold text-white/70 hover:bg-white/10"
-                  onClick={() => setReplayRate(rate)}
-                >
-                  {rate}x
-                </button>
-              ))}
+            <div className="mt-2 flex max-h-[min(42dvh,calc(100dvh-16rem))] min-h-[8rem] items-center justify-center overflow-hidden rounded-xl bg-[#050a08] sm:max-h-[min(52dvh,calc(100dvh-14rem))]">
+              <video
+                ref={replayRef}
+                className={MEDIA_FIT_CLASS}
+                controls
+                preload="metadata"
+                src={summary.delivery_replay_url}
+              />
             </div>
           </div>
-          <video
-            ref={replayRef}
-            className="mt-3 aspect-video w-full rounded-lg bg-black object-contain"
-            controls
-            preload="metadata"
-            src={summary.delivery_replay_url}
-          />
-          <div className="mt-3 grid gap-3 sm:grid-cols-3 text-sm">
-            <div className="rounded-lg bg-black/25 p-3">
-              <span className="block text-xs text-white/35">Observed / recovered</span>
-              <strong className="mt-1 block">
+          <aside className="flex min-w-0 flex-col gap-2 xl:sticky xl:top-4 xl:max-h-[calc(100dvh-5rem)] xl:self-start xl:overflow-y-auto">
+            <div className="rounded-lg bg-black/25 p-2.5 text-sm">
+              <span className="block text-[10px] text-white/35">Track quality</span>
+              <strong className="mt-0.5 block capitalize">{summary.track_quality}</strong>
+            </div>
+            <div className="rounded-lg bg-black/25 p-2.5 text-sm">
+              <span className="block text-[10px] text-white/35">Bounce</span>
+              <strong className="mt-0.5 block">{bounceLabel}</strong>
+            </div>
+            <div className="rounded-lg bg-black/25 p-2.5 text-sm">
+              <span className="block text-[10px] text-white/35">Observed / recovered</span>
+              <strong className="mt-0.5 block">
                 {summary.observed_track_points} / {summary.recovered_points}
               </strong>
             </div>
-            <div className="rounded-lg bg-black/25 p-3">
-              <span className="block text-xs text-white/35">Bounce confidence</span>
-              <strong className="mt-1 block">
+            <div className="rounded-lg bg-black/25 p-2.5 text-sm">
+              <span className="block text-[10px] text-white/35">Bounce confidence</span>
+              <strong className="mt-0.5 block">
                 {(summary.bounce_confidence ?? bounce?.confidence ?? 0).toFixed(2)}
               </strong>
             </div>
-            <div className="rounded-lg bg-black/25 p-3">
-              <span className="block text-xs text-white/35">Track start (not true release)</span>
-              <strong className="mt-1 block">
-                {summary.first_supported_delivery_point ?? "—"}
-              </strong>
+            <div className="flex flex-wrap gap-2 pt-1">
+              {links.map(([label, url]) => (
+                <a
+                  key={label}
+                  className="rounded-lg border border-white/15 bg-white/5 px-2.5 py-1.5 text-[11px] font-bold text-lime hover:bg-white/10"
+                  href={url}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {label}
+                </a>
+              ))}
+            </div>
+          </aside>
+        </div>
+      )}
+
+      <details className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+        <summary className="cursor-pointer text-sm font-bold text-white/55">
+          Debug videos &amp; stats
+        </summary>
+        <div className="mt-3 space-y-3">
+          <div className="grid gap-3 md:grid-cols-3">
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-[0.12em] text-white/35">Original</p>
+              <div className="mt-1.5 flex min-h-[6rem] items-center justify-center overflow-hidden rounded-xl bg-[#050a08]">
+                <video className={MEDIA_FIT_CLASS} controls preload="metadata" src={analysis.original_video_url} />
+              </div>
+            </div>
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-[0.12em] text-white/35">Detection</p>
+              <div className="mt-1.5 flex min-h-[6rem] items-center justify-center overflow-hidden rounded-xl bg-[#050a08]">
+                <video className={MEDIA_FIT_CLASS} controls preload="metadata" src={detection.summary.processed_video_url} />
+              </div>
+            </div>
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-[0.12em] text-white/35">Tracking debug</p>
+              <div className="mt-1.5 flex min-h-[6rem] items-center justify-center overflow-hidden rounded-xl bg-[#050a08]">
+                <video className={MEDIA_FIT_CLASS} controls preload="metadata" src={summary.tracking_video_url} />
+              </div>
             </div>
           </div>
-        </div>
-      )}
-
-      <div className="grid gap-5 xl:grid-cols-3">
-        <div className="rounded-xl border border-white/10 bg-black/20 p-4">
-          <p className="text-xs font-bold uppercase tracking-[0.15em] text-white/40">Original Video</p>
-          <video className="mt-3 aspect-video w-full rounded-lg bg-black object-contain" controls preload="metadata" src={analysis.original_video_url} />
-        </div>
-        <div className="rounded-xl border border-white/10 bg-black/20 p-4">
-          <p className="text-xs font-bold uppercase tracking-[0.15em] text-white/40">Raw Detection Video</p>
-          <video className="mt-3 aspect-video w-full rounded-lg bg-black object-contain" controls preload="metadata" src={detection.summary.processed_video_url} />
-        </div>
-        <div className="rounded-xl border border-white/10 bg-black/20 p-4">
-          <p className="text-xs font-bold uppercase tracking-[0.15em] text-white/40">Tracking Debug Video</p>
-          <video className="mt-3 aspect-video w-full rounded-lg bg-black object-contain" controls preload="metadata" src={summary.tracking_video_url} />
-        </div>
-      </div>
-
-      <div className="flex flex-wrap gap-4 rounded-xl border border-white/10 bg-black/20 p-4 text-xs text-white/55">
-        <span><i className="mr-2 inline-block h-3 w-3 rounded-full border-2 border-[#50e650]" />Green = OBSERVED</span>
-        <span><i className="mr-2 inline-block h-3 w-3 rounded-full border-2 border-[#ff9600]" />Orange = TRACKER_RECOVERED</span>
-        <span><i className="mr-2 inline-block h-3 w-3 rounded-full border-2 border-[#ffe600]" />Yellow = PROJECTED / physics</span>
-        <strong className="text-white/70">Debug video shows provenance clearly; user replay keeps trail subtle.</strong>
-      </div>
-
-      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-        {stats.map(([label, value]) => (
-          <div key={label} className="rounded-xl bg-black/20 p-3">
-            <span className="block text-xs text-white/35">{label}</span>
-            <strong className="mt-1 block text-lg capitalize">{value}</strong>
+          <div className="flex flex-wrap gap-3 text-[11px] text-white/55">
+            <span><i className="mr-1.5 inline-block h-2.5 w-2.5 rounded-full border-2 border-[#50e650]" />Observed</span>
+            <span><i className="mr-1.5 inline-block h-2.5 w-2.5 rounded-full border-2 border-[#ff9600]" />Recovered</span>
+            <span><i className="mr-1.5 inline-block h-2.5 w-2.5 rounded-full border-2 border-[#ffe600]" />Projected</span>
           </div>
-        ))}
-      </div>
-
-      <div className="grid gap-4 rounded-xl border border-white/10 bg-black/20 p-4 sm:grid-cols-2 xl:grid-cols-4">
-        <div><span className="block text-xs text-white/35">Approximate direction</span><strong className="mt-1 block text-sm capitalize">{summary.approximate_direction}</strong></div>
-        <div><span className="block text-xs text-white/35">Primary bounce</span><strong className="mt-1 block text-sm">{bounceLabel}</strong></div>
-        <div><span className="block text-xs text-white/35">Observed confidence</span><strong className="mt-1 block text-sm">{summary.average_observed_confidence.toFixed(3)}</strong></div>
-        <div><span className="block text-xs text-white/35">Processing duration</span><strong className="mt-1 block text-sm">{summary.processing_duration_seconds.toFixed(2)}s</strong></div>
-      </div>
-
-      {bounce && bounce.evidence.length > 0 && (
-        <p className="text-xs text-white/45">
-          Bounce evidence: {bounce.evidence.join(", ")}
-          {bounce.warnings.length ? ` · Warnings: ${bounce.warnings.join("; ")}` : ""}
-        </p>
-      )}
-
-      <div className="flex flex-wrap gap-2">
-        {links.map(([label, url]) => (
-          <a key={label} className="rounded-lg border border-white/15 bg-white/5 px-3 py-2 text-xs font-bold text-lime hover:bg-white/10" href={url} target="_blank" rel="noreferrer">
-            {label}
-          </a>
-        ))}
-      </div>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+            {stats.map(([label, value]) => (
+              <div key={label} className="rounded-lg bg-black/25 p-2.5">
+                <span className="block text-[10px] text-white/35">{label}</span>
+                <strong className="mt-0.5 block text-sm capitalize">{value}</strong>
+              </div>
+            ))}
+          </div>
+          {bounce && bounce.evidence.length > 0 && (
+            <p className="text-[11px] text-white/45">
+              Bounce evidence: {bounce.evidence.join(", ")}
+              {bounce.warnings.length ? ` · Warnings: ${bounce.warnings.join("; ")}` : ""}
+            </p>
+          )}
+          {!summary.delivery_replay_url && (
+            <div className="flex flex-wrap gap-2">
+              {links.map(([label, url]) => (
+                <a
+                  key={label}
+                  className="rounded-lg border border-white/15 bg-white/5 px-2.5 py-1.5 text-[11px] font-bold text-lime hover:bg-white/10"
+                  href={url}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {label}
+                </a>
+              ))}
+            </div>
+          )}
+        </div>
+      </details>
     </div>
   );
 }
@@ -329,53 +351,50 @@ export function BallTrackingPanel({
   const noReliableTrack = result?.status === "no_reliable_track";
 
   return (
-    <Card className="border-lime/20">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <StatusBadge
-            label={ready ? "Ball Tracking — Ready" : noReliableTrack ? "Ball Tracking — No reliable track" : job ? `Ball Tracking — ${statusLabel(job.status)}` : "Ball Tracking — Available"}
-            tone={error || noReliableTrack ? "warn" : ready ? "good" : "neutral"}
-          />
-          <h2 className="mt-4 text-2xl font-black">Complete Delivery Tracking</h2>
-          <p className="mt-2 max-w-3xl text-sm leading-6 text-white/50">
-            Build one primary moving-ball track from the saved raw detections. YOLO is not rerun; stationary likelihood, motion continuity, adaptive gating, size, direction, and the pitch corridor soft score are evaluated together.
+    <Card className="border-lime/20 p-4 sm:p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-lg font-black tracking-tight sm:text-xl">Ball Tracking</h2>
+            <StatusBadge
+              label={
+                ready
+                  ? "Ready"
+                  : noReliableTrack
+                    ? "Needs Attention"
+                    : active
+                      ? "Processing"
+                      : error
+                        ? "Failed"
+                        : "Ready"
+              }
+              tone={error || noReliableTrack ? "warn" : ready ? "good" : "neutral"}
+            />
+          </div>
+          <p className="mt-1 text-sm text-white/45">
+            Primary delivery track from saved detections
+            {job ? ` · ${statusLabel(job.status)}` : ""}
           </p>
         </div>
         <Button disabled={active} onClick={() => void runTracking()}>
-          {starting ? "Starting…" : active ? "Tracker running…" : result ? "Run Delivery Tracking Again" : "Run Delivery Tracking"}
+          {starting ? "Starting…" : active ? "Tracker running…" : result ? "Run Again" : "Run Tracking"}
         </Button>
       </div>
 
-      <div className="mt-5 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
-        {[
-          ["Input", "Saved detections.json"],
-          ["Motion model", "Constant velocity"],
-          ["Maximum gap", "6 frames"],
-          ["Corridor", "Soft score only"],
-          ["Output", "One primary track"]
-        ].map(([label, value]) => (
-          <div key={label} className="rounded-xl bg-black/20 p-3">
-            <span className="block text-xs text-white/35">{label}</span>
-            <strong className="mt-1 block text-sm">{value}</strong>
-          </div>
-        ))}
-      </div>
-
       {job && (
-        <div className="mt-5 rounded-xl border border-lime/20 bg-lime/[0.04] p-4">
-          <div className="flex items-center justify-between gap-4">
-            <p className="font-bold text-lime">{job.message}</p>
+        <div className="mt-3 rounded-xl border border-lime/20 bg-lime/[0.04] p-3">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm font-bold text-lime">{job.message}</p>
             <span className="text-sm font-black">{progress}%</span>
           </div>
-          <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/10">
+          <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10">
             <div className="h-full rounded-full bg-lime transition-[width]" style={{ width: `${progress}%` }} />
           </div>
-          <p className="mt-2 text-xs text-white/40">{statusLabel(job.status)}</p>
         </div>
       )}
 
       {error && (
-        <p className="mt-5 rounded-xl border border-signal/30 bg-signal/10 p-4 text-sm leading-6 text-[#ffaaa6]">{error}</p>
+        <p className="mt-3 rounded-lg border border-signal/30 bg-signal/10 px-3 py-2 text-sm leading-6 text-[#ffaaa6]">{error}</p>
       )}
 
       {result && (

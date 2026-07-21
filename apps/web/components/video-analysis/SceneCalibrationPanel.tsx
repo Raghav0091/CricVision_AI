@@ -16,6 +16,7 @@ import {
   type WicketCalibration
 } from "@/lib/api";
 
+import { MEDIA_FIT_CLASS } from "./AnalysisMediaStage";
 import {
   CalibrationCanvas,
   DEFAULT_VIDEO_GUIDES,
@@ -39,6 +40,15 @@ function guideOrDefault(
   fallback: NormalizedBox
 ): NormalizedBox {
   return guide ?? fallback;
+}
+
+
+function phaseBadge(phase: CalibrationPhase): { label: string; tone: "neutral" | "good" | "warn" } {
+  if (phase === "accepted") return { label: "Ready", tone: "good" };
+  if (phase === "detecting" || phase === "saving") return { label: "Processing", tone: "neutral" };
+  if (phase === "failed") return { label: "Needs Attention", tone: "warn" };
+  if (phase === "review") return { label: "Needs Attention", tone: "warn" };
+  return { label: "Ready", tone: "neutral" };
 }
 
 
@@ -72,7 +82,7 @@ export function SceneCalibrationPanel({
   );
   const [message, setMessage] = useState(
     initialCalibration?.message
-      ?? "Drag the guide boxes over the striker (far) and non-striker (near) wickets, then Detect Wickets."
+      ?? "Drag guide boxes over far (striker) and near (non-striker) wickets, then Detect."
   );
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(
@@ -117,6 +127,8 @@ export function SceneCalibrationPanel({
     phase === "accepted" || phase === "detecting" || phase === "saving"
       ? "locked"
       : "guides";
+  const busy = phase === "detecting" || phase === "saving";
+  const badge = phaseBadge(phase);
 
   useEffect(() => {
     if (!initialCalibration) {
@@ -126,7 +138,7 @@ export function SceneCalibrationPanel({
       setStriker(null);
       setNonStriker(null);
       setMessage(
-        "Drag the guide boxes over the striker (far) and non-striker (near) wickets, then Detect Wickets."
+        "Drag guide boxes over far (striker) and near (non-striker) wickets, then Detect."
       );
       setQuality(null);
       setQualityReasons([]);
@@ -322,208 +334,195 @@ export function SceneCalibrationPanel({
     : failedEnds.map((end) => (end === "striker" ? "striker" : "non-striker")).join(" and ");
 
   return (
-    <Card className="border-[#ffca68]/25">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <StatusBadge
-            label={
-              phase === "accepted"
-                ? "Calibration Accepted"
-                : phase === "detecting"
-                  ? "Detecting Wickets"
-                  : phase === "guides"
-                    ? "Place Guides"
-                    : phase === "failed"
-                      ? "Detection Incomplete"
-                      : "Review Detection"
-            }
-            tone={phase === "accepted" ? "good" : "neutral"}
-          />
-          <h2 className="mt-4 text-2xl font-black">Guided Scene Calibration</h2>
-          <p className="mt-3 max-w-3xl text-sm leading-6 text-white/55">
-            Fixed-camera visual scene calibration — overlay locked for the whole video.
-            Soft pitch context only — not precise metric 3D / DRS / Hawk-Eye.
+    <Card className="border-[#ffca68]/25 p-4 sm:p-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-lg font-black tracking-tight sm:text-xl">Scene Calibration</h2>
+            <StatusBadge label={badge.label} tone={badge.tone} />
+            {quality && <StatusBadge label={quality} tone={qualityTone} />}
+          </div>
+          <p className="mt-1 text-sm text-white/45">
+            Place guides · detect wickets · accept overlay for this video.
           </p>
         </div>
-        {quality && (
-          <StatusBadge label={`Quality ${quality}`} tone={qualityTone} />
-        )}
       </div>
 
       {error && (
-        <p className="mt-5 rounded-xl border border-signal/30 bg-signal/10 p-4 text-sm text-[#ffaaa6]">
+        <p className="mt-3 rounded-lg border border-signal/30 bg-signal/10 px-3 py-2 text-sm text-[#ffaaa6]">
           {error}
         </p>
       )}
-      <div className="mt-5 rounded-xl border border-white/10 bg-black/20 p-4">
-        <p className="text-sm leading-6 text-white/65">{message}</p>
-        {phase === "guides" && (
-          <p className="mt-2 text-xs leading-5 text-white/40">
-            Guide boxes are search regions. Soft pitch corridor is estimated after detection.
-          </p>
-        )}
-        <div className="mt-3 flex flex-wrap gap-3 text-sm font-semibold">
-          <span className={striker ? "text-lime" : "text-white/35"}>
-            Striker {striker ? "✅" : phase === "detecting" ? "…" : failedEnds.includes("striker") ? "✗" : "—"}
-          </span>
-          <span className={nonStriker ? "text-lime" : "text-white/35"}>
-            Non-Striker {nonStriker ? "✅" : phase === "detecting" ? "…" : failedEnds.includes("non_striker") ? "✗" : "—"}
-          </span>
-        </div>
-        {failedEndsLabel && (
-          <p className="mt-2 text-xs font-semibold text-[#ffaaa6]">
-            Failed end{failedEnds.length > 1 ? "s" : ""}: {failedEndsLabel}. Adjust guides and Redetect.
-          </p>
-        )}
-        <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs text-white/35">
-          <span>Reference frame {referenceFrameIndex}</span>
-          {(phase !== "guides" || candidateCount > 0) && (
-            <span>{candidateCount} detector candidate{candidateCount === 1 ? "" : "s"}</span>
-          )}
-          {modelPath && <span>Model: {modelPath}</span>}
-        </div>
-        {qualityReasons.length > 0 && (
-          <ul className="mt-3 list-disc space-y-1 pl-5 text-xs text-white/45">
-            {qualityReasons.map((reason) => (
-              <li key={reason}>{reason}</li>
-            ))}
-          </ul>
-        )}
-        {detectionDebug && (
-          <details className="mt-4 rounded-lg border border-white/10 bg-black/30 p-3 text-xs text-white/45">
-            <summary className="cursor-pointer font-semibold text-white/55">
-              Developer detection debug ({detectionDebug.pass_count} passes)
-            </summary>
-            <div className="mt-3 space-y-2">
-              <p>
-                Striker source: {striker?.detection_pass ?? "—"}
-                {" · "}
-                Non-striker source: {nonStriker?.detection_pass ?? "—"}
-              </p>
-              {detectionDebug.debug_overlay_url && (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  className="mt-2 h-auto w-full rounded-md bg-black object-contain"
-                  src={detectionDebug.debug_overlay_url}
-                  alt="Wicket detection debug overlay"
-                />
-              )}
-              {detectionDebug.debug_json_url && (
-                <a
-                  className="inline-block text-lime underline"
-                  href={detectionDebug.debug_json_url}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Open detection debug JSON
-                </a>
-              )}
-            </div>
-          </details>
-        )}
-      </div>
       {displayWarning && (
-        <p className="mt-4 rounded-xl border border-[#ffca68]/35 bg-[#ffca68]/10 p-4 text-sm text-[#ffe0a3]">
+        <p className="mt-3 rounded-lg border border-[#ffca68]/35 bg-[#ffca68]/10 px-3 py-2 text-sm text-[#ffe0a3]">
           {displayWarning}
         </p>
       )}
 
-      <div className="mt-6">
-        <CalibrationCanvas
-          imageUrl={referenceUrl}
-          imageWidth={imageWidth}
-          imageHeight={imageHeight}
-          striker={striker}
-          nonStriker={nonStriker}
-          strikerGuide={strikerGuide}
-          nonStrikerGuide={nonStrikerGuide}
-          pitchGeometry={pitchGeometry}
-          interactionMode={canvasMode}
-          onGuideChange={handleGuideChange}
-        />
-      </div>
-
-      <div className="mt-6 grid gap-3 sm:grid-cols-3">
-        {phase === "guides" || phase === "detecting" ? (
-          <Button
-            className="sm:col-span-2"
-            disabled={phase === "detecting"}
-            onClick={() => void runDetection()}
-          >
-            {phase === "detecting" ? "Detecting…" : "Detect Wickets"}
-          </Button>
-        ) : (
-          <Button
-            disabled={!canAccept || phase === "saving"}
-            onClick={() => void acceptCalibration()}
-          >
-            {phase === "saving"
-              ? "Accepting…"
-              : phase === "accepted"
-                ? "Accepted"
-                : "Accept"}
-          </Button>
-        )}
-        {(phase === "review" || phase === "failed" || phase === "accepted" || phase === "saving") && (
-          <Button
-            variant="secondary"
-            disabled={phase === "detecting" || phase === "saving"}
-            onClick={() => void runDetection()}
-          >
-            Redetect
-          </Button>
-        )}
-        {(phase === "review" || phase === "failed" || phase === "accepted" || phase === "saving") && (
-          <Button
-            variant="secondary"
-            disabled={!bothWicketsReady || phase === "detecting" || phase === "saving"}
-            onClick={swapWicketEnds}
-          >
-            Swap Wicket Ends
-          </Button>
-        )}
-      </div>
-
-      {savedCalibration && phase === "accepted" && (
-        <div className="mt-7 rounded-xl border border-lime/20 bg-lime/[0.04] p-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <p className="font-black text-lime">Guided scene calibration accepted</p>
-              <p className="mt-1 text-xs text-white/40">
-                Fixed-camera visual scene calibration — overlay locked for the whole video.
-              </p>
-            </div>
-            <a
-              className="text-xs font-bold text-lime underline"
-              href={savedCalibration.calibration_url}
-              target="_blank"
-              rel="noreferrer"
-            >
-              Open calibration JSON
-            </a>
-          </div>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            className="mt-4 h-auto w-full rounded-lg bg-black object-contain"
-            src={`${savedCalibration.calibration_overlay_url}?v=${encodeURIComponent(savedCalibration.updated_at)}`}
-            alt="Accepted guided scene calibration overlay"
+      <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(15rem,20rem)]">
+        <div className="min-w-0">
+          <CalibrationCanvas
+            imageUrl={referenceUrl}
+            imageWidth={imageWidth}
+            imageHeight={imageHeight}
+            striker={striker}
+            nonStriker={nonStriker}
+            strikerGuide={strikerGuide}
+            nonStrikerGuide={nonStrikerGuide}
+            pitchGeometry={pitchGeometry}
+            interactionMode={canvasMode}
+            onGuideChange={handleGuideChange}
           />
-          {savedCalibration.scene_overlay_status === "ready" && savedCalibration.scene_overlay_url && (
-            <video
-              className="mt-4 h-auto w-full rounded-lg bg-black object-contain"
-              src={`${savedCalibration.scene_overlay_url}?v=${encodeURIComponent(savedCalibration.updated_at)}`}
-              controls
-              playsInline
-              muted
-            />
-          )}
-          {savedCalibration.scene_overlay_status === "failed" && (
-            <p className="mt-3 text-xs text-white/40">
-              Scene overlay video could not be generated; still overlay is shown above.
-            </p>
-          )}
         </div>
-      )}
+
+        <aside className="flex min-w-0 flex-col gap-3 xl:sticky xl:top-4 xl:max-h-[calc(100dvh-5rem)] xl:self-start xl:overflow-y-auto">
+          <div className="rounded-xl border border-white/10 bg-black/25 p-3">
+            <p className="text-sm leading-5 text-white/65">{message}</p>
+            <div className="mt-3 flex flex-wrap gap-3 text-xs font-semibold">
+              <span className={striker ? "text-lime" : "text-white/35"}>
+                Striker {striker ? "✓" : phase === "detecting" ? "…" : failedEnds.includes("striker") ? "✗" : "—"}
+              </span>
+              <span className={nonStriker ? "text-lime" : "text-white/35"}>
+                Non-Striker {nonStriker ? "✓" : phase === "detecting" ? "…" : failedEnds.includes("non_striker") ? "✗" : "—"}
+              </span>
+            </div>
+            {failedEndsLabel && (
+              <p className="mt-2 text-xs font-semibold text-[#ffaaa6]">
+                Failed: {failedEndsLabel}. Adjust guides and Redetect.
+              </p>
+            )}
+            <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-white/35">
+              <span>Frame {referenceFrameIndex}</span>
+              {(phase !== "guides" || candidateCount > 0) && (
+                <span>{candidateCount} candidate{candidateCount === 1 ? "" : "s"}</span>
+              )}
+            </div>
+            {qualityReasons.length > 0 && (
+              <ul className="mt-2 list-disc space-y-0.5 pl-4 text-[11px] text-white/40">
+                {qualityReasons.map((reason) => (
+                  <li key={reason}>{reason}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="flex flex-col gap-2">
+            {phase === "guides" || phase === "detecting" ? (
+              <Button
+                className="w-full"
+                disabled={busy}
+                onClick={() => void runDetection()}
+              >
+                {phase === "detecting" ? "Detecting…" : "Detect Wickets"}
+              </Button>
+            ) : (
+              <Button
+                className="w-full"
+                disabled={!canAccept || busy}
+                onClick={() => void acceptCalibration()}
+              >
+                {phase === "saving"
+                  ? "Accepting…"
+                  : phase === "accepted"
+                    ? "Accepted"
+                    : "Accept"}
+              </Button>
+            )}
+            {(phase === "review" || phase === "failed" || phase === "accepted" || phase === "saving") && (
+              <>
+                <Button
+                  variant="secondary"
+                  className="w-full"
+                  disabled={busy}
+                  onClick={() => void runDetection()}
+                >
+                  Redetect
+                </Button>
+                <Button
+                  variant="secondary"
+                  className="w-full"
+                  disabled={!bothWicketsReady || busy}
+                  onClick={swapWicketEnds}
+                >
+                  Swap Wicket Ends
+                </Button>
+              </>
+            )}
+          </div>
+
+          {detectionDebug && (
+            <details className="rounded-lg border border-white/10 bg-black/30 p-3 text-xs text-white/45">
+              <summary className="cursor-pointer font-semibold text-white/55">
+                Advanced diagnostics
+              </summary>
+              <div className="mt-3 space-y-2">
+                <p>
+                  Striker: {striker?.detection_pass ?? "—"}
+                  {" · "}
+                  Non-striker: {nonStriker?.detection_pass ?? "—"}
+                  {modelPath ? ` · ${modelPath}` : ""}
+                </p>
+                {detectionDebug.debug_overlay_url && (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    className={MEDIA_FIT_CLASS}
+                    src={detectionDebug.debug_overlay_url}
+                    alt="Wicket detection debug overlay"
+                  />
+                )}
+                {detectionDebug.debug_json_url && (
+                  <a
+                    className="inline-block text-lime underline"
+                    href={detectionDebug.debug_json_url}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open detection debug JSON
+                  </a>
+                )}
+              </div>
+            </details>
+          )}
+
+          {savedCalibration && phase === "accepted" && (
+            <details className="rounded-xl border border-lime/20 bg-lime/[0.04] p-3">
+              <summary className="cursor-pointer text-sm font-bold text-lime">
+                Calibration accepted
+              </summary>
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                <a
+                  className="text-[11px] font-bold text-lime underline"
+                  href={savedCalibration.calibration_url}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Open calibration JSON
+                </a>
+              </div>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                className={`${MEDIA_FIT_CLASS} mt-3`}
+                src={`${savedCalibration.calibration_overlay_url}?v=${encodeURIComponent(savedCalibration.updated_at)}`}
+                alt="Accepted guided scene calibration overlay"
+              />
+              {savedCalibration.scene_overlay_status === "ready" && savedCalibration.scene_overlay_url && (
+                <video
+                  className={`${MEDIA_FIT_CLASS} mt-3`}
+                  src={`${savedCalibration.scene_overlay_url}?v=${encodeURIComponent(savedCalibration.updated_at)}`}
+                  controls
+                  playsInline
+                  muted
+                />
+              )}
+              {savedCalibration.scene_overlay_status === "failed" && (
+                <p className="mt-2 text-[11px] text-white/40">
+                  Scene overlay video unavailable; still overlay shown above.
+                </p>
+              )}
+            </details>
+          )}
+        </aside>
+      </div>
     </Card>
   );
 }

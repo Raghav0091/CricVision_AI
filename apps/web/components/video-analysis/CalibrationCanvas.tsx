@@ -9,6 +9,8 @@ import type {
   WicketCalibration
 } from "@/lib/api";
 
+import { AnalysisMediaStage } from "./AnalysisMediaStage";
+
 
 type WicketLabel = "striker" | "non_striker";
 type ResizeCorner = "nw" | "ne" | "sw" | "se";
@@ -253,96 +255,101 @@ export function CalibrationCanvas({
     );
   }
 
+  // ponytail: overlays use normalized 0–1 coords on the aspect box; letterbox is outside.
   return (
-    <div
-      ref={wrapperRef}
-      className="relative w-full select-none overflow-hidden rounded-xl bg-black"
-      style={{
-        aspectRatio: `${imageWidth} / ${imageHeight}`,
-        touchAction: guidesEditable ? "none" : "auto"
-      }}
-      onPointerMove={moveOperation}
-      onPointerUp={endOperation}
-      onPointerCancel={endOperation}
+    <AnalysisMediaStage
+      aspectWidth={imageWidth}
+      aspectHeight={imageHeight}
+      expandable
+      label="Guided scene calibration reference"
     >
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        className="absolute inset-0 h-full w-full object-contain"
-        src={imageUrl}
-        alt="Guided scene calibration reference"
-        draggable={false}
-      />
-      <svg
-        className="pointer-events-none absolute inset-0 h-full w-full"
-        viewBox="0 0 1 1"
-        preserveAspectRatio="none"
-        aria-label="Scene calibration overlay"
+      <div
+        ref={wrapperRef}
+        className="absolute inset-0 select-none"
+        style={{ touchAction: guidesEditable ? "none" : "auto" }}
+        onPointerMove={moveOperation}
+        onPointerUp={endOperation}
+        onPointerCancel={endOperation}
       >
-        {pitchGeometry && (
-          <>
-            <polygon
-              points={pitchGeometry.corridor.map((point) => `${point.x},${point.y}`).join(" ")}
-              fill="rgba(226,183,72,0.16)"
-              stroke="rgba(255,225,132,0.75)"
-              strokeWidth="0.004"
-            />
-            <line
-              x1={pitchGeometry.axis_start.x}
-              y1={pitchGeometry.axis_start.y}
-              x2={pitchGeometry.axis_end.x}
-              y2={pitchGeometry.axis_end.y}
-              stroke="rgba(255,255,255,0.85)"
-              strokeWidth="0.004"
-              strokeDasharray="0.012 0.008"
-            />
-          </>
-        )}
-        {[striker, nonStriker].map((wicket) => wicket && (
-          <g key={`${wicket.label}-detection`}>
-            <rect
-              x={wicket.box.x}
-              y={wicket.box.y}
-              width={wicket.box.width}
-              height={wicket.box.height}
-              fill="rgba(183,243,75,0.08)"
-              stroke="#b7f34b"
-              strokeWidth="0.004"
-              strokeDasharray="0.012 0.008"
-              rx="0.006"
-            />
-            <text
-              x={wicket.box.x + 0.008}
-              y={Math.max(0.03, wicket.box.y - 0.012)}
-              fill="#b7f34b"
-              fontSize="0.028"
-              fontWeight="700"
-            >
-              {wicket.label}
-              {wicket.confidence != null ? ` ${(wicket.confidence * 100).toFixed(0)}%` : ""}
-            </text>
-            {virtualStumpsFromBox(wicket.box).map((segment) => (
-              <line
-                key={segment.key}
-                x1={segment.x1}
-                y1={segment.y1}
-                x2={segment.x2}
-                y2={segment.y2}
-                stroke={segment.kind === "bail" ? "#ffdf7e" : "#f6cf62"}
-                strokeWidth={segment.kind === "bail" ? "0.005" : "0.006"}
-                strokeLinecap="round"
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          className="absolute inset-0 h-full w-full object-contain"
+          src={imageUrl}
+          alt="Guided scene calibration reference"
+          draggable={false}
+        />
+        <svg
+          className="pointer-events-none absolute inset-0 h-full w-full"
+          viewBox="0 0 1 1"
+          preserveAspectRatio="none"
+          aria-label="Scene calibration overlay"
+        >
+          {pitchGeometry && (
+            <>
+              <polygon
+                points={pitchGeometry.corridor.map((point) => `${point.x},${point.y}`).join(" ")}
+                fill="rgba(226,183,72,0.16)"
+                stroke="rgba(255,225,132,0.75)"
+                strokeWidth="0.004"
               />
-            ))}
-          </g>
-        ))}
-      </svg>
-      {renderGuide("striker", strikerGuide)}
-      {renderGuide("non_striker", nonStrikerGuide)}
-      {(striker || nonStriker) && (
-        <span className="pointer-events-none absolute bottom-3 left-3 rounded-md bg-ink/85 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.1em] text-white/80">
-          Guided scene · approximate 2D corridor
-        </span>
-      )}
-    </div>
+              <line
+                x1={pitchGeometry.axis_start.x}
+                y1={pitchGeometry.axis_start.y}
+                x2={pitchGeometry.axis_end.x}
+                y2={pitchGeometry.axis_end.y}
+                stroke="rgba(255,255,255,0.85)"
+                strokeWidth="0.004"
+                strokeDasharray="0.012 0.008"
+              />
+            </>
+          )}
+          {[striker, nonStriker].map((wicket) => wicket && (
+            <g key={`${wicket.label}-detection`}>
+              <rect
+                x={wicket.box.x}
+                y={wicket.box.y}
+                width={wicket.box.width}
+                height={wicket.box.height}
+                fill="rgba(183,243,75,0.08)"
+                stroke="#b7f34b"
+                strokeWidth="0.004"
+                strokeDasharray="0.012 0.008"
+                rx="0.006"
+              />
+              <text
+                x={wicket.box.x + 0.008}
+                y={Math.max(0.03, wicket.box.y - 0.012)}
+                fill="#b7f34b"
+                fontSize="0.028"
+                fontWeight="700"
+              >
+                {wicket.label}
+                {wicket.confidence != null ? ` ${(wicket.confidence * 100).toFixed(0)}%` : ""}
+              </text>
+              {virtualStumpsFromBox(wicket.box).map((segment) => (
+                <line
+                  key={segment.key}
+                  x1={segment.x1}
+                  y1={segment.y1}
+                  x2={segment.x2}
+                  y2={segment.y2}
+                  stroke={segment.kind === "bail" ? "#ffdf7e" : "#f6cf62"}
+                  strokeWidth={segment.kind === "bail" ? "0.005" : "0.006"}
+                  strokeLinecap="round"
+                />
+              ))}
+            </g>
+          ))}
+        </svg>
+        {renderGuide("striker", strikerGuide)}
+        {renderGuide("non_striker", nonStrikerGuide)}
+        {(striker || nonStriker) && (
+          <span className="pointer-events-none absolute bottom-3 left-3 rounded-md bg-ink/85 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.1em] text-white/80">
+            Guided scene · approximate 2D corridor
+          </span>
+        )}
+      </div>
+    </AnalysisMediaStage>
   );
 }
 
