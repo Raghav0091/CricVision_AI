@@ -1282,6 +1282,7 @@ export type VideoBallTrackingResultLinks = {
   tracking_json_url: string;
   tracking_csv_url: string;
   tracking_summary_url: string;
+  delivery_replay_url?: string | null;
 };
 
 
@@ -1309,20 +1310,43 @@ export type VideoBallTrackingJobResponse = {
 };
 
 
+export type TrackingProvenance =
+  | "OBSERVED"
+  | "TRACKER_RECOVERED"
+  | "PHYSICS_RECONSTRUCTED"
+  | "PROJECTED";
+
+
 export type VideoBallTrackingPoint = {
   frame_index: number;
   timestamp_seconds: number;
   source: "observed" | "predicted" | "recovered";
+  provenance: TrackingProvenance;
   candidate_id?: string | null;
   x: number;
   y: number;
   normalized_x: number;
   normalized_y: number;
   confidence: number;
+  uncertainty?: number;
   vx: number;
   vy: number;
   prediction_error?: number | null;
   inside_pitch_corridor?: boolean | null;
+};
+
+
+export type PrimaryBounceResult = {
+  bounce_detected: boolean | "uncertain";
+  bounce_frame?: number | null;
+  bounce_timestamp_seconds?: number | null;
+  bounce_x?: number | null;
+  bounce_y?: number | null;
+  bounce_normalized_x?: number | null;
+  bounce_normalized_y?: number | null;
+  confidence: number;
+  evidence: string[];
+  warnings: string[];
 };
 
 
@@ -1334,19 +1358,29 @@ export type VideoBallTrackingSummary = {
   candidate_frames: number;
   track_start_frame?: number | null;
   track_end_frame?: number | null;
+  first_supported_delivery_point?: number | null;
+  track_start_label?: "track_start" | "unavailable";
   track_duration_frames: number;
   track_duration_seconds: number;
   observed_track_points: number;
   predicted_points: number;
   recovered_points: number;
+  physics_reconstructed_points?: number;
+  projected_points?: number;
   rejected_candidates: number;
   longest_gap_frames: number;
+  observation_ratio?: number;
   average_observed_confidence: number;
+  consistency_score?: number;
   track_confidence: number;
-  track_quality: "low" | "medium" | "good" | "strong";
+  track_quality: "high" | "medium" | "low" | "failed";
   approximate_direction: string;
   possible_bounce_transition_detected: boolean | "uncertain";
+  bounce_detected?: boolean | "uncertain";
+  bounce_frame?: number | null;
+  bounce_confidence?: number;
   tracking_video_url: string;
+  delivery_replay_url?: string | null;
   tracking_json_url: string;
   tracking_csv_url: string;
   tracking_summary_url: string;
@@ -1361,6 +1395,7 @@ export type VideoBallTrackingResultResponse = {
   analysis_id: string;
   summary: VideoBallTrackingSummary;
   primary_track: VideoBallTrackingPoint[];
+  bounce?: PrimaryBounceResult | null;
   message: string;
 };
 
@@ -1373,7 +1408,10 @@ function withBrowserSafeTrackingLinks(
     tracking_video_url: resolveApiUrl(links.tracking_video_url) ?? links.tracking_video_url,
     tracking_json_url: resolveApiUrl(links.tracking_json_url) ?? links.tracking_json_url,
     tracking_csv_url: resolveApiUrl(links.tracking_csv_url) ?? links.tracking_csv_url,
-    tracking_summary_url: resolveApiUrl(links.tracking_summary_url) ?? links.tracking_summary_url
+    tracking_summary_url: resolveApiUrl(links.tracking_summary_url) ?? links.tracking_summary_url,
+    delivery_replay_url: links.delivery_replay_url
+      ? resolveApiUrl(links.delivery_replay_url) ?? links.delivery_replay_url
+      : links.delivery_replay_url
   };
 }
 
@@ -1386,6 +1424,9 @@ function withBrowserSafeTrackingResult(
     summary: {
       ...result.summary,
       tracking_video_url: resolveApiUrl(result.summary.tracking_video_url) ?? result.summary.tracking_video_url,
+      delivery_replay_url: result.summary.delivery_replay_url
+        ? resolveApiUrl(result.summary.delivery_replay_url) ?? result.summary.delivery_replay_url
+        : result.summary.delivery_replay_url,
       tracking_json_url: resolveApiUrl(result.summary.tracking_json_url) ?? result.summary.tracking_json_url,
       tracking_csv_url: resolveApiUrl(result.summary.tracking_csv_url) ?? result.summary.tracking_csv_url,
       tracking_summary_url: resolveApiUrl(result.summary.tracking_summary_url) ?? result.summary.tracking_summary_url

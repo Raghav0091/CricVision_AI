@@ -851,6 +851,16 @@ class VideoBallTrackingResultLinks(BaseModel):
     tracking_json_url: str
     tracking_csv_url: str
     tracking_summary_url: str
+    delivery_replay_url: str | None = None
+
+
+# Provenance for every final track point (never label all as "detected").
+TrackingProvenance = Literal[
+    "OBSERVED",
+    "TRACKER_RECOVERED",
+    "PHYSICS_RECONSTRUCTED",
+    "PROJECTED",
+]
 
 
 class VideoBallTrackingStartResponse(BaseModel):
@@ -878,13 +888,16 @@ class VideoBallTrackingJobResponse(BaseModel):
 class TrackingPoint(StrictGeometryModel):
     frame_index: int = Field(ge=0)
     timestamp_seconds: float = Field(ge=0)
+    # Legacy debug alias kept for older UI colour maps; provenance is canonical.
     source: Literal["observed", "predicted", "recovered"]
+    provenance: TrackingProvenance
     candidate_id: str | None = None
     x: float = Field(ge=0)
     y: float = Field(ge=0)
     normalized_x: float = Field(ge=0, le=1)
     normalized_y: float = Field(ge=0, le=1)
     confidence: float = Field(ge=0, le=1)
+    uncertainty: float = Field(default=0.0, ge=0, le=1)
     vx: float
     vy: float
     prediction_error: float | None = Field(default=None, ge=0)
@@ -912,6 +925,19 @@ class TrackingCandidateDiagnostic(StrictGeometryModel):
     score_components: TrackingCandidateScoreComponents | None = None
 
 
+class PrimaryBounceResult(BaseModel):
+    bounce_detected: bool | Literal["uncertain"]
+    bounce_frame: int | None = Field(default=None, ge=0)
+    bounce_timestamp_seconds: float | None = Field(default=None, ge=0)
+    bounce_x: float | None = Field(default=None, ge=0)
+    bounce_y: float | None = Field(default=None, ge=0)
+    bounce_normalized_x: float | None = Field(default=None, ge=0, le=1)
+    bounce_normalized_y: float | None = Field(default=None, ge=0, le=1)
+    confidence: float = Field(default=0.0, ge=0, le=1)
+    evidence: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class VideoBallTrackingSettings(BaseModel):
     motion_model: Literal["constant_velocity_recent_median"]
     max_recoverable_gap: int = Field(ge=1)
@@ -920,6 +946,8 @@ class VideoBallTrackingSettings(BaseModel):
     base_gate_normalized: float = Field(gt=0)
     maximum_gate_normalized: float = Field(gt=0)
     history_points: int = Field(ge=1)
+    beam_width: int = Field(default=4, ge=1, le=8)
+    tracker_version: Literal["delivery_track_v2"] = "delivery_track_v2"
 
 
 class VideoBallTrackingDocument(BaseModel):
@@ -929,7 +957,10 @@ class VideoBallTrackingDocument(BaseModel):
     completed_at: datetime
     settings: VideoBallTrackingSettings
     primary_track: list[TrackingPoint]
+    # Raw association decisions before bidirectional refinement / outlier trim.
+    raw_primary_track: list[TrackingPoint] = Field(default_factory=list)
     candidate_diagnostics: list[TrackingCandidateDiagnostic]
+    bounce: PrimaryBounceResult | None = None
     message: str
 
 
@@ -941,19 +972,30 @@ class VideoBallTrackingSummary(BaseModel):
     candidate_frames: int = Field(ge=0)
     track_start_frame: int | None = Field(default=None, ge=0)
     track_end_frame: int | None = Field(default=None, ge=0)
+    # Earliest strong observation of the final hypothesis — not true release.
+    first_supported_delivery_point: int | None = Field(default=None, ge=0)
+    track_start_label: Literal["track_start", "unavailable"] = "unavailable"
     track_duration_frames: int = Field(ge=0)
     track_duration_seconds: float = Field(ge=0)
     observed_track_points: int = Field(ge=0)
     predicted_points: int = Field(ge=0)
     recovered_points: int = Field(ge=0)
+    physics_reconstructed_points: int = Field(default=0, ge=0)
+    projected_points: int = Field(default=0, ge=0)
     rejected_candidates: int = Field(ge=0)
     longest_gap_frames: int = Field(ge=0)
+    observation_ratio: float = Field(default=0.0, ge=0, le=1)
     average_observed_confidence: float = Field(ge=0, le=1)
+    consistency_score: float = Field(default=0.0, ge=0, le=1)
     track_confidence: float = Field(ge=0, le=1)
-    track_quality: Literal["low", "medium", "good", "strong"]
+    track_quality: Literal["high", "medium", "low", "failed"]
     approximate_direction: str
     possible_bounce_transition_detected: bool | Literal["uncertain"]
+    bounce_detected: bool | Literal["uncertain"] = "uncertain"
+    bounce_frame: int | None = Field(default=None, ge=0)
+    bounce_confidence: float = Field(default=0.0, ge=0, le=1)
     tracking_video_url: str
+    delivery_replay_url: str | None = None
     tracking_json_url: str
     tracking_csv_url: str
     tracking_summary_url: str
@@ -967,4 +1009,5 @@ class VideoBallTrackingResultResponse(BaseModel):
     analysis_id: str
     summary: VideoBallTrackingSummary
     primary_track: list[TrackingPoint]
+    bounce: PrimaryBounceResult | None = None
     message: str
