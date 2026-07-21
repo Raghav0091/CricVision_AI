@@ -8,7 +8,7 @@ import math
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from ..schemas.video_analysis import (
     ConfirmedVideoCalibrationResponse,
@@ -23,9 +23,14 @@ from ..schemas.video_analysis import (
     WicketCalibrationInput,
     WicketCandidate,
 )
+from .ball_detection_clip import transcode_browser_mp4
 from .stump_detector_service import (
     STUMP_MODEL_PATH,
     STUMP_MODEL_RELATIVE_PATH,
+    build_scene_overlay_rgba,
+    compose_scene_overlay_image,
+    default_wicket_guides,
+    detect_wickets_guided,
     detect_wickets_robust,
     save_robust_detection_overlay,
 )
@@ -41,6 +46,7 @@ from .video_analysis_service import (
 
 CALIBRATION_FILENAME = "calibration.json"
 CALIBRATION_OVERLAY_FILENAME = "calibration_overlay.jpg"
+SCENE_OVERLAY_FILENAME = "scene_overlay.mp4"
 DETECTION_DEBUG_JSON = "wicket_detection_debug.json"
 DETECTION_DEBUG_OVERLAY = "wicket_detection_debug.jpg"
 EARLY_FALLBACK_ATTEMPTS = 3
@@ -53,34 +59,42 @@ def detect_video_calibration(
     analysis_id: str,
     *,
     refresh_early_reference: bool = False,
+    striker_guide: NormalizedBox | None = None,
+    non_striker_guide: NormalizedBox | None = None,
 ) -> VideoCalibrationDetectionResponse:
     analysis = load_video_analysis(analysis_id)
     if refresh_early_reference:
         _try_refresh_early_reference(analysis_id, analysis)
         analysis = load_video_analysis(analysis_id)
 
-    response = _detect_on_current_reference(analysis_id, analysis)
+    guides = _resolve_guides(striker_guide, non_striker_guide)
+    response = _detect_on_current_reference(analysis_id, analysis, guides=guides)
     if (
         response.provisional_striker_wicket is not None
         and response.provisional_non_striker_wicket is not None
     ):
         return response
 
-    # Preserve early-window preference; try a few other early clean frames only.
-    if _try_early_frame_fallback(analysis_id, analysis):
-        analysis = load_video_analysis(analysis_id)
-        return _detect_on_current_reference(analysis_id, analysis)
+    # Guided redetect keeps the same frame; only unguided legacy path falls back.
+    if striker_guide is None and non_striker_guide is None:
+        if _try_early_frame_fallback(analysis_id, analysis):
+            analysis = load_video_analysis(analysis_id)
+            return _detect_on_current_reference(
+                analysis_id, analysis, guides=guides
+            )
     return response
 
 
 def _detect_on_current_reference(
     analysis_id: str,
     analysis: Any,
+    *,
+    guides: dict[str, dict[str, float]],
 ) -> VideoCalibrationDetectionResponse:
     reference_path = _reference_path(analysis_id)
     image = _open_reference_image(reference_path)
     image_width, image_height = image.size
-    detection_result = detect_wickets_robust(image, enable_roi=True)
+    detection_result = detect_wickets_guided(image, guides)
     raw_candidates = detection_result.get("candidates") or []
     candidates: list[WicketCandidate] = []
     for index, candidate in enumerate(raw_candidates, start=1):
@@ -102,27 +116,34 @@ def _detect_on_current_reference(
     selected = detection_result.get("selected") or {}
     selected_striker = selected.get("striker")
     selected_non_striker = selected.get("non_striker")
-    if selected_striker is not None and selected_non_striker is not None:
+    if selected_striker is not None:
         striker_candidate = _match_selected_candidate(
             candidates, selected_striker, image_width, image_height
         )
+        if striker_candidate is not None:
+            striker = _calibration_from_candidate(striker_candidate, "striker")
+    if selected_non_striker is not None:
         non_striker_candidate = _match_selected_candidate(
             candidates, selected_non_striker, image_width, image_height
         )
-        if striker_candidate is not None and non_striker_candidate is not None:
-            striker = _calibration_from_candidate(striker_candidate, "striker")
+        if non_striker_candidate is not None:
             non_striker = _calibration_from_candidate(
                 non_striker_candidate, "non_striker"
             )
-            assignment_warning = _assignment_uncertainty_warning(
-                striker, non_striker
-            )
-    elif len(candidates) == 1:
+    if striker is not None and non_striker is not None:
+        assignment_warning = _assignment_uncertainty_warning(striker, non_striker)
+    elif len(candidates) == 1 and striker is None and non_striker is None:
         only = candidates[0]
         if _near_score(only) >= 0.65:
             non_striker = _calibration_from_candidate(only, "non_striker")
         else:
             striker = _calibration_from_candidate(only, "striker")
+
+    failed_ends: list[str] = []
+    if striker is None:
+        failed_ends.append("striker")
+    if non_striker is None:
+        failed_ends.append("non_striker")
 
     pitch_geometry = (
         calculate_pitch_geometry(striker, non_striker, 1.0)
@@ -149,22 +170,30 @@ def _detect_on_current_reference(
         detection_result=detection_result,
     )
 
+    guide_models = {
+        "striker": NormalizedBox(**guides["striker"]),
+        "non_striker": NormalizedBox(**guides["non_striker"]),
+    }
+
     if not detection_result["success"]:
         status = detection_result["status"]
         message = detection_result["message"]
         success = False
     elif striker is None or non_striker is None:
         status = "detection_incomplete"
+        failed_label = " and ".join(
+            end.replace("_", "-") for end in failed_ends
+        ) or "wickets"
         message = (
-            "Automatic visual calibration could not lock both wickets on the "
-            "early reference frame after full-frame and ROI passes. "
-            "Press Redetect to try another early frame."
+            f"Guided detection could not lock the {failed_label} end(s) "
+            "inside the current guide boxes. Reposition the guide(s) and "
+            "press Detect Wickets again."
         )
         success = True
     else:
         status = "candidates_ready"
         message = (
-            "Automatic visual calibration detected both wickets. "
+            "Guided visual calibration detected both wickets. "
             "Review the overlay, then Accept, Redetect, or Swap Wicket Ends."
         )
         success = True
@@ -182,6 +211,9 @@ def _detect_on_current_reference(
         provisional_striker_wicket=striker,
         provisional_non_striker_wicket=non_striker,
         pitch_geometry=pitch_geometry,
+        striker_guide=guide_models["striker"],
+        non_striker_guide=guide_models["non_striker"],
+        failed_ends=failed_ends,  # type: ignore[arg-type]
         model_path_used=STUMP_MODEL_RELATIVE_PATH,
         mode="automatic_visual",
         quality=quality,
@@ -239,8 +271,10 @@ def confirm_video_calibration(
 
     analysis_dir = VIDEO_ANALYSIS_ROOT / analysis_id
     calibration_dir = analysis_dir / "calibration"
+    calibration_dir.mkdir(parents=True, exist_ok=True)
     calibration_path = calibration_dir / CALIBRATION_FILENAME
     overlay_path = calibration_dir / CALIBRATION_OVERLAY_FILENAME
+    scene_overlay_path = calibration_dir / SCENE_OVERLAY_FILENAME
     now = datetime.now(timezone.utc)
     created_at = _existing_created_at(calibration_path) or now
     calibration_url = (
@@ -250,6 +284,10 @@ def confirm_video_calibration(
     overlay_url = (
         f"/static/video-analysis/{analysis_id}/calibration/"
         f"{CALIBRATION_OVERLAY_FILENAME}"
+    )
+    scene_overlay_url = (
+        f"/static/video-analysis/{analysis_id}/calibration/"
+        f"{SCENE_OVERLAY_FILENAME}"
     )
     model_path_used = (
         STUMP_MODEL_RELATIVE_PATH
@@ -270,6 +308,8 @@ def confirm_video_calibration(
         reference_frame_url=analysis.reference_frame_url,
         calibration_url=calibration_url,
         calibration_overlay_url=overlay_url,
+        scene_overlay_url=None,
+        scene_overlay_status=None,
         image_width=image_width,
         image_height=image_height,
         model_path_used=model_path_used,
@@ -280,14 +320,40 @@ def confirm_video_calibration(
         striker_wicket=striker,
         non_striker_wicket=non_striker,
         pitch_geometry=pitch_geometry,
+        striker_guide=request.striker_guide,
+        non_striker_guide=request.non_striker_guide,
         user_note=request.user_note,
         message=(
-            "Automatic visual calibration accepted. "
+            "Guided scene overlay locked. "
             "Approximate 2D scene context only — not metric 3D."
         ),
     )
 
     _save_calibration_overlay(image, confirmed, overlay_path)
+    # ponytail: scene_overlay.mp4 is a separate display artefact; never feed
+    # composited frames into ball detection / YOLO.
+    scene_overlay_status: str = "failed"
+    scene_overlay_url_value: str | None = None
+    try:
+        _render_scene_overlay_video(
+            analysis_id,
+            analysis,
+            confirmed,
+            scene_overlay_path,
+        )
+        scene_overlay_status = "ready"
+        scene_overlay_url_value = scene_overlay_url
+    except Exception:
+        scene_overlay_path.unlink(missing_ok=True)
+        scene_overlay_status = "failed"
+        scene_overlay_url_value = None
+
+    confirmed = confirmed.model_copy(
+        update={
+            "scene_overlay_url": scene_overlay_url_value,
+            "scene_overlay_status": scene_overlay_status,
+        }
+    )
     _write_json(calibration_path, confirmed.model_dump(mode="json"))
     _update_analysis_metadata(
         analysis_dir,
@@ -295,6 +361,7 @@ def confirm_video_calibration(
         calibration_url=calibration_url,
         overlay_url=overlay_url,
         quality=quality,
+        scene_overlay_url=scene_overlay_url_value,
     )
     return confirmed
 
@@ -457,7 +524,12 @@ def _candidate_from_detection(
     )
     center, bottom_center = _box_points(box)
     detection_pass = candidate.get("source")
-    if detection_pass not in {"full_frame", "far_roi", "near_roi"}:
+    if detection_pass not in {
+        "full_frame",
+        "far_roi",
+        "near_roi",
+        "guide_roi",
+    }:
         detection_pass = None
     return WicketCandidate(
         candidate_id=f"wicket_{index}",
@@ -884,88 +956,182 @@ def _offset_point(
     )
 
 
+def _resolve_guides(
+    striker_guide: NormalizedBox | None,
+    non_striker_guide: NormalizedBox | None,
+) -> dict[str, dict[str, float]]:
+    defaults = default_wicket_guides()
+    return {
+        "striker": (
+            striker_guide.model_dump()
+            if striker_guide is not None
+            else defaults["striker"]
+        ),
+        "non_striker": (
+            non_striker_guide.model_dump()
+            if non_striker_guide is not None
+            else defaults["non_striker"]
+        ),
+    }
+
+
+def _normalized_wicket_bbox_pixels(
+    wicket: WicketCalibration,
+    width: int,
+    height: int,
+) -> dict[str, float]:
+    return {
+        "x": float(wicket.box.x) * width,
+        "y": float(wicket.box.y) * height,
+        "width": float(wicket.box.width) * width,
+        "height": float(wicket.box.height) * height,
+    }
+
+
 def _save_calibration_overlay(
     image: Image.Image,
     calibration: ConfirmedVideoCalibrationResponse,
     output_path: Path,
 ) -> None:
     try:
-        overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay, "RGBA")
         width, height = image.size
-
-        corridor = [
-            (round(point.x * width), round(point.y * height))
-            for point in calibration.pitch_geometry.corridor
-        ]
-        draw.polygon(
-            corridor,
-            fill=(213, 255, 107, 42),
-            outline=(213, 255, 107, 220),
-        )
-        axis_start = calibration.pitch_geometry.axis_start
-        axis_end = calibration.pitch_geometry.axis_end
-        draw.line(
-            (
-                round(axis_start.x * width),
-                round(axis_start.y * height),
-                round(axis_end.x * width),
-                round(axis_end.y * height),
+        composed = compose_scene_overlay_image(
+            image,
+            striker_bbox=_normalized_wicket_bbox_pixels(
+                calibration.striker_wicket, width, height
             ),
-            fill=(255, 255, 255, 235),
-            width=max(2, round(width / 640)),
-        )
-
-        for wicket, color, label in (
-            (calibration.striker_wicket, (255, 190, 70, 255), "Striker Wicket"),
-            (
-                calibration.non_striker_wicket,
-                (80, 220, 255, 255),
-                "Non-Striker Wicket",
+            non_striker_bbox=_normalized_wicket_bbox_pixels(
+                calibration.non_striker_wicket, width, height
             ),
-        ):
-            x1 = round(wicket.box.x * width)
-            y1 = round(wicket.box.y * height)
-            x2 = round((wicket.box.x + wicket.box.width) * width)
-            y2 = round((wicket.box.y + wicket.box.height) * height)
-            draw.rectangle(
-                (x1, y1, x2, y2),
-                outline=color,
-                width=max(3, round(width / 480)),
-            )
-            label_top = max(0, y1 - 20)
-            draw.rectangle(
-                (x1, label_top, min(width, x1 + 145), y1),
-                fill=(8, 12, 16, 220),
-            )
-            draw.text((x1 + 4, label_top + 3), label, fill=color)
-            point_x = round(wicket.bottom_center.x * width)
-            point_y = round(wicket.bottom_center.y * height)
-            radius = max(4, round(width / 320))
-            draw.ellipse(
-                (
-                    point_x - radius,
-                    point_y - radius,
-                    point_x + radius,
-                    point_y + radius,
-                ),
-                fill=color,
-                outline=(0, 0, 0, 255),
-            )
-
-        draw.rectangle((12, 12, 265, 36), fill=(8, 12, 16, 210))
-        draw.text(
-            (18, 18),
-            "Automatic visual calibration",
-            fill=(255, 255, 255, 255),
         )
-        composed = Image.alpha_composite(image.convert("RGBA"), overlay)
-        composed.convert("RGB").save(output_path, format="JPEG", quality=92)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        composed.save(output_path, format="JPEG", quality=92)
     except Exception as exc:
         raise VideoAnalysisServiceError(
             f"Calibration overlay could not be saved: {type(exc).__name__}.",
             status_code=500,
         ) from exc
+
+
+def _render_scene_overlay_video(
+    analysis_id: str,
+    analysis: Any,
+    calibration: ConfirmedVideoCalibrationResponse,
+    output_path: Path,
+) -> None:
+    """Composite a prebuilt RGBA scene overlay onto clean original frames."""
+    import cv2
+    import numpy as np
+
+    analysis_dir = VIDEO_ANALYSIS_ROOT / analysis_id
+    video_path = analysis_dir / "raw" / analysis.stored_filename
+    if not video_path.is_file():
+        raise VideoAnalysisServiceError(
+            "Original analysis video is missing.",
+            status_code=404,
+        )
+
+    total_frames = int(analysis.frame_count)
+    if total_frames <= 0:
+        raise VideoAnalysisServiceError(
+            "Original analysis video contains zero frames.",
+            status_code=500,
+        )
+
+    intermediate_path = output_path.with_name("scene_overlay_intermediate.avi")
+    encoded_path = output_path.with_name("scene_overlay_encoded.mp4")
+    for stale_path in (output_path, intermediate_path, encoded_path):
+        stale_path.unlink(missing_ok=True)
+
+    capture = cv2.VideoCapture(str(video_path))
+    writer = None
+    try:
+        if not capture.isOpened():
+            raise VideoAnalysisServiceError(
+                "OpenCV could not open the original video.",
+                status_code=500,
+            )
+        input_fps = float(capture.get(cv2.CAP_PROP_FPS))
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        capture_frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        if not math.isfinite(input_fps) or input_fps <= 0:
+            raise VideoAnalysisServiceError(
+                "Original analysis video has an invalid FPS value.",
+                status_code=500,
+            )
+        if width <= 0 or height <= 0:
+            raise VideoAnalysisServiceError(
+                "Original analysis video has invalid dimensions.",
+                status_code=500,
+            )
+        if capture_frame_count > 0 and capture_frame_count != total_frames:
+            raise VideoAnalysisServiceError(
+                "Stored frame count no longer matches the original video.",
+                status_code=500,
+            )
+
+        # Prebuild once; composite onto clean frames only (separate output).
+        overlay_rgba = build_scene_overlay_rgba(
+            frame_width=width,
+            frame_height=height,
+            striker_bbox=_normalized_wicket_bbox_pixels(
+                calibration.striker_wicket, width, height
+            ),
+            non_striker_bbox=_normalized_wicket_bbox_pixels(
+                calibration.non_striker_wicket, width, height
+            ),
+        )
+        overlay_np = np.asarray(overlay_rgba)
+        alpha = overlay_np[:, :, 3:4].astype(np.float32) / 255.0
+        overlay_bgr = cv2.cvtColor(overlay_np[:, :, :3], cv2.COLOR_RGB2BGR)
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        writer = cv2.VideoWriter(
+            str(intermediate_path),
+            cv2.VideoWriter_fourcc(*"MJPG"),
+            input_fps,
+            (width, height),
+        )
+        if not writer.isOpened():
+            raise VideoAnalysisServiceError(
+                "Could not create the scene-overlay intermediate video.",
+                status_code=500,
+            )
+
+        for frame_index in range(total_frames):
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                raise VideoAnalysisServiceError(
+                    f"Video decoding stopped at frame {frame_index} "
+                    f"of {total_frames}.",
+                    status_code=500,
+                )
+            composed = (
+                frame.astype(np.float32) * (1.0 - alpha)
+                + overlay_bgr.astype(np.float32) * alpha
+            ).astype(np.uint8)
+            writer.write(composed)
+    finally:
+        capture.release()
+        if writer is not None:
+            writer.release()
+
+    try:
+        transcode_browser_mp4(
+            intermediate_path,
+            encoded_path,
+            timeout_seconds=600,
+        )
+        encoded_path.replace(output_path)
+    except Exception as exc:
+        encoded_path.unlink(missing_ok=True)
+        raise VideoAnalysisServiceError(
+            f"Could not encode scene overlay video: {type(exc).__name__}.",
+            status_code=500,
+        ) from exc
+    finally:
+        intermediate_path.unlink(missing_ok=True)
 
 
 def _existing_created_at(path: Path) -> datetime | None:
@@ -985,6 +1151,7 @@ def _update_analysis_metadata(
     calibration_url: str,
     overlay_url: str,
     quality: VisualCalibrationQuality,
+    scene_overlay_url: str | None = None,
 ) -> None:
     metadata_path = analysis_dir / "reports" / "analysis_metadata.json"
     try:
@@ -1005,6 +1172,12 @@ def _update_analysis_metadata(
             "updated_at": updated_at.isoformat().replace("+00:00", "Z"),
         }
     )
+    if scene_overlay_url:
+        metadata["scene_overlay_url"] = scene_overlay_url
+        metadata["scene_overlay_status"] = "ready"
+    else:
+        metadata["scene_overlay_url"] = None
+        metadata["scene_overlay_status"] = "failed"
     _write_json(metadata_path, metadata)
 
 

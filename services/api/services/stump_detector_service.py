@@ -180,6 +180,410 @@ def detect_stump_candidates(image: Image.Image) -> dict[str, Any]:
     }
 
 
+# ponytail: sensible rear-camera defaults — far upper/central, near lower/central larger.
+DEFAULT_STRIKER_GUIDE = {"x": 0.34, "y": 0.16, "width": 0.32, "height": 0.36}
+DEFAULT_NON_STRIKER_GUIDE = {"x": 0.22, "y": 0.48, "width": 0.56, "height": 0.48}
+
+
+def default_wicket_guides() -> dict[str, dict[str, float]]:
+    return {
+        "striker": dict(DEFAULT_STRIKER_GUIDE),
+        "non_striker": dict(DEFAULT_NON_STRIKER_GUIDE),
+    }
+
+
+def detect_wickets_guided(
+    image: Image.Image,
+    guides: dict[str, dict[str, float]],
+) -> dict[str, Any]:
+    """Detect wickets inside user guide boxes; robust full/ROI fallback if needed.
+
+    Role follows guide labels (striker guide → striker). Does not fabricate boxes.
+    Reuses `_detect_end` (same crop path as Upload Image) and `detect_wickets_robust`.
+    """
+    if not STUMP_MODEL_PATH.is_file():
+        return {
+            "success": False,
+            "status": "stump_detector_missing",
+            "message": (
+                "Stump detector model not found at "
+                f"{STUMP_MODEL_RELATIVE_PATH}"
+            ),
+            "candidates": [],
+            "selected": {"striker": None, "non_striker": None},
+            "rois": dict(guides),
+            "diagnostics": {
+                "passes": [],
+                "rejected": [],
+                "selected": None,
+                "pass_count": 0,
+            },
+        }
+
+    try:
+        model = _load_model(str(STUMP_MODEL_PATH))
+    except Exception as exc:
+        return {
+            "success": False,
+            "status": "stump_detector_error",
+            "message": f"Stump detector could not be loaded: {type(exc).__name__}.",
+            "candidates": [],
+            "selected": {"striker": None, "non_striker": None},
+            "rois": dict(guides),
+            "diagnostics": {
+                "passes": [],
+                "rejected": [],
+                "selected": None,
+                "pass_count": 0,
+            },
+        }
+
+    frame_width, frame_height = image.size
+    diagnostics: dict[str, Any] = {
+        "passes": [],
+        "rejected": [],
+        "selected": None,
+        "pass_count": 0,
+        "frame_width": frame_width,
+        "frame_height": frame_height,
+        "mode": "guided",
+    }
+    selected: dict[str, dict[str, Any] | None] = {
+        "striker": None,
+        "non_striker": None,
+    }
+    candidates: list[dict[str, Any]] = []
+
+    for end in ("striker", "non_striker"):
+        guide = guides[end]
+        detection = _detect_end(
+            model,
+            image,
+            end,
+            guide,
+            frame_width,
+            frame_height,
+        )
+        accepted: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
+        if detection.get("found") and detection.get("bbox"):
+            candidate = {
+                "confidence": float(detection["confidence"]),
+                "class_name": str(detection.get("class_name") or "stump"),
+                "bbox": {
+                    "x": float(detection["bbox"]["x"]),
+                    "y": float(detection["bbox"]["y"]),
+                    "width": float(detection["bbox"]["width"]),
+                    "height": float(detection["bbox"]["height"]),
+                },
+                "source": "guide_roi",
+                "guide_end": end,
+            }
+            accepted.append(candidate)
+            candidates.append(candidate)
+            selected[end] = candidate
+        else:
+            rejected.append(
+                {
+                    "source": "guide_roi",
+                    "reason": "no_stump_in_guide",
+                    "guide_end": end,
+                    "confidence": None,
+                    "class_name": None,
+                    "bbox": None,
+                }
+            )
+        diagnostics["passes"].append(
+            _pass_summary(f"guide_{end}", accepted, rejected, roi=guide)
+        )
+        diagnostics["rejected"].extend(rejected)
+
+    missing = [end for end, item in selected.items() if item is None]
+    if missing:
+        robust = detect_wickets_robust(image, enable_roi=True)
+        robust_diagnostics = robust.get("diagnostics") or {}
+        diagnostics["passes"].extend(robust_diagnostics.get("passes") or [])
+        diagnostics["rejected"].extend(robust_diagnostics.get("rejected") or [])
+        for item in robust.get("candidates") or []:
+            candidates = _merge_candidates(candidates, [item])
+
+        used_boxes = [
+            item["bbox"] for item in selected.values() if item is not None
+        ]
+        for end in missing:
+            guide = guides[end]
+            best = _best_candidate_in_guide(
+                candidates,
+                guide,
+                frame_width,
+                frame_height,
+                exclude_boxes=used_boxes,
+            )
+            if best is None:
+                # Last resort: robust role assignment for this end only.
+                fallback = (robust.get("selected") or {}).get(end)
+                if fallback is not None and _bbox_center_in_guide(
+                    fallback["bbox"], guide, frame_width, frame_height
+                ):
+                    best = fallback
+                elif fallback is not None and end == "non_striker":
+                    # ponytail: purple near-wicket often sits near frame bottom;
+                    # allow robust near pick when guide was close but empty.
+                    best = fallback
+            if best is not None:
+                selected[end] = best
+                used_boxes.append(best["bbox"])
+
+    diagnostics["pass_count"] = len(diagnostics["passes"])
+    diagnostics["selected"] = {
+        "striker": _candidate_debug(selected["striker"]),
+        "non_striker": _candidate_debug(selected["non_striker"]),
+    }
+    candidates.sort(key=lambda item: item["confidence"], reverse=True)
+    both = selected["striker"] is not None and selected["non_striker"] is not None
+    return {
+        "success": True,
+        "status": "candidates_ready" if both else "detection_incomplete",
+        "message": (
+            "Guided stump detection found both wickets."
+            if both
+            else "Guided stump detection could not lock both wickets."
+        ),
+        "candidates": candidates,
+        "selected": selected,
+        "rois": dict(guides),
+        "diagnostics": diagnostics,
+    }
+
+
+def _best_candidate_in_guide(
+    candidates: list[dict[str, Any]],
+    guide: dict[str, float],
+    frame_width: int,
+    frame_height: int,
+    *,
+    exclude_boxes: list[dict[str, float]],
+) -> dict[str, Any] | None:
+    best: dict[str, Any] | None = None
+    best_conf = -1.0
+    for candidate in candidates:
+        bbox = candidate.get("bbox") or {}
+        if any(_bbox_iou(bbox, other) >= DEDUPE_IOU for other in exclude_boxes):
+            continue
+        if not _bbox_center_in_guide(bbox, guide, frame_width, frame_height):
+            continue
+        confidence = float(candidate.get("confidence") or 0.0)
+        if confidence > best_conf:
+            best = candidate
+            best_conf = confidence
+    return best
+
+
+def _bbox_center_in_guide(
+    bbox: dict[str, float],
+    guide: dict[str, float],
+    frame_width: int,
+    frame_height: int,
+) -> bool:
+    try:
+        cx = (float(bbox["x"]) + float(bbox["width"]) / 2.0) / frame_width
+        cy = (float(bbox["y"]) + float(bbox["height"]) / 2.0) / frame_height
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return False
+    return (
+        guide["x"] <= cx <= guide["x"] + guide["width"]
+        and guide["y"] <= cy <= guide["y"] + guide["height"]
+    )
+
+
+def build_scene_overlay_rgba(
+    *,
+    frame_width: int,
+    frame_height: int,
+    striker_bbox: dict[str, float],
+    non_striker_bbox: dict[str, float],
+) -> Image.Image:
+    """Transparent Upload-Image-style scene overlay (virtual wickets + corridor).
+
+    Shared by calibration JPEG preview and full-video scene compositing.
+    """
+    detections = {
+        "striker": {
+            "found": True,
+            "confidence": 1.0,
+            "bbox": _bbox_to_int(striker_bbox),
+        },
+        "non_striker": {
+            "found": True,
+            "confidence": 1.0,
+            "bbox": _bbox_to_int(non_striker_bbox),
+        },
+    }
+    virtual_stumps = {
+        end: _virtual_stumps_from_bbox(
+            detections[end]["bbox"],
+            frame_width=frame_width,
+            frame_height=frame_height,
+        )
+        for end in ("striker", "non_striker")
+    }
+    pitch_overlay = _build_pitch_overlay(
+        detections,
+        virtual_stumps,
+        frame_width=frame_width,
+        frame_height=frame_height,
+    )
+    overlay = Image.new("RGBA", (frame_width, frame_height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay, "RGBA")
+    _draw_upload_style_scene(
+        draw,
+        pitch_overlay=pitch_overlay,
+        detections=detections,
+        virtual_stumps=virtual_stumps,
+        frame_width=frame_width,
+        include_detection_boxes=True,
+    )
+    return overlay
+
+
+def compose_scene_overlay_image(
+    image: Image.Image,
+    *,
+    striker_bbox: dict[str, float],
+    non_striker_bbox: dict[str, float],
+) -> Image.Image:
+    """Composite Upload-Image-style scene geometry onto a clean RGB frame."""
+    width, height = image.size
+    overlay = build_scene_overlay_rgba(
+        frame_width=width,
+        frame_height=height,
+        striker_bbox=striker_bbox,
+        non_striker_bbox=non_striker_bbox,
+    )
+    return Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
+
+
+def _bbox_to_int(bbox: dict[str, float]) -> dict[str, int]:
+    return {
+        "x": int(round(float(bbox["x"]))),
+        "y": int(round(float(bbox["y"]))),
+        "width": max(1, int(round(float(bbox["width"])))),
+        "height": max(1, int(round(float(bbox["height"])))),
+    }
+
+
+def _draw_upload_style_scene(
+    draw: ImageDraw.ImageDraw,
+    *,
+    pitch_overlay: dict[str, Any],
+    detections: dict[str, dict[str, Any]],
+    virtual_stumps: dict[str, Any],
+    frame_width: int,
+    include_detection_boxes: bool,
+) -> None:
+    """Thin perspective corridor + dashed centreline + virtual stumps (Upload style)."""
+    stroke = max(2, round(frame_width / 640))
+    stump_width = max(3, round(frame_width / 420))
+    bail_width = max(3, round(frame_width / 380))
+
+    corridor = pitch_overlay.get("pitch_corridor") or []
+    if len(corridor) == 4:
+        polygon = [(point["x"], point["y"]) for point in corridor]
+        draw.polygon(
+            polygon,
+            fill=(226, 183, 72, 40),
+            outline=(255, 225, 132, 200),
+            width=stroke,
+        )
+
+    center_line = pitch_overlay.get("center_line") or []
+    if len(center_line) == 2:
+        _draw_dashed_line(
+            draw,
+            (
+                center_line[0]["x"],
+                center_line[0]["y"],
+                center_line[1]["x"],
+                center_line[1]["y"],
+            ),
+            fill=(255, 255, 255, 210),
+            width=stroke,
+            dash=max(8, round(frame_width / 80)),
+            gap=max(6, round(frame_width / 100)),
+        )
+
+    for guide in (pitch_overlay.get("crease_guides") or {}).values():
+        if len(guide) == 2:
+            draw.line(
+                (guide[0]["x"], guide[0]["y"], guide[1]["x"], guide[1]["y"]),
+                fill=(255, 255, 255, 185),
+                width=max(1, stroke - 1),
+            )
+
+    if include_detection_boxes:
+        for end in ("striker", "non_striker"):
+            detection = detections.get(end) or {}
+            bbox = detection.get("bbox")
+            if not detection.get("found") or not bbox:
+                continue
+            bx1, by1 = bbox["x"], bbox["y"]
+            bx2 = bx1 + bbox["width"]
+            by2 = by1 + bbox["height"]
+            draw.rectangle(
+                (bx1, by1, bx2, by2),
+                outline=(183, 243, 75, 230),
+                width=stroke,
+            )
+            label = f"{end} {(detection.get('confidence') or 0) * 100:.0f}%"
+            draw.text((bx1 + 4, max(0, by1 - 14)), label, fill=(183, 243, 75, 255))
+
+    for end in ("striker", "non_striker"):
+        end_geometry = virtual_stumps.get(end) or {}
+        for stump in end_geometry.get("stumps", []):
+            top = stump["top"]
+            base = stump["base"]
+            draw.line(
+                (top["x"], top["y"], base["x"], base["y"]),
+                fill=(246, 207, 98, 255),
+                width=stump_width,
+            )
+        for bail in end_geometry.get("bails", []):
+            start = bail["start"]
+            end_point = bail["end"]
+            draw.line(
+                (start["x"], start["y"], end_point["x"], end_point["y"]),
+                fill=(255, 223, 126, 255),
+                width=bail_width,
+            )
+
+
+def _draw_dashed_line(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[int, int, int, int],
+    *,
+    fill: tuple[int, int, int, int],
+    width: int,
+    dash: int,
+    gap: int,
+) -> None:
+    x1, y1, x2, y2 = xy
+    dx = float(x2 - x1)
+    dy = float(y2 - y1)
+    length = (dx * dx + dy * dy) ** 0.5
+    if length < 1:
+        return
+    ux, uy = dx / length, dy / length
+    drawn = 0.0
+    while drawn < length:
+        seg_end = min(length, drawn + dash)
+        sx = round(x1 + ux * drawn)
+        sy = round(y1 + uy * drawn)
+        ex = round(x1 + ux * seg_end)
+        ey = round(y1 + uy * seg_end)
+        draw.line((sx, sy, ex, ey), fill=fill, width=width)
+        drawn = seg_end + gap
+
+
 def detect_wickets_robust(
     image: Image.Image,
     *,

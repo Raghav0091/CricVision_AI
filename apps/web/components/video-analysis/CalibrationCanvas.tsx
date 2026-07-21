@@ -12,6 +12,7 @@ import type {
 
 type WicketLabel = "striker" | "non_striker";
 type ResizeCorner = "nw" | "ne" | "sw" | "se";
+type InteractionMode = "guides" | "review" | "locked";
 type PointerOperation = {
   pointerId: number;
   label: WicketLabel;
@@ -24,6 +25,12 @@ type PointerOperation = {
 
 
 const MIN_BOX_SIZE = 0.035;
+
+// ponytail: far/near search defaults match typical side-on fixed-camera framing.
+export const DEFAULT_VIDEO_GUIDES = {
+  striker: { x: 0.34, y: 0.16, width: 0.32, height: 0.36 },
+  non_striker: { x: 0.22, y: 0.48, width: 0.56, height: 0.48 }
+};
 
 
 export function wicketFromBox(
@@ -120,33 +127,38 @@ export function CalibrationCanvas({
   imageHeight,
   striker,
   nonStriker,
+  strikerGuide = null,
+  nonStrikerGuide = null,
   pitchGeometry,
-  disabled = false,
-  readOnly = false,
-  onWicketChange
+  interactionMode = "locked",
+  showGuides,
+  onGuideChange
 }: {
   imageUrl: string;
   imageWidth: number;
   imageHeight: number;
   striker: WicketCalibration | null;
   nonStriker: WicketCalibration | null;
+  strikerGuide?: NormalizedBox | null;
+  nonStrikerGuide?: NormalizedBox | null;
   pitchGeometry: PitchGeometry | null;
-  disabled?: boolean;
-  readOnly?: boolean;
-  onWicketChange?: (label: WicketLabel, wicket: WicketCalibration) => void;
+  interactionMode?: InteractionMode;
+  showGuides?: boolean;
+  onGuideChange?: (label: WicketLabel, box: NormalizedBox) => void;
 }) {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const operationRef = useRef<PointerOperation | null>(null);
-  const editingLocked = disabled || readOnly || !onWicketChange;
+  const guidesEditable = interactionMode === "guides" && Boolean(onGuideChange);
+  const shouldShowGuides = showGuides ?? Boolean(strikerGuide || nonStrikerGuide);
 
-  function startOperation(
+  function startGuideOperation(
     event: ReactPointerEvent<HTMLElement>,
     label: WicketLabel,
-    wicket: WicketCalibration,
+    box: NormalizedBox,
     mode: PointerOperation["mode"],
     corner?: ResizeCorner
   ) {
-    if (editingLocked) return;
+    if (!guidesEditable) return;
     event.preventDefault();
     event.stopPropagation();
     const wrapper = wrapperRef.current;
@@ -159,13 +171,13 @@ export function CalibrationCanvas({
       corner,
       startX: (event.clientX - rect.left) / rect.width,
       startY: (event.clientY - rect.top) / rect.height,
-      original: { ...wicket.box }
+      original: { ...box }
     };
     wrapper.setPointerCapture(event.pointerId);
   }
 
   function moveOperation(event: ReactPointerEvent<HTMLDivElement>) {
-    if (editingLocked || !onWicketChange) return;
+    if (!guidesEditable || !onGuideChange) return;
     const operation = operationRef.current;
     const wrapper = wrapperRef.current;
     if (!operation || !wrapper || event.pointerId !== operation.pointerId) return;
@@ -178,13 +190,7 @@ export function CalibrationCanvas({
     const box = operation.mode === "move"
       ? moveBox(operation.original, dx, dy)
       : resizeBox(operation.original, operation.corner ?? "se", dx, dy);
-    const current = operation.label === "striker" ? striker : nonStriker;
-    if (!current) return;
-    const source = current.source === "detected" ? "adjusted" : current.source;
-    onWicketChange(
-      operation.label,
-      wicketFromBox(operation.label, source, current.confidence ?? null, box)
-    );
+    onGuideChange(operation.label, box);
   }
 
   function endOperation(event: ReactPointerEvent<HTMLDivElement>) {
@@ -195,53 +201,49 @@ export function CalibrationCanvas({
     }
   }
 
-  function renderWicket(
-    wicket: WicketCalibration | null,
-    label: WicketLabel
-  ) {
-    if (!wicket) return null;
-    const strikerBox = label === "striker";
-    const color = strikerBox ? "#ffca68" : "#50dcff";
-    const title = strikerBox ? "Striker Wicket" : "Non-Striker Wicket";
+  function renderGuide(label: WicketLabel, box: NormalizedBox | null) {
+    if (!box || !shouldShowGuides) return null;
+    const title = label === "striker" ? "Striker Guide" : "Non-Striker Guide";
+    const dimmed = interactionMode !== "guides";
     return (
       <div
-        className="absolute border-2"
+        className="absolute rounded-md border-2 border-dashed border-signal"
         style={{
-          left: `${wicket.box.x * 100}%`,
-          top: `${wicket.box.y * 100}%`,
-          width: `${wicket.box.width * 100}%`,
-          height: `${wicket.box.height * 100}%`,
-          borderColor: color,
-          boxShadow: `0 0 0 1px rgba(0,0,0,.7), 0 0 18px ${color}44`
+          left: `${box.x * 100}%`,
+          top: `${box.y * 100}%`,
+          width: `${box.width * 100}%`,
+          height: `${box.height * 100}%`,
+          opacity: dimmed ? 0.45 : 1,
+          boxShadow: dimmed ? undefined : "0 0 18px rgba(255,85,79,0.32)",
+          cursor: guidesEditable ? "move" : "default",
+          touchAction: "none",
+          pointerEvents: guidesEditable ? "auto" : "none"
         }}
+        onPointerDown={guidesEditable
+          ? (event) => startGuideOperation(event, label, box, "move")
+          : undefined}
       >
-        <div
-          className="absolute -top-7 left-0 max-w-[12rem] whitespace-nowrap rounded-t-md bg-ink/90 px-2 py-1 text-[10px] font-black uppercase tracking-[0.08em]"
-          style={{ color }}
-        >
+        <span className="absolute -top-7 left-0 whitespace-nowrap rounded bg-signal px-2 py-1 text-[10px] font-black uppercase tracking-wide text-white">
           {title}
-          {wicket.confidence != null && ` ${(wicket.confidence * 100).toFixed(0)}%`}
-        </div>
-        {!readOnly && (["nw", "ne", "sw", "se"] as ResizeCorner[]).map((corner) => (
+        </span>
+        {guidesEditable && (["nw", "ne", "sw", "se"] as ResizeCorner[]).map((corner) => (
           <button
             key={corner}
             type="button"
-            disabled={editingLocked}
             aria-label={`Resize ${title} from ${corner}`}
-            className={`absolute h-4 w-4 rounded-sm border-2 border-ink disabled:cursor-default ${
+            className={`absolute h-4 w-4 rounded-sm border-2 border-ink bg-signal ${
               corner.includes("n") ? "-top-2" : "-bottom-2"
             } ${
               corner.includes("w") ? "-left-2" : "-right-2"
             }`}
             style={{
-              backgroundColor: color,
               cursor: `${corner}-resize`,
               touchAction: "none"
             }}
-            onPointerDown={(event) => startOperation(
+            onPointerDown={(event) => startGuideOperation(
               event,
               label,
-              wicket,
+              box,
               "resize",
               corner
             )}
@@ -257,7 +259,7 @@ export function CalibrationCanvas({
       className="relative w-full select-none overflow-hidden rounded-xl bg-black"
       style={{
         aspectRatio: `${imageWidth} / ${imageHeight}`,
-        touchAction: readOnly ? "auto" : "none"
+        touchAction: guidesEditable ? "none" : "auto"
       }}
       onPointerMove={moveOperation}
       onPointerUp={endOperation}
@@ -267,53 +269,129 @@ export function CalibrationCanvas({
       <img
         className="absolute inset-0 h-full w-full object-contain"
         src={imageUrl}
-        alt="Automatic visual calibration reference"
+        alt="Guided scene calibration reference"
         draggable={false}
       />
-      {pitchGeometry && (
-        <svg
-          className="pointer-events-none absolute inset-0 h-full w-full"
-          viewBox="0 0 1 1"
-          preserveAspectRatio="none"
-          aria-label="Approximate pitch axis and corridor"
-        >
-          <polygon
-            points={pitchGeometry.corridor.map((point) => `${point.x},${point.y}`).join(" ")}
-            fill="rgba(213,255,107,.16)"
-            stroke="rgba(213,255,107,.9)"
-            strokeWidth="0.004"
-          />
-          <line
-            x1={pitchGeometry.axis_start.x}
-            y1={pitchGeometry.axis_start.y}
-            x2={pitchGeometry.axis_end.x}
-            y2={pitchGeometry.axis_end.y}
-            stroke="white"
-            strokeWidth="0.004"
-            strokeDasharray="0.012 0.008"
-          />
-          {[striker, nonStriker].map((wicket) => wicket && (
-            <circle
-              key={wicket.label}
-              cx={(wicket.approximate_wicket_base_reference ?? wicket.bottom_center).x}
-              cy={(wicket.approximate_wicket_base_reference ?? wicket.bottom_center).y}
-              r="0.009"
-              fill={wicket.label === "striker" ? "#ffca68" : "#50dcff"}
-              stroke="#080c10"
-              strokeWidth="0.003"
+      <svg
+        className="pointer-events-none absolute inset-0 h-full w-full"
+        viewBox="0 0 1 1"
+        preserveAspectRatio="none"
+        aria-label="Scene calibration overlay"
+      >
+        {pitchGeometry && (
+          <>
+            <polygon
+              points={pitchGeometry.corridor.map((point) => `${point.x},${point.y}`).join(" ")}
+              fill="rgba(226,183,72,0.16)"
+              stroke="rgba(255,225,132,0.75)"
+              strokeWidth="0.004"
             />
-          ))}
-        </svg>
-      )}
-      {renderWicket(striker, "striker")}
-      {renderWicket(nonStriker, "non_striker")}
-      {pitchGeometry && (
+            <line
+              x1={pitchGeometry.axis_start.x}
+              y1={pitchGeometry.axis_start.y}
+              x2={pitchGeometry.axis_end.x}
+              y2={pitchGeometry.axis_end.y}
+              stroke="rgba(255,255,255,0.85)"
+              strokeWidth="0.004"
+              strokeDasharray="0.012 0.008"
+            />
+          </>
+        )}
+        {[striker, nonStriker].map((wicket) => wicket && (
+          <g key={`${wicket.label}-detection`}>
+            <rect
+              x={wicket.box.x}
+              y={wicket.box.y}
+              width={wicket.box.width}
+              height={wicket.box.height}
+              fill="rgba(183,243,75,0.08)"
+              stroke="#b7f34b"
+              strokeWidth="0.004"
+              strokeDasharray="0.012 0.008"
+              rx="0.006"
+            />
+            <text
+              x={wicket.box.x + 0.008}
+              y={Math.max(0.03, wicket.box.y - 0.012)}
+              fill="#b7f34b"
+              fontSize="0.028"
+              fontWeight="700"
+            >
+              {wicket.label}
+              {wicket.confidence != null ? ` ${(wicket.confidence * 100).toFixed(0)}%` : ""}
+            </text>
+            {virtualStumpsFromBox(wicket.box).map((segment) => (
+              <line
+                key={segment.key}
+                x1={segment.x1}
+                y1={segment.y1}
+                x2={segment.x2}
+                y2={segment.y2}
+                stroke={segment.kind === "bail" ? "#ffdf7e" : "#f6cf62"}
+                strokeWidth={segment.kind === "bail" ? "0.005" : "0.006"}
+                strokeLinecap="round"
+              />
+            ))}
+          </g>
+        ))}
+      </svg>
+      {renderGuide("striker", strikerGuide)}
+      {renderGuide("non_striker", nonStrikerGuide)}
+      {(striker || nonStriker) && (
         <span className="pointer-events-none absolute bottom-3 left-3 rounded-md bg-ink/85 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.1em] text-white/80">
-          Automatic visual · approximate 2D corridor
+          Guided scene · approximate 2D corridor
         </span>
       )}
     </div>
   );
+}
+
+
+function virtualStumpsFromBox(box: NormalizedBox): Array<{
+  key: string;
+  kind: "stump" | "bail";
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}> {
+  // ponytail: mirror upload `_virtual_stumps_from_bbox` in normalized space.
+  const topY = box.y + box.height * 0.08;
+  const baseY = box.y + box.height;
+  const stumpFractions = [
+    ["left", 0.2],
+    ["middle", 0.5],
+    ["right", 0.8]
+  ] as const;
+  return [
+    ...stumpFractions.map(([name, fraction]) => {
+      const x = box.x + box.width * fraction;
+      return {
+        key: `stump-${name}`,
+        kind: "stump" as const,
+        x1: x,
+        y1: topY,
+        x2: x,
+        y2: baseY
+      };
+    }),
+    {
+      key: "bail-left",
+      kind: "bail" as const,
+      x1: box.x + box.width * 0.14,
+      y1: topY,
+      x2: box.x + box.width * 0.5,
+      y2: topY
+    },
+    {
+      key: "bail-right",
+      kind: "bail" as const,
+      x1: box.x + box.width * 0.5,
+      y1: topY,
+      x2: box.x + box.width * 0.86,
+      y2: topY
+    }
+  ];
 }
 
 

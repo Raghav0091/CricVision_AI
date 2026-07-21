@@ -1,7 +1,7 @@
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Body, File, HTTPException, UploadFile
 
 from ..schemas.video_analysis import (
     CalibrationV2ConfirmRequest,
@@ -16,6 +16,7 @@ from ..schemas.video_analysis import (
     VideoBallTrackingResultResponse,
     VideoBallTrackingStartResponse,
     VideoCalibrationConfirmationRequest,
+    VideoCalibrationDetectionRequest,
     VideoCalibrationDetectionResponse,
     WicketCameraPoseInitialiseResponse,
     WicketCameraPoseResult,
@@ -397,11 +398,18 @@ def get_analysis_camera_pose(
 def detect_analysis_calibration(
     analysis_id: str,
     refresh_early_reference: bool = False,
+    body: Annotated[
+        VideoCalibrationDetectionRequest | None, Body()
+    ] = None,
 ) -> VideoCalibrationDetectionResponse:
     try:
         return detect_video_calibration(
             analysis_id,
             refresh_early_reference=refresh_early_reference,
+            striker_guide=None if body is None else body.striker_guide,
+            non_striker_guide=(
+                None if body is None else body.non_striker_guide
+            ),
         )
     except VideoAnalysisServiceError as exc:
         logger.warning(

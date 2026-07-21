@@ -9,6 +9,7 @@ import {
   confirmVideoAnalysisCalibration,
   detectVideoAnalysisCalibration,
   type ConfirmedVideoCalibrationResponse,
+  type NormalizedBox,
   type VideoAnalysisPreparedResponse,
   type VisualCalibrationDetectionDebug,
   type VisualCalibrationQuality,
@@ -17,6 +18,7 @@ import {
 
 import {
   CalibrationCanvas,
+  DEFAULT_VIDEO_GUIDES,
   calculateApproximatePitchGeometry,
   wicketDistanceWarning,
   wicketFromBox
@@ -24,11 +26,20 @@ import {
 
 
 type CalibrationPhase =
+  | "guides"
   | "detecting"
   | "review"
   | "saving"
   | "accepted"
   | "failed";
+
+
+function guideOrDefault(
+  guide: NormalizedBox | null | undefined,
+  fallback: NormalizedBox
+): NormalizedBox {
+  return guide ?? fallback;
+}
 
 
 export function SceneCalibrationPanel({
@@ -45,7 +56,13 @@ export function SceneCalibrationPanel({
   onReferenceFrameUpdated?: (referenceFrameIndex: number, referenceFrameUrl: string) => void;
 }) {
   const [phase, setPhase] = useState<CalibrationPhase>(
-    initialCalibration ? "accepted" : "detecting"
+    initialCalibration ? "accepted" : "guides"
+  );
+  const [strikerGuide, setStrikerGuide] = useState<NormalizedBox>(
+    guideOrDefault(initialCalibration?.striker_guide, DEFAULT_VIDEO_GUIDES.striker)
+  );
+  const [nonStrikerGuide, setNonStrikerGuide] = useState<NormalizedBox>(
+    guideOrDefault(initialCalibration?.non_striker_guide, DEFAULT_VIDEO_GUIDES.non_striker)
   );
   const [striker, setStriker] = useState<WicketCalibration | null>(
     initialCalibration?.striker_wicket ?? null
@@ -55,7 +72,7 @@ export function SceneCalibrationPanel({
   );
   const [message, setMessage] = useState(
     initialCalibration?.message
-      ?? "Detecting wickets on the early reference frame…"
+      ?? "Drag the guide boxes over the striker (far) and non-striker (near) wickets, then Detect Wickets."
   );
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(
@@ -67,6 +84,7 @@ export function SceneCalibrationPanel({
   const [qualityReasons, setQualityReasons] = useState<string[]>(
     initialCalibration?.quality_reasons ?? []
   );
+  const [failedEnds, setFailedEnds] = useState<Array<"striker" | "non_striker">>([]);
   const [candidateCount, setCandidateCount] = useState(0);
   const [modelPath, setModelPath] = useState<string | null>(
     initialCalibration?.model_path_used ?? null
@@ -94,59 +112,85 @@ export function SceneCalibrationPanel({
   const displayWarning = proximityWarning ?? warning;
   const bothWicketsReady = striker !== null && nonStriker !== null;
   const canAccept = bothWicketsReady && quality !== "FAILED" && !proximityWarning;
+  // ponytail: keep guides movable until Accept so Redetect can reuse nudged ROIs.
+  const canvasMode =
+    phase === "accepted" || phase === "detecting" || phase === "saving"
+      ? "locked"
+      : "guides";
 
   useEffect(() => {
-    if (initialCalibration) {
-      setPhase("accepted");
-      setStriker(initialCalibration.striker_wicket);
-      setNonStriker(initialCalibration.non_striker_wicket);
-      setMessage(initialCalibration.message);
-      setQuality(initialCalibration.quality ?? "READY");
-      setQualityReasons(initialCalibration.quality_reasons ?? []);
-      setWarning(initialCalibration.assignment_warning ?? null);
-      setModelPath(initialCalibration.model_path_used ?? null);
-      setImageWidth(initialCalibration.image_width);
-      setImageHeight(initialCalibration.image_height);
-      setReferenceUrl(initialCalibration.reference_frame_url);
-      setReferenceFrameIndex(initialCalibration.reference_frame_index);
-      setSavedCalibration(initialCalibration);
+    if (!initialCalibration) {
+      setPhase("guides");
+      setStrikerGuide(DEFAULT_VIDEO_GUIDES.striker);
+      setNonStrikerGuide(DEFAULT_VIDEO_GUIDES.non_striker);
+      setStriker(null);
+      setNonStriker(null);
+      setMessage(
+        "Drag the guide boxes over the striker (far) and non-striker (near) wickets, then Detect Wickets."
+      );
+      setQuality(null);
+      setQualityReasons([]);
+      setWarning(null);
+      setFailedEnds([]);
+      setSavedCalibration(null);
+      setReferenceUrl(analysis.reference_frame_url);
+      setReferenceFrameIndex(analysis.reference_frame_index);
+      setImageWidth(analysis.width);
+      setImageHeight(analysis.height);
       return;
     }
-    // Auto-detect only for a fresh prepared analysis (no accepted calibration yet).
-    void runDetection(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [analysis.analysis_id]);
-
-  useEffect(() => {
-    if (!initialCalibration) return;
     setPhase("accepted");
     setStriker(initialCalibration.striker_wicket);
     setNonStriker(initialCalibration.non_striker_wicket);
+    setStrikerGuide(
+      guideOrDefault(initialCalibration.striker_guide, DEFAULT_VIDEO_GUIDES.striker)
+    );
+    setNonStrikerGuide(
+      guideOrDefault(initialCalibration.non_striker_guide, DEFAULT_VIDEO_GUIDES.non_striker)
+    );
     setMessage(initialCalibration.message);
     setQuality(initialCalibration.quality ?? "READY");
     setQualityReasons(initialCalibration.quality_reasons ?? []);
     setWarning(initialCalibration.assignment_warning ?? null);
+    setFailedEnds([]);
     setModelPath(initialCalibration.model_path_used ?? null);
     setImageWidth(initialCalibration.image_width);
     setImageHeight(initialCalibration.image_height);
     setReferenceUrl(initialCalibration.reference_frame_url);
     setReferenceFrameIndex(initialCalibration.reference_frame_index);
     setSavedCalibration(initialCalibration);
-  }, [initialCalibration]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [analysis.analysis_id, initialCalibration]);
 
-  async function runDetection(refreshEarlyReference: boolean) {
+  function handleGuideChange(label: "striker" | "non_striker", box: NormalizedBox) {
+    if (label === "striker") setStrikerGuide(box);
+    else setNonStrikerGuide(box);
+    if (phase === "accepted") {
+      setSavedCalibration(null);
+      onDirty();
+    }
+  }
+
+  async function runDetection() {
     setPhase("detecting");
     setError(null);
     setWarning(null);
+    setFailedEnds([]);
     setSavedCalibration(null);
     onDirty();
     try {
       const result = await detectVideoAnalysisCalibration(
         analysis.analysis_id,
-        { refreshEarlyReference }
+        {
+          strikerGuide,
+          nonStrikerGuide,
+          refreshEarlyReference: false
+        }
       );
       const nextStriker = result.provisional_striker_wicket ?? null;
       const nextNonStriker = result.provisional_non_striker_wicket ?? null;
+      if (result.striker_guide) setStrikerGuide(result.striker_guide);
+      if (result.non_striker_guide) setNonStrikerGuide(result.non_striker_guide);
       setStriker(nextStriker);
       setNonStriker(nextNonStriker);
       setCandidateCount(result.candidates.length);
@@ -165,6 +209,7 @@ export function SceneCalibrationPanel({
       setWarning(result.assignment_warning ?? result.warning ?? null);
       setQuality(result.quality ?? "FAILED");
       setQualityReasons(result.quality_reasons ?? []);
+      setFailedEnds(result.failed_ends ?? []);
       setDetectionDebug(result.detection_debug ?? null);
       setPhase(
         nextStriker && nextNonStriker && result.quality !== "FAILED"
@@ -194,6 +239,8 @@ export function SceneCalibrationPanel({
       striker.box,
       striker.detection_pass
     ));
+    setStrikerGuide(nonStrikerGuide);
+    setNonStrikerGuide(strikerGuide);
     setSavedCalibration(null);
     onDirty();
     setPhase("review");
@@ -234,11 +281,19 @@ export function SceneCalibrationPanel({
             box: nonStriker.box,
             detection_pass: nonStriker.detection_pass ?? null
           },
-          corridor_width_multiplier: 1
+          corridor_width_multiplier: 1,
+          striker_guide: strikerGuide,
+          non_striker_guide: nonStrikerGuide
         }
       );
       setStriker(confirmed.striker_wicket);
       setNonStriker(confirmed.non_striker_wicket);
+      setStrikerGuide(
+        guideOrDefault(confirmed.striker_guide, strikerGuide)
+      );
+      setNonStrikerGuide(
+        guideOrDefault(confirmed.non_striker_guide, nonStrikerGuide)
+      );
       setMessage(confirmed.message);
       setQuality(confirmed.quality ?? "READY");
       setQualityReasons(confirmed.quality_reasons ?? []);
@@ -262,6 +317,10 @@ export function SceneCalibrationPanel({
       ? "warn"
       : "warn";
 
+  const failedEndsLabel = failedEnds.length === 0
+    ? null
+    : failedEnds.map((end) => (end === "striker" ? "striker" : "non-striker")).join(" and ");
+
   return (
     <Card className="border-[#ffca68]/25">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -272,13 +331,17 @@ export function SceneCalibrationPanel({
                 ? "Calibration Accepted"
                 : phase === "detecting"
                   ? "Detecting Wickets"
-                  : "Calibration Detected"
+                  : phase === "guides"
+                    ? "Place Guides"
+                    : phase === "failed"
+                      ? "Detection Incomplete"
+                      : "Review Detection"
             }
             tone={phase === "accepted" ? "good" : "neutral"}
           />
-          <h2 className="mt-4 text-2xl font-black">Automatic Visual Calibration</h2>
+          <h2 className="mt-4 text-2xl font-black">Guided Scene Calibration</h2>
           <p className="mt-3 max-w-3xl text-sm leading-6 text-white/55">
-            Approximate 2D scene calibration from an early reference frame.
+            Fixed-camera visual scene calibration — overlay locked for the whole video.
             Soft pitch context only — not precise metric 3D / DRS / Hawk-Eye.
           </p>
         </div>
@@ -294,17 +357,29 @@ export function SceneCalibrationPanel({
       )}
       <div className="mt-5 rounded-xl border border-white/10 bg-black/20 p-4">
         <p className="text-sm leading-6 text-white/65">{message}</p>
+        {phase === "guides" && (
+          <p className="mt-2 text-xs leading-5 text-white/40">
+            Guide boxes are search regions. Soft pitch corridor is estimated after detection.
+          </p>
+        )}
         <div className="mt-3 flex flex-wrap gap-3 text-sm font-semibold">
           <span className={striker ? "text-lime" : "text-white/35"}>
-            Striker {striker ? "✅" : phase === "detecting" ? "…" : "—"}
+            Striker {striker ? "✅" : phase === "detecting" ? "…" : failedEnds.includes("striker") ? "✗" : "—"}
           </span>
           <span className={nonStriker ? "text-lime" : "text-white/35"}>
-            Non-Striker {nonStriker ? "✅" : phase === "detecting" ? "…" : "—"}
+            Non-Striker {nonStriker ? "✅" : phase === "detecting" ? "…" : failedEnds.includes("non_striker") ? "✗" : "—"}
           </span>
         </div>
+        {failedEndsLabel && (
+          <p className="mt-2 text-xs font-semibold text-[#ffaaa6]">
+            Failed end{failedEnds.length > 1 ? "s" : ""}: {failedEndsLabel}. Adjust guides and Redetect.
+          </p>
+        )}
         <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs text-white/35">
           <span>Reference frame {referenceFrameIndex}</span>
-          <span>{candidateCount} detector candidate{candidateCount === 1 ? "" : "s"}</span>
+          {(phase !== "guides" || candidateCount > 0) && (
+            <span>{candidateCount} detector candidate{candidateCount === 1 ? "" : "s"}</span>
+          )}
           {modelPath && <span>Model: {modelPath}</span>}
         </div>
         {qualityReasons.length > 0 && (
@@ -360,47 +435,62 @@ export function SceneCalibrationPanel({
           imageHeight={imageHeight}
           striker={striker}
           nonStriker={nonStriker}
+          strikerGuide={strikerGuide}
+          nonStrikerGuide={nonStrikerGuide}
           pitchGeometry={pitchGeometry}
-          readOnly
-          disabled={phase === "detecting" || phase === "saving"}
+          interactionMode={canvasMode}
+          onGuideChange={handleGuideChange}
         />
       </div>
 
       <div className="mt-6 grid gap-3 sm:grid-cols-3">
-        <Button
-          disabled={!canAccept || phase === "detecting" || phase === "saving"}
-          onClick={() => void acceptCalibration()}
-        >
-          {phase === "saving"
-            ? "Accepting…"
-            : phase === "accepted"
-              ? "Accepted"
-              : "Accept"}
-        </Button>
-        <Button
-          variant="secondary"
-          disabled={phase === "detecting" || phase === "saving"}
-          onClick={() => void runDetection(true)}
-        >
-          {phase === "detecting" ? "Detecting…" : "Redetect"}
-        </Button>
-        <Button
-          variant="secondary"
-          disabled={!bothWicketsReady || phase === "detecting" || phase === "saving"}
-          onClick={swapWicketEnds}
-        >
-          Swap Wicket Ends
-        </Button>
+        {phase === "guides" || phase === "detecting" ? (
+          <Button
+            className="sm:col-span-2"
+            disabled={phase === "detecting"}
+            onClick={() => void runDetection()}
+          >
+            {phase === "detecting" ? "Detecting…" : "Detect Wickets"}
+          </Button>
+        ) : (
+          <Button
+            disabled={!canAccept || phase === "saving"}
+            onClick={() => void acceptCalibration()}
+          >
+            {phase === "saving"
+              ? "Accepting…"
+              : phase === "accepted"
+                ? "Accepted"
+                : "Accept"}
+          </Button>
+        )}
+        {(phase === "review" || phase === "failed" || phase === "accepted" || phase === "saving") && (
+          <Button
+            variant="secondary"
+            disabled={phase === "detecting" || phase === "saving"}
+            onClick={() => void runDetection()}
+          >
+            Redetect
+          </Button>
+        )}
+        {(phase === "review" || phase === "failed" || phase === "accepted" || phase === "saving") && (
+          <Button
+            variant="secondary"
+            disabled={!bothWicketsReady || phase === "detecting" || phase === "saving"}
+            onClick={swapWicketEnds}
+          >
+            Swap Wicket Ends
+          </Button>
+        )}
       </div>
 
-      {savedCalibration && (
+      {savedCalibration && phase === "accepted" && (
         <div className="mt-7 rounded-xl border border-lime/20 bg-lime/[0.04] p-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <p className="font-black text-lime">Automatic visual calibration accepted</p>
+              <p className="font-black text-lime">Guided scene calibration accepted</p>
               <p className="mt-1 text-xs text-white/40">
-                Approximate wicket base references use bbox bottom-centres.
-                Soft scene context for later tracking — not a hard ball-rejection boundary.
+                Fixed-camera visual scene calibration — overlay locked for the whole video.
               </p>
             </div>
             <a
@@ -416,8 +506,22 @@ export function SceneCalibrationPanel({
           <img
             className="mt-4 h-auto w-full rounded-lg bg-black object-contain"
             src={`${savedCalibration.calibration_overlay_url}?v=${encodeURIComponent(savedCalibration.updated_at)}`}
-            alt="Accepted automatic visual calibration overlay"
+            alt="Accepted guided scene calibration overlay"
           />
+          {savedCalibration.scene_overlay_status === "ready" && savedCalibration.scene_overlay_url && (
+            <video
+              className="mt-4 h-auto w-full rounded-lg bg-black object-contain"
+              src={`${savedCalibration.scene_overlay_url}?v=${encodeURIComponent(savedCalibration.updated_at)}`}
+              controls
+              playsInline
+              muted
+            />
+          )}
+          {savedCalibration.scene_overlay_status === "failed" && (
+            <p className="mt-3 text-xs text-white/40">
+              Scene overlay video could not be generated; still overlay is shown above.
+            </p>
+          )}
         </div>
       )}
     </Card>

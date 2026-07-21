@@ -308,7 +308,7 @@ export type NormalizedBox = {
 };
 
 
-export type WicketDetectionPass = "full_frame" | "far_roi" | "near_roi";
+export type WicketDetectionPass = "full_frame" | "far_roi" | "near_roi" | "guide_roi";
 
 
 export type WicketCandidate = {
@@ -376,6 +376,9 @@ export type VideoCalibrationDetectionResponse = {
   provisional_striker_wicket?: WicketCalibration | null;
   provisional_non_striker_wicket?: WicketCalibration | null;
   pitch_geometry?: PitchGeometry | null;
+  striker_guide?: NormalizedBox | null;
+  non_striker_guide?: NormalizedBox | null;
+  failed_ends?: Array<"striker" | "non_striker">;
   model_path_used: string;
   mode?: "automatic_visual";
   quality?: VisualCalibrationQuality;
@@ -399,6 +402,8 @@ export type VideoCalibrationConfirmationRequest = {
   >;
   corridor_width_multiplier: number;
   user_note?: string | null;
+  striker_guide?: NormalizedBox | null;
+  non_striker_guide?: NormalizedBox | null;
 };
 
 
@@ -412,6 +417,8 @@ export type ConfirmedVideoCalibrationResponse = {
   reference_frame_url: string;
   calibration_url: string;
   calibration_overlay_url: string;
+  scene_overlay_url?: string | null;
+  scene_overlay_status?: "ready" | "failed" | "skipped" | null;
   image_width: number;
   image_height: number;
   model_path_used?: string | null;
@@ -422,6 +429,8 @@ export type ConfirmedVideoCalibrationResponse = {
   striker_wicket: WicketCalibration;
   non_striker_wicket: WicketCalibration;
   pitch_geometry: PitchGeometry;
+  striker_guide?: NormalizedBox | null;
+  non_striker_guide?: NormalizedBox | null;
   user_note?: string | null;
   message: string;
 };
@@ -823,7 +832,8 @@ function withBrowserSafeCalibrationUrls(
     ...result,
     reference_frame_url: resolveApiUrl(result.reference_frame_url) ?? result.reference_frame_url,
     calibration_url: resolveApiUrl(result.calibration_url) ?? result.calibration_url,
-    calibration_overlay_url: resolveApiUrl(result.calibration_overlay_url) ?? result.calibration_overlay_url
+    calibration_overlay_url: resolveApiUrl(result.calibration_overlay_url) ?? result.calibration_overlay_url,
+    scene_overlay_url: resolveApiUrl(result.scene_overlay_url) ?? result.scene_overlay_url
   };
 }
 
@@ -882,14 +892,26 @@ function withBrowserSafeCameraPoseUrls(
 
 export async function detectVideoAnalysisCalibration(
   analysisId: string,
-  options?: { refreshEarlyReference?: boolean }
+  options?: {
+    refreshEarlyReference?: boolean;
+    strikerGuide?: NormalizedBox;
+    nonStrikerGuide?: NormalizedBox;
+  }
 ): Promise<VideoCalibrationDetectionResponse> {
   const params = options?.refreshEarlyReference
     ? "?refresh_early_reference=true"
     : "";
+  const body = {
+    striker_guide: options?.strikerGuide ?? null,
+    non_striker_guide: options?.nonStrikerGuide ?? null
+  };
   const response = await fetch(
     `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/calibration/detect${params}`,
-    { method: "POST" }
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }
   );
   if (!response.ok) {
     throw await videoAnalysisError(response, `Stump detection returned ${response.status}.`);

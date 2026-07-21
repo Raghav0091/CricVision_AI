@@ -30,7 +30,7 @@ class NormalizedBox(StrictGeometryModel):
         return self
 
 
-WicketDetectionPass = Literal["full_frame", "far_roi", "near_roi"]
+WicketDetectionPass = Literal["full_frame", "far_roi", "near_roi", "guide_roi"]
 
 
 class WicketCandidate(StrictGeometryModel):
@@ -184,6 +184,13 @@ class VisualCalibrationDetectionDebug(BaseModel):
     debug_json_url: str | None = None
 
 
+class VideoCalibrationDetectionRequest(BaseModel):
+    """Optional guided search regions for two-wicket detection."""
+
+    striker_guide: NormalizedBox | None = None
+    non_striker_guide: NormalizedBox | None = None
+
+
 class VideoCalibrationDetectionResponse(BaseModel):
     success: bool
     status: Literal[
@@ -202,6 +209,11 @@ class VideoCalibrationDetectionResponse(BaseModel):
     provisional_striker_wicket: WicketCalibration | None = None
     provisional_non_striker_wicket: WicketCalibration | None = None
     pitch_geometry: PitchGeometry | None = None
+    striker_guide: NormalizedBox | None = None
+    non_striker_guide: NormalizedBox | None = None
+    failed_ends: list[Literal["striker", "non_striker"]] = Field(
+        default_factory=list
+    )
     model_path_used: str
     mode: VisualCalibrationMode = "automatic_visual"
     quality: VisualCalibrationQuality = "FAILED"
@@ -218,6 +230,9 @@ class VideoCalibrationConfirmationRequest(BaseModel):
     non_striker_wicket: WicketCalibrationInput
     corridor_width_multiplier: float = Field(default=1.0, ge=0.7, le=1.5)
     user_note: str | None = Field(default=None, max_length=1000)
+    # ponytail: optional for older clients; guided UI always sends both.
+    striker_guide: NormalizedBox | None = None
+    non_striker_guide: NormalizedBox | None = None
 
 
 class ConfirmedVideoCalibrationResponse(BaseModel):
@@ -230,6 +245,8 @@ class ConfirmedVideoCalibrationResponse(BaseModel):
     reference_frame_url: str
     calibration_url: str
     calibration_overlay_url: str
+    scene_overlay_url: str | None = None
+    scene_overlay_status: Literal["ready", "failed", "skipped"] | None = None
     image_width: int
     image_height: int
     model_path_used: str | None = None
@@ -240,6 +257,8 @@ class ConfirmedVideoCalibrationResponse(BaseModel):
     striker_wicket: WicketCalibration
     non_striker_wicket: WicketCalibration
     pitch_geometry: PitchGeometry
+    striker_guide: NormalizedBox | None = None
+    non_striker_guide: NormalizedBox | None = None
     user_note: str | None = None
     message: str
 
