@@ -404,9 +404,7 @@ export default function VideoAnalysisPage() {
       label: "Replay",
       state: replayReady
         ? "complete"
-        : ballTrackingActive && ballTrackingResult
-          ? "current"
-          : "future"
+        : "future"
     }
   ];
 
@@ -658,6 +656,7 @@ export default function VideoAnalysisPage() {
                 detectionResult={ballDetectionResult}
                 initialResult={ballTrackingResult}
                 initialJobId={analysis.tracking_job_id}
+                onResult={setBallTrackingResult}
               />
               <Button variant="secondary" onClick={() => setActiveStage("ball_detection")}>
                 Back to Ball Detection

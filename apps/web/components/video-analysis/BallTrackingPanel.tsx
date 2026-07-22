@@ -248,12 +248,14 @@ export function BallTrackingPanel({
   analysis,
   detectionResult,
   initialResult,
-  initialJobId
+  initialJobId,
+  onResult
 }: {
   analysis: VideoAnalysisPreparedResponse;
   detectionResult: VideoBallDetectionResultResponse;
   initialResult: VideoBallTrackingResultResponse | null;
   initialJobId?: string | null;
+  onResult?: (result: VideoBallTrackingResultResponse | null) => void;
 }) {
   const pollGeneration = useRef(0);
   const [job, setJob] = useState<JobView | null>(null);
@@ -269,6 +271,7 @@ export function BallTrackingPanel({
     const completed = await getVideoBallTrackingResult(analysis.analysis_id);
     if (!completed) return false;
     setResult(completed);
+    onResult?.(completed);
     setJob(null);
     setError(completed.status === "no_reliable_track" ? completed.message : null);
     return true;
@@ -322,6 +325,7 @@ export function BallTrackingPanel({
     try {
       const started = await startVideoBallTracking(analysis.analysis_id);
       setResult(null);
+      onResult?.(null);
       setJob({
         jobId: started.job_id,
         status: started.status,

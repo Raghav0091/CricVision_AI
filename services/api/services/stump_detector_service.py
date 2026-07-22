@@ -196,7 +196,7 @@ def detect_wickets_guided(
     image: Image.Image,
     guides: dict[str, dict[str, float]],
 ) -> dict[str, Any]:
-    """Detect wickets inside user guide boxes; robust full/ROI fallback if needed.
+    """Detect wickets inside user guide boxes with robust role corroboration.
 
     Role follows guide labels (striker guide → striker). Does not fabricate boxes.
     Reuses `_detect_end` (same crop path as Upload Image) and `detect_wickets_robust`.
@@ -298,14 +298,29 @@ def detect_wickets_guided(
         )
         diagnostics["rejected"].extend(rejected)
 
+    # ponytail: guides define search regions; the existing robust far/near
+    # assignment decides semantic roles when its candidate is inside that guide.
+    # This avoids a higher-confidence net/post crop replacing the known near wicket.
+    robust = detect_wickets_robust(image, enable_roi=True)
+    robust_diagnostics = robust.get("diagnostics") or {}
+    diagnostics["passes"].extend(robust_diagnostics.get("passes") or [])
+    diagnostics["rejected"].extend(robust_diagnostics.get("rejected") or [])
+    for item in robust.get("candidates") or []:
+        candidates = _merge_candidates(candidates, [item])
+
+    robust_selected = robust.get("selected") or {}
+    for end in ("striker", "non_striker"):
+        role_candidate = robust_selected.get(end)
+        if role_candidate is not None and _bbox_center_in_guide(
+            role_candidate["bbox"],
+            guides[end],
+            frame_width,
+            frame_height,
+        ):
+            selected[end] = role_candidate
+
     missing = [end for end, item in selected.items() if item is None]
     if missing:
-        robust = detect_wickets_robust(image, enable_roi=True)
-        robust_diagnostics = robust.get("diagnostics") or {}
-        diagnostics["passes"].extend(robust_diagnostics.get("passes") or [])
-        diagnostics["rejected"].extend(robust_diagnostics.get("rejected") or [])
-        for item in robust.get("candidates") or []:
-            candidates = _merge_candidates(candidates, [item])
 
         used_boxes = [
             item["bbox"] for item in selected.values() if item is not None
@@ -321,7 +336,7 @@ def detect_wickets_guided(
             )
             if best is None:
                 # Last resort: robust role assignment for this end only.
-                fallback = (robust.get("selected") or {}).get(end)
+                fallback = robust_selected.get(end)
                 if fallback is not None and _bbox_center_in_guide(
                     fallback["bbox"], guide, frame_width, frame_height
                 ):
