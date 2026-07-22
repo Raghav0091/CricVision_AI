@@ -458,6 +458,14 @@ export default function VideoAnalysisPage() {
         <WorkflowStepper steps={workflowSteps} onSelect={selectWorkflowStage} />
       </div>
 
+      <input
+        id="analysis-video"
+        className="sr-only"
+        type="file"
+        accept={ACCEPT_VALUE}
+        onChange={handleFileSelection}
+      />
+
       {!uploadComplete && (
         <Card className="mt-4 p-4 sm:p-5">
           <div className="flex flex-wrap items-start justify-between gap-3">
@@ -484,14 +492,6 @@ export default function VideoAnalysisPage() {
               </span>
             </label>
           )}
-          <input
-            id="analysis-video"
-            className="sr-only"
-            type="file"
-            accept={ACCEPT_VALUE}
-            onChange={handleFileSelection}
-          />
-
           {selectedFile && (
             <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(14rem,17rem)]">
               <div className="flex max-h-[min(42dvh,calc(100dvh-16rem))] min-h-[8rem] items-center justify-center overflow-hidden rounded-xl bg-[#050a08] sm:max-h-[min(52dvh,calc(100dvh-14rem))]">
