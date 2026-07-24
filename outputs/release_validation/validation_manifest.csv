@@ -1,0 +1,15 @@
+validation_id,analysis_id,video_path,fps,frame_count,width,height,camera_notes,bowler_handedness,quality_notes
+rv1_001,analysis_20260718_005833_bbaf9d,C:\CricVision_AI\outputs\video_analysis\analysis_20260718_005833_bbaf9d\raw\original_video.mp4,25.0,49,1280,720,"landscape, 1280x720, 25.0 fps",unknown,low_fps
+rv1_002,analysis_20260718_065149_af258b,C:\CricVision_AI\outputs\video_analysis\analysis_20260718_065149_af258b\raw\original_video.mp4,60.0,197,478,850,"portrait, 478x850, 60.0 fps",unknown,"small_frame_dimension, existing_release_baseline"
+rv1_003,analysis_20260718_085114_739b2f,C:\CricVision_AI\outputs\video_analysis\analysis_20260718_085114_739b2f\raw\original_video.mp4,59.947,197,478,850,"portrait, 478x850, 59.947 fps",unknown,small_frame_dimension
+rv1_004,analysis_20260718_235819_20a95d,C:\CricVision_AI\outputs\video_analysis\analysis_20260718_235819_20a95d\raw\original_video.mp4,60.0,197,478,850,"portrait, 478x850, 60.0 fps",unknown,small_frame_dimension
+rv1_005,analysis_20260719_132629_7400e0,C:\CricVision_AI\outputs\video_analysis\analysis_20260719_132629_7400e0\raw\original_video.mp4,60.0,197,720,1280,"portrait, 720x1280, 60.0 fps",unknown,unreviewed
+rv1_006,analysis_20260720_131209_2c5403,C:\CricVision_AI\outputs\video_analysis\analysis_20260720_131209_2c5403\raw\original_video.mp4,60.0,197,478,850,"portrait, 478x850, 60.0 fps",unknown,small_frame_dimension
+rv1_007,analysis_20260721_011137_44c35d,C:\CricVision_AI\outputs\video_analysis\analysis_20260721_011137_44c35d\raw\original_video.mp4,60.0,197,720,1280,"portrait, 720x1280, 60.0 fps",unknown,unreviewed
+rv1_008,analysis_20260722_012308_ddaddf,C:\CricVision_AI\outputs\video_analysis\analysis_20260722_012308_ddaddf\raw\original_video.mp4,60.0,197,720,1280,"portrait, 720x1280, 60.0 fps",unknown,unreviewed
+rv1_009,analysis_20260722_014742_6864b7,C:\CricVision_AI\outputs\video_analysis\analysis_20260722_014742_6864b7\raw\original_video.mp4,60.0,197,720,1280,"portrait, 720x1280, 60.0 fps",unknown,unreviewed
+rv1_010,analysis_20260722_015351_6e9a66,C:\CricVision_AI\outputs\video_analysis\analysis_20260722_015351_6e9a66\raw\original_video.mp4,60.0,197,720,1280,"portrait, 720x1280, 60.0 fps",unknown,unreviewed
+rv1_011,analysis_20260722_021751_ac6eb9,C:\CricVision_AI\outputs\video_analysis\analysis_20260722_021751_ac6eb9\raw\original_video.mp4,60.0,196,720,1280,"portrait, 720x1280, 60.0 fps",unknown,unreviewed
+rv1_012,analysis_20260722_135522_7f6d13,C:\CricVision_AI\outputs\video_analysis\analysis_20260722_135522_7f6d13\raw\original_video.mp4,60.0,197,720,1280,"portrait, 720x1280, 60.0 fps",unknown,unreviewed
+rv1_013,analysis_20260722_135910_b7f8ef,C:\CricVision_AI\outputs\video_analysis\analysis_20260722_135910_b7f8ef\raw\original_video.mp4,60.0,196,720,1280,"portrait, 720x1280, 60.0 fps",unknown,unreviewed
+rv1_014,analysis_20260723_001041_22593e,C:\CricVision_AI\outputs\video_analysis\analysis_20260723_001041_22593e\raw\original_video.mp4,60.0,197,720,1280,"portrait, 720x1280, 60.0 fps",unknown,unreviewed

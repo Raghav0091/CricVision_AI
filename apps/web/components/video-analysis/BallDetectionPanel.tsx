@@ -9,6 +9,7 @@ import {
   getVideoBallDetectionJob,
   getVideoBallDetectionResult,
   startVideoBallDetection,
+  type BallDetectorModelKey,
   type VideoAnalysisPreparedResponse,
   type VideoBallDetectionJobStatus,
   type VideoBallDetectionResultResponse
@@ -34,6 +35,29 @@ const ACTIVE_JOB_STATUSES = new Set<VideoBallDetectionJobStatus>([
   "writing_video",
   "saving_results"
 ]);
+
+
+const BALL_DETECTOR_OPTIONS: Array<{
+  key: BallDetectorModelKey;
+  name: string;
+  description: string;
+}> = [
+  {
+    key: "e4c_best_overall",
+    name: "E4C — Best Overall",
+    description: "Best current overall clean and robustness performance."
+  },
+  {
+    key: "e3_motion_blur",
+    name: "E3 — Motion Blur Robustness",
+    description: "Reference model trained specifically for motion-blur robustness."
+  },
+  {
+    key: "e2_baseline",
+    name: "E2 — Original 1280 Baseline",
+    description: "Original 1280 baseline used for comparison."
+  }
+];
 
 
 function statusLabel(status: VideoBallDetectionJobStatus): string {
@@ -110,6 +134,12 @@ function DetectionResult({
   result: VideoBallDetectionResultResponse;
 }) {
   const summary = result.summary;
+  const detectorName = summary.detector?.name
+    ?? summary.ball_detector_model_name
+    ?? summary.model_path_used;
+  const detectorFile = summary.detector?.model_file
+    ?? summary.model_path_used.split("/").at(-1)
+    ?? summary.model_path_used;
   const stats = [
     ["Total frames", summary.total_frames.toLocaleString()],
     ["Frames processed", summary.frames_processed.toLocaleString()],
@@ -179,7 +209,7 @@ function DetectionResult({
             ))}
           </div>
           <div className="grid gap-3 rounded-lg border border-white/10 bg-black/20 p-3 sm:grid-cols-2 xl:grid-cols-4">
-            <div><span className="block text-[10px] text-white/35">Model</span><strong className="mt-0.5 block break-all text-xs">{summary.model_path_used}</strong></div>
+            <div><span className="block text-[10px] text-white/35">Detector</span><strong className="mt-0.5 block text-xs">{detectorName}</strong><span className="mt-0.5 block break-all text-[10px] text-white/35">{detectorFile}</span></div>
             <div><span className="block text-[10px] text-white/35">Device</span><strong className="mt-0.5 block text-xs">{summary.device_used}</strong></div>
             <div><span className="block text-[10px] text-white/35">Settings</span><strong className="mt-0.5 block text-xs">{summary.imgsz}px · conf {summary.confidence_threshold} · stride {summary.frame_stride}</strong></div>
             <div><span className="block text-[10px] text-white/35">Duration</span><strong className="mt-0.5 block text-xs">{summary.processing_duration_seconds.toFixed(2)}s</strong></div>
@@ -213,6 +243,12 @@ export function BallDetectionPanel({
   const [result, setResult] = useState(initialResult);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  const [selectedModelKey, setSelectedModelKey] = useState<BallDetectorModelKey>(
+    initialResult?.summary.ball_detector_model_key
+      ?? initialResult?.summary.detector?.key
+      ?? analysis.ball_detector_model_key
+      ?? "e4c_best_overall"
+  );
 
   function stopPolling() {
     pollGeneration.current += 1;
@@ -222,6 +258,11 @@ export function BallDetectionPanel({
     const completed = await getVideoBallDetectionResult(analysis.analysis_id);
     if (!completed) return false;
     setResult(completed);
+    setSelectedModelKey(
+      completed.summary.ball_detector_model_key
+        ?? completed.summary.detector?.key
+        ?? selectedModelKey
+    );
     onResult?.(completed);
     setJob(null);
     setError(null);
@@ -276,7 +317,10 @@ export function BallDetectionPanel({
     setStarting(true);
     setError(null);
     try {
-      const started = await startVideoBallDetection(analysis.analysis_id);
+      const started = await startVideoBallDetection(
+        analysis.analysis_id,
+        selectedModelKey
+      );
       setResult(null);
       onResult?.(null);
       setJob({
@@ -326,6 +370,29 @@ export function BallDetectionPanel({
         <Button disabled={isActive} onClick={() => void runDetection()}>
           {starting ? "Starting…" : isActive ? "Detection running…" : result ? "Run Again" : "Run Detection"}
         </Button>
+      </div>
+
+      <div className="mt-4 max-w-xl rounded-xl border border-white/10 bg-black/20 p-3">
+        <label className="block text-xs font-black uppercase tracking-[0.12em] text-white/65" htmlFor={`ball-detector-${analysis.analysis_id}`}>
+          Ball Detection Model
+        </label>
+        <select
+          id={`ball-detector-${analysis.analysis_id}`}
+          className="mt-2 w-full rounded-lg border border-white/15 bg-[#07100d] px-3 py-2 text-sm font-bold text-white outline-none focus:border-lime/60 disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={isActive}
+          value={selectedModelKey}
+          onChange={(event) => setSelectedModelKey(event.target.value as BallDetectorModelKey)}
+        >
+          {BALL_DETECTOR_OPTIONS.map((option) => (
+            <option key={option.key} value={option.key}>{option.name}</option>
+          ))}
+        </select>
+        <p className="mt-2 text-xs text-white/40">
+          Choose which trained CricVision detector to use for this analysis.
+        </p>
+        <p className="mt-1 text-xs text-white/55">
+          {BALL_DETECTOR_OPTIONS.find((option) => option.key === selectedModelKey)?.description}
+        </p>
       </div>
 
       {job && (

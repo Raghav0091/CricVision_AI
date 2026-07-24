@@ -8,6 +8,12 @@ const API_BASE_URL = (
 ).replace(/\/$/, "");
 
 
+export type BallDetectorModelKey =
+  | "e2_baseline"
+  | "e3_motion_blur"
+  | "e4c_best_overall";
+
+
 export type BallDetectionClipResponse = {
   success: boolean;
   status: "processing" | "ready" | "failed" | "ball_detector_missing" | "invalid_upload" | "upload_too_large" | "video_processing_failed" | "model_inference_failed" | "video_writer_failed";
@@ -226,6 +232,8 @@ export type VideoAnalysisPreparedResponse = {
   ball_detection_job_id?: string | null;
   ball_detection_started_at?: string | null;
   ball_detection_completed_at?: string | null;
+  ball_detector_model_key?: BallDetectorModelKey;
+  ball_detector_model_name?: string;
   detection_summary_url?: string | null;
   detection_overlay_url?: string | null;
   tracking_status?: "tracking_queued" | "tracking_ball" | "tracking_complete" | "tracking_failed" | "tracking_no_reliable_track" | null;
@@ -1113,6 +1121,8 @@ export type VideoBallDetectionStartResponse = {
   progress: number;
   current_frame: number;
   total_frames: number;
+  ball_detector_model_key: BallDetectorModelKey;
+  ball_detector_model_name: string;
   message: string;
 };
 
@@ -1128,6 +1138,8 @@ export type VideoBallDetectionJobResponse = {
   created_at: string;
   updated_at: string;
   model_path_used?: string | null;
+  ball_detector_model_key: BallDetectorModelKey;
+  ball_detector_model_name: string;
   error_message?: string | null;
   result?: VideoBallDetectionResultLinks | null;
   message: string;
@@ -1144,6 +1156,13 @@ export type VideoBallDetectionSummary = {
   detections_json_url: string;
   detections_csv_url: string;
   detection_summary_url: string;
+  detector?: {
+    key: BallDetectorModelKey;
+    name: string;
+    model_file: string;
+  } | null;
+  ball_detector_model_key?: BallDetectorModelKey | null;
+  ball_detector_model_name?: string | null;
   model_path_used: string;
   model_warning?: string | null;
   model_class_names: string[];
@@ -1178,6 +1197,8 @@ export type VideoBallDetectionResultResponse = {
   success: true;
   status: "ready";
   analysis_id: string;
+  ball_detector_model_key?: BallDetectorModelKey | null;
+  ball_detector_model_name?: string | null;
   summary: VideoBallDetectionSummary;
   frame_candidate_counts: number[];
   message: string;
@@ -1215,11 +1236,16 @@ function withBrowserSafeVideoBallDetectionResult(
 
 
 export async function startVideoBallDetection(
-  analysisId: string
+  analysisId: string,
+  ballDetectorModelKey: BallDetectorModelKey = "e4c_best_overall"
 ): Promise<VideoBallDetectionStartResponse> {
   const response = await fetch(
     `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/ball-detection/start`,
-    { method: "POST" }
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ball_detector_model_key: ballDetectorModelKey })
+    }
   );
   if (!response.ok) {
     throw await videoAnalysisError(response, `Ball detection start returned ${response.status}.`);
@@ -1481,5 +1507,185 @@ export async function getVideoBallTrackingResult(
   }
   return withBrowserSafeTrackingResult(
     await response.json() as VideoBallTrackingResultResponse
+  );
+}
+
+
+export type ReleasePoint = {
+  x: number;
+  y: number;
+};
+
+
+export type ReleaseFrameUncertainty = {
+  start: number;
+  end: number;
+};
+
+
+export type ReleaseEvidenceMode =
+  | "observed_pose_ball_separation"
+  | "trajectory_pose_inferred"
+  | "fallback_trajectory_only"
+  | "unresolved";
+
+
+export type ReleaseType =
+  | "OBSERVED_RELEASE"
+  | "INFERRED_RELEASE"
+  | "UNRESOLVED";
+
+
+export type ReleaseResultStatus = "ready" | "unresolved";
+
+
+export type ReleaseResult = {
+  schema_version: "1.0";
+  analysis_id: string;
+  status: ReleaseResultStatus;
+  release_frame?: number | null;
+  release_time_seconds?: number | null;
+  release_point_px?: ReleasePoint | null;
+  confidence: number;
+  frame_uncertainty?: ReleaseFrameUncertainty | null;
+  method: string;
+  evidence_mode: ReleaseEvidenceMode;
+  release_type: ReleaseType;
+  evidence: Record<string, unknown>;
+  quality_flags: string[];
+  provenance: Record<string, unknown>;
+};
+
+
+export type ReleaseResultDocument = {
+  schema_version: "1.0";
+  analysis_id: string;
+  created_at: string;
+  completed_at?: string | null;
+  result: ReleaseResult;
+  candidate_scores: Array<Record<string, unknown>>;
+  quality_summary: Record<string, unknown>;
+  message: string;
+};
+
+
+export type ReleaseJobStatus =
+  | "queued"
+  | "loading_inputs"
+  | "generating_candidates"
+  | "scoring_candidates"
+  | "saving_results"
+  | "ready"
+  | "unresolved"
+  | "failed";
+
+
+export type ReleaseResultLinks = {
+  release_json_url: string;
+};
+
+
+export type ReleaseStartResponse = {
+  success: true;
+  status: "queued";
+  analysis_id: string;
+  job_id: string;
+  progress: number;
+  message: string;
+};
+
+
+export type ReleaseJobResponse = {
+  success: boolean;
+  status: ReleaseJobStatus;
+  analysis_id: string;
+  job_id: string;
+  progress: number;
+  created_at: string;
+  updated_at: string;
+  error_message?: string | null;
+  result?: ReleaseResultLinks | null;
+  message: string;
+};
+
+
+export type ReleaseResultResponse = {
+  success: boolean;
+  status: ReleaseResultStatus;
+  analysis_id: string;
+  release_json_url: string;
+  result: ReleaseResult;
+  candidate_scores: Array<Record<string, unknown>>;
+  quality_summary: Record<string, unknown>;
+  message: string;
+};
+
+
+function withBrowserSafeReleaseLinks(
+  links?: ReleaseResultLinks | null
+): ReleaseResultLinks | null | undefined {
+  if (!links) return links;
+  return {
+    release_json_url: resolveApiUrl(links.release_json_url) ?? links.release_json_url
+  };
+}
+
+
+function withBrowserSafeReleaseResult(
+  result: ReleaseResultResponse
+): ReleaseResultResponse {
+  return {
+    ...result,
+    release_json_url: resolveApiUrl(result.release_json_url) ?? result.release_json_url
+  };
+}
+
+
+export async function startReleasePointAnalysis(
+  analysisId: string
+): Promise<ReleaseStartResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/release-point/start`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(response, `Release Point Analysis start returned ${response.status}.`);
+  }
+  return response.json() as Promise<ReleaseStartResponse>;
+}
+
+
+export async function getReleasePointJob(
+  analysisId: string,
+  jobId: string
+): Promise<ReleaseJobResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/release-point/job/${encodeURIComponent(jobId)}`,
+    { cache: "no-store" }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(response, `Release Point Analysis job lookup returned ${response.status}.`);
+  }
+  const job = await response.json() as ReleaseJobResponse;
+  return {
+    ...job,
+    result: withBrowserSafeReleaseLinks(job.result)
+  };
+}
+
+
+export async function getReleasePointResult(
+  analysisId: string
+): Promise<ReleaseResultResponse | null> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/release-point`,
+    { cache: "no-store" }
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw await videoAnalysisError(response, `Release Point Analysis result lookup returned ${response.status}.`);
+  }
+  return withBrowserSafeReleaseResult(
+    await response.json() as ReleaseResultResponse
   );
 }

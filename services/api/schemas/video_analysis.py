@@ -5,6 +5,13 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 
+BallDetectorModelKey = Literal[
+    "e2_baseline",
+    "e3_motion_blur",
+    "e4c_best_overall",
+]
+
+
 class StrictGeometryModel(BaseModel):
     model_config = ConfigDict(allow_inf_nan=False)
 
@@ -155,6 +162,8 @@ class VideoAnalysisPreparedResponse(BaseModel):
     ball_detection_job_id: str | None = None
     ball_detection_started_at: datetime | None = None
     ball_detection_completed_at: datetime | None = None
+    ball_detector_model_key: BallDetectorModelKey = "e4c_best_overall"
+    ball_detector_model_name: str = "E4C — Best Overall"
     detection_summary_url: str | None = None
     detection_overlay_url: str | None = None
     tracking_status: Literal[
@@ -715,6 +724,12 @@ class VideoBallDetectionResultLinks(BaseModel):
     detection_summary_url: str
 
 
+class VideoBallDetectionStartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ball_detector_model_key: BallDetectorModelKey = "e4c_best_overall"
+
+
 class VideoBallDetectionStartResponse(BaseModel):
     success: bool
     status: Literal["queued"]
@@ -723,6 +738,8 @@ class VideoBallDetectionStartResponse(BaseModel):
     progress: int = Field(ge=0, le=100)
     current_frame: int = Field(ge=0)
     total_frames: int = Field(gt=0)
+    ball_detector_model_key: BallDetectorModelKey
+    ball_detector_model_name: str
     message: str
 
 
@@ -737,6 +754,8 @@ class VideoBallDetectionJobResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     model_path_used: str | None = None
+    ball_detector_model_key: BallDetectorModelKey
+    ball_detector_model_name: str
     error_message: str | None = None
     result: VideoBallDetectionResultLinks | None = None
     message: str
@@ -776,8 +795,17 @@ class VideoBallDetectionSettings(BaseModel):
     max_det: Literal[20]
 
 
+class BallDetectorResultMetadata(BaseModel):
+    key: BallDetectorModelKey
+    name: str
+    model_file: str
+
+
 class VideoBallDetectionsDocument(BaseModel):
     analysis_id: str
+    detector: BallDetectorResultMetadata | None = None
+    ball_detector_model_key: BallDetectorModelKey | None = None
+    ball_detector_model_name: str | None = None
     model_path_used: str
     model_class_names: list[str]
     settings: VideoBallDetectionSettings
@@ -794,6 +822,9 @@ class VideoBallDetectionSummary(BaseModel):
     detections_json_url: str
     detections_csv_url: str
     detection_summary_url: str
+    detector: BallDetectorResultMetadata | None = None
+    ball_detector_model_key: BallDetectorModelKey | None = None
+    ball_detector_model_name: str | None = None
     model_path_used: str
     model_warning: str | None = None
     model_class_names: list[str]
@@ -827,6 +858,8 @@ class VideoBallDetectionResultResponse(BaseModel):
     success: Literal[True]
     status: Literal["ready"]
     analysis_id: str
+    ball_detector_model_key: BallDetectorModelKey | None = None
+    ball_detector_model_name: str | None = None
     summary: VideoBallDetectionSummary
     frame_candidate_counts: list[int]
     message: str

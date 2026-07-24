@@ -11,6 +11,7 @@ from ..schemas.video_analysis import (
     VideoAnalysisPreparedResponse,
     VideoBallDetectionJobResponse,
     VideoBallDetectionResultResponse,
+    VideoBallDetectionStartRequest,
     VideoBallDetectionStartResponse,
     VideoBallTrackingJobResponse,
     VideoBallTrackingResultResponse,
@@ -22,6 +23,11 @@ from ..schemas.video_analysis import (
     WicketCameraPoseResult,
     WicketCameraPoseSolveRequest,
 )
+from ..schemas.release_point import (
+    VideoReleasePointJobResponse,
+    VideoReleasePointResultResponse,
+    VideoReleasePointStartResponse,
+)
 from ..services.video_analysis_service import (
     VideoAnalysisServiceError,
     load_video_analysis,
@@ -29,6 +35,11 @@ from ..services.video_analysis_service import (
 )
 from ..services.video_ball_detection_job_store import (
     video_ball_detection_job_store,
+)
+from ..services.ball_detector_registry import (
+    BallDetectorModelMissing,
+    InvalidBallDetectorModelKey,
+    get_ball_detector_model,
 )
 from ..services.video_ball_detection_service import (
     VideoBallDetectionError,
@@ -45,6 +56,16 @@ from ..services.video_ball_tracking_service import (
     mark_video_ball_tracking_queued,
     run_video_ball_tracking_job,
     validate_video_ball_tracking_input,
+)
+from ..services.video_release_point_job_store import (
+    video_release_point_job_store,
+)
+from ..services.video_release_point_service import (
+    VideoReleasePointError,
+    load_video_release_point_result,
+    mark_video_release_point_queued,
+    run_video_release_point_job,
+    validate_video_release_point_input,
 )
 from ..services.video_calibration_service import (
     confirm_video_calibration,
@@ -99,13 +120,21 @@ def prepare_video_analysis(
 def start_analysis_ball_detection(
     analysis_id: str,
     background_tasks: BackgroundTasks,
+    request: VideoBallDetectionStartRequest = Body(
+        default=VideoBallDetectionStartRequest()
+    ),
 ) -> VideoBallDetectionStartResponse:
     job = None
     try:
         analysis = load_video_analysis(analysis_id)
+        selected_model = get_ball_detector_model(
+            request.ball_detector_model_key
+        )
         job = video_ball_detection_job_store.create(
             analysis_id,
             analysis.frame_count,
+            selected_model.key,
+            selected_model.display_name,
         )
         if job is None:
             raise HTTPException(
@@ -115,16 +144,23 @@ def start_analysis_ball_detection(
                     "for this analysis."
                 ),
             )
-        mark_video_ball_detection_queued(analysis_id, job["job_id"])
+        mark_video_ball_detection_queued(
+            analysis_id,
+            job["job_id"],
+            selected_model.key,
+            selected_model.display_name,
+        )
         background_tasks.add_task(
             run_video_ball_detection_job,
             analysis_id,
             job["job_id"],
         )
         logger.info(
-            "Queued every-frame ball detection %s for %s",
+            "Queued every-frame ball detection %s for %s using %s (%s)",
             job["job_id"],
             analysis_id,
+            selected_model.display_name,
+            selected_model.model_file,
         )
         return VideoBallDetectionStartResponse.model_validate(job)
     except VideoAnalysisServiceError as exc:
@@ -132,6 +168,8 @@ def start_analysis_ball_detection(
             status_code=exc.status_code,
             detail=exc.message,
         ) from exc
+    except (InvalidBallDetectorModelKey, BallDetectorModelMissing) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except VideoBallDetectionError as exc:
         if job is not None:
             video_ball_detection_job_store.update(
@@ -260,6 +298,87 @@ def get_analysis_ball_tracking(
     try:
         return load_video_ball_tracking_result(analysis_id)
     except (VideoAnalysisServiceError, VideoBallTrackingError) as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.post(
+    "/{analysis_id}/release-point/start",
+    response_model=VideoReleasePointStartResponse,
+    status_code=202,
+)
+def start_analysis_release_point(
+    analysis_id: str,
+    background_tasks: BackgroundTasks,
+) -> VideoReleasePointStartResponse:
+    job = None
+    try:
+        validate_video_release_point_input(analysis_id)
+        job = video_release_point_job_store.create(analysis_id)
+        if job is None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "An active Release Point V1 job already exists "
+                    "for this analysis."
+                ),
+            )
+        mark_video_release_point_queued(analysis_id, job["job_id"])
+        background_tasks.add_task(
+            run_video_release_point_job,
+            analysis_id,
+            job["job_id"],
+        )
+        logger.info(
+            "Queued Release Point V1 job %s for %s",
+            job["job_id"],
+            analysis_id,
+        )
+        return VideoReleasePointStartResponse.model_validate(job)
+    except (VideoAnalysisServiceError, VideoReleasePointError) as exc:
+        if job is not None:
+            video_release_point_job_store.update(
+                job["job_id"],
+                success=False,
+                status="failed",
+                error_message=exc.message,
+                message=exc.message,
+            )
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.get(
+    "/{analysis_id}/release-point/job/{job_id}",
+    response_model=VideoReleasePointJobResponse,
+)
+def get_analysis_release_point_job(
+    analysis_id: str,
+    job_id: str,
+) -> VideoReleasePointJobResponse:
+    job = video_release_point_job_store.get(job_id)
+    if job is None or job["analysis_id"] != analysis_id:
+        raise HTTPException(
+            status_code=404,
+            detail="Release Point V1 job not found.",
+        )
+    return VideoReleasePointJobResponse.model_validate(job)
+
+
+@router.get(
+    "/{analysis_id}/release-point",
+    response_model=VideoReleasePointResultResponse,
+)
+def get_analysis_release_point(
+    analysis_id: str,
+) -> VideoReleasePointResultResponse:
+    try:
+        return load_video_release_point_result(analysis_id)
+    except (VideoAnalysisServiceError, VideoReleasePointError) as exc:
         raise HTTPException(
             status_code=exc.status_code,
             detail=exc.message,

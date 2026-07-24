@@ -1,0 +1,92 @@
+{
+  "schema_version": "1.0",
+  "created_at": "2026-07-24T00:57:31.347972Z",
+  "dataset_clip_count": 14,
+  "human_annotation_count": 14,
+  "valid_labeled_count": 0,
+  "not_visible_or_uncertain_count": 0,
+  "prediction_coverage": 0.571429,
+  "unresolved_rate": 0.428571,
+  "exact_frame_accuracy": null,
+  "within_1_frame_accuracy": null,
+  "within_2_frame_accuracy": null,
+  "mean_absolute_frame_error": null,
+  "median_absolute_frame_error": null,
+  "catastrophic_failure_rate": null,
+  "confidence_bins": {
+    "0.00-0.39": {
+      "count": 0,
+      "within_2_rate": null,
+      "mae": null
+    },
+    "0.40-0.59": {
+      "count": 0,
+      "within_2_rate": null,
+      "mae": null
+    },
+    "0.60-0.79": {
+      "count": 0,
+      "within_2_rate": null,
+      "mae": null
+    },
+    "0.80-1.00": {
+      "count": 0,
+      "within_2_rate": null,
+      "mae": null
+    }
+  },
+  "method_breakdown": {
+    "fallback_trajectory_only": {
+      "baseline_count": 5,
+      "labelled_count": 0,
+      "within_2_rate": null,
+      "mae": null
+    },
+    "missing": {
+      "baseline_count": 6,
+      "labelled_count": 0,
+      "within_2_rate": null,
+      "mae": null
+    },
+    "trajectory_pose_inferred": {
+      "baseline_count": 3,
+      "labelled_count": 0,
+      "within_2_rate": null,
+      "mae": null
+    }
+  },
+  "pose_quality_breakdown": {
+    "bowling_end_assignment_uncertain": {
+      "baseline_count": 8,
+      "labelled_count": 0,
+      "within_2_rate": null,
+      "mae": null
+    },
+    "bowler_selection_uncertain": {
+      "baseline_count": 3,
+      "labelled_count": 0,
+      "within_2_rate": null,
+      "mae": null
+    },
+    "low_confidence_wrist": {
+      "baseline_count": 1,
+      "labelled_count": 0,
+      "within_2_rate": null,
+      "mae": null
+    },
+    "pose_unavailable_or_unreliable": {
+      "baseline_count": 5,
+      "labelled_count": 0,
+      "within_2_rate": null,
+      "mae": null
+    },
+    "trajectory_only_estimate": {
+      "baseline_count": 5,
+      "labelled_count": 0,
+      "within_2_rate": null,
+      "mae": null
+    }
+  },
+  "failure_category_counts": {},
+  "labelled_records": []
+}

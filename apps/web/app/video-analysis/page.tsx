@@ -5,6 +5,7 @@ import { type ChangeEvent, useEffect, useRef, useState } from "react";
 import { BallDetectionPanel } from "@/components/video-analysis/BallDetectionPanel";
 import { BallTrackingPanel } from "@/components/video-analysis/BallTrackingPanel";
 import { MEDIA_FIT_CLASS } from "@/components/video-analysis/AnalysisMediaStage";
+import { ReleasePointPanel } from "@/components/video-analysis/ReleasePointPanel";
 import { SceneCalibrationPanel } from "@/components/video-analysis/SceneCalibrationPanel";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
@@ -12,10 +13,12 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import {
   getVideoAnalysis,
   getVideoAnalysisCalibration,
+  getReleasePointResult,
   getVideoBallDetectionResult,
   getVideoBallTrackingResult,
   prepareVideoAnalysis,
   type ConfirmedVideoCalibrationResponse,
+  type ReleaseResultResponse,
   type VideoAnalysisPreparedResponse,
   type VideoBallDetectionResultResponse,
   type VideoBallTrackingResultResponse
@@ -23,7 +26,7 @@ import {
 
 
 type WorkspaceState = "idle" | "file_selected" | "uploading" | "prepared" | "failed";
-type ActiveStage = "upload" | "calibration" | "ball_detection" | "ball_tracking";
+type ActiveStage = "upload" | "calibration" | "ball_detection" | "ball_tracking" | "release_point";
 
 
 const MAX_FILE_BYTES = 500 * 1024 * 1024;
@@ -88,6 +91,8 @@ function WorkflowStepper({
               step.key === "detect" && steps.some((s) => s.key === "calibration" && s.state === "complete")
             ) || (
               step.key === "track" && steps.some((s) => s.key === "detect" && s.state === "complete")
+            ) || (
+              step.key === "release" && steps.some((s) => s.key === "track" && s.state === "complete")
             ) || (
               step.key === "calibration" && steps.some((s) => s.key === "upload" && s.state === "complete")
             ));
@@ -171,6 +176,9 @@ export default function VideoAnalysisPage() {
   const [ballTrackingResult, setBallTrackingResult] = useState<
     VideoBallTrackingResultResponse | null
   >(null);
+  const [releasePointResult, setReleasePointResult] = useState<
+    ReleaseResultResponse | null
+  >(null);
   const [error, setError] = useState<string | null>(null);
   const [restoring, setRestoring] = useState(false);
 
@@ -194,6 +202,7 @@ export default function VideoAnalysisPage() {
     setConfirmedCalibration(null);
     setBallDetectionResult(null);
     setBallTrackingResult(null);
+    setReleasePointResult(null);
     setActiveStage("upload");
     setWorkspaceState("file_selected");
     setError(null);
@@ -220,6 +229,7 @@ export default function VideoAnalysisPage() {
     setConfirmedCalibration(null);
     setBallDetectionResult(null);
     setBallTrackingResult(null);
+    setReleasePointResult(null);
     setError(null);
     setActiveStage("upload");
     setWorkspaceState("idle");
@@ -247,6 +257,7 @@ export default function VideoAnalysisPage() {
       setConfirmedCalibration(null);
       setBallDetectionResult(null);
       setBallTrackingResult(null);
+      setReleasePointResult(null);
       setWorkspaceState("prepared");
       setActiveStage("calibration");
       window.history.replaceState(
@@ -270,22 +281,27 @@ export default function VideoAnalysisPage() {
       getVideoAnalysis(analysisId),
       getVideoAnalysisCalibration(analysisId),
       getVideoBallDetectionResult(analysisId),
-      getVideoBallTrackingResult(analysisId)
+      getVideoBallTrackingResult(analysisId),
+      getReleasePointResult(analysisId)
     ])
       .then(([
         restored,
         calibration,
         detectionResult,
-        trackingResult
+        trackingResult,
+        releaseResult
       ]) => {
         if (cancelled) return;
         setAnalysis(restored);
         setConfirmedCalibration(calibration);
         setBallDetectionResult(detectionResult);
         setBallTrackingResult(trackingResult);
+        setReleasePointResult(releaseResult);
         setWorkspaceState("prepared");
         setActiveStage(
-          trackingResult
+          releaseResult
+            ? "release_point"
+            : trackingResult
           || restored.tracking_status === "tracking_queued"
           || restored.tracking_status === "tracking_ball"
             ? "ball_tracking"
@@ -328,8 +344,12 @@ export default function VideoAnalysisPage() {
     && activeStage === "ball_tracking"
     && ballDetectionResult !== null
   );
-  const replayReady = Boolean(ballTrackingResult?.summary?.delivery_replay_url);
-
+  const releasePointPrerequisiteReady = ballTrackingResult?.status === "ready";
+  const releasePointActive = (
+    uploadComplete
+    && activeStage === "release_point"
+    && releasePointPrerequisiteReady
+  );
   const workspaceTone: "neutral" | "good" | "warn" =
     workspaceState === "failed"
       ? "warn"
@@ -393,18 +413,23 @@ export default function VideoAnalysisPage() {
       stage: "ball_tracking",
       state: !ballDetectionResult
         ? "future"
-        : ballTrackingResult && !ballTrackingActive
+        : releasePointPrerequisiteReady && !ballTrackingActive
           ? "complete"
           : ballTrackingActive
             ? "current"
             : "future"
     },
     {
-      key: "replay",
-      label: "Replay",
-      state: replayReady
-        ? "complete"
-        : "future"
+      key: "release",
+      label: "Release",
+      stage: "release_point",
+      state: !releasePointPrerequisiteReady
+        ? "future"
+        : releasePointResult && !releasePointActive
+          ? "complete"
+          : releasePointActive
+            ? "current"
+            : "future"
     }
   ];
 
@@ -420,6 +445,10 @@ export default function VideoAnalysisPage() {
     }
     if (stage === "ball_tracking" && ballDetectionResult) {
       setActiveStage("ball_tracking");
+      return;
+    }
+    if (stage === "release_point" && releasePointPrerequisiteReady) {
+      setActiveStage("release_point");
     }
   }
   return (
@@ -632,7 +661,10 @@ export default function VideoAnalysisPage() {
                 initialJobId={analysis.ball_detection_job_id}
                 onResult={(result) => {
                   setBallDetectionResult(result);
-                  if (!result) setBallTrackingResult(null);
+                  if (!result) {
+                    setBallTrackingResult(null);
+                    setReleasePointResult(null);
+                  }
                 }}
               />
               <div className="flex flex-wrap gap-2">
@@ -656,10 +688,35 @@ export default function VideoAnalysisPage() {
                 detectionResult={ballDetectionResult}
                 initialResult={ballTrackingResult}
                 initialJobId={analysis.tracking_job_id}
-                onResult={setBallTrackingResult}
+                onResult={(result) => {
+                  setBallTrackingResult(result);
+                  setReleasePointResult(null);
+                }}
               />
-              <Button variant="secondary" onClick={() => setActiveStage("ball_detection")}>
-                Back to Ball Detection
+              <div className="flex flex-wrap gap-2">
+                {releasePointPrerequisiteReady && (
+                  <Button onClick={() => setActiveStage("release_point")}>
+                    Continue to Release Point
+                  </Button>
+                )}
+                <Button variant="secondary" onClick={() => setActiveStage("ball_detection")}>
+                  Back to Ball Detection
+                </Button>
+              </div>
+            </>
+          )}
+
+          {releasePointActive && ballTrackingResult && (
+            <>
+              <ReleasePointPanel
+                key={analysis.analysis_id}
+                analysis={analysis}
+                trackingResult={ballTrackingResult}
+                initialResult={releasePointResult}
+                onResult={setReleasePointResult}
+              />
+              <Button variant="secondary" onClick={() => setActiveStage("ball_tracking")}>
+                Back to Ball Tracking
               </Button>
             </>
           )}
