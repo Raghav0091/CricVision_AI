@@ -1,6 +1,7 @@
 # Python environments
 .env
 .venv/
+.venv_*/
 venv/
 env/
 ENV/
@@ -15,12 +16,17 @@ __pycache__/
 *.pyo
 *.pyd
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
 # Streamlit secrets
 .streamlit/secrets.toml
 
 # Large outputs
 outputs/
+outputs/release_validation/frame_packages/
 outputs/debug/
 outputs/review_frames/
 data/session_results.json
@@ -51,6 +57,11 @@ Thumbs.db
 .vscode/
 .idea/
 .cursor/
+
+# Node / Next.js generated content
+node_modules/
+.next/
+out/
 
 # Local command-output artifacts
 /cls
