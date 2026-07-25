@@ -48,7 +48,7 @@ class ReleaseFrameUncertainty(StrictGeometryModel):
 
 
 class ReleaseResult(StrictGeometryModel):
-    schema_version: Literal["1.0"]
+    schema_version: Literal["1.0", "1.1", "1.2", "1.3"]
     analysis_id: str
     status: ReleaseStatus
     release_frame: int | None = Field(default=None, ge=0)
@@ -74,10 +74,11 @@ class ReleaseCandidateScore(BaseModel):
     features: dict[str, Any] = Field(default_factory=dict)
     score_components: dict[str, float] = Field(default_factory=dict)
     quality_flags: list[str] = Field(default_factory=list)
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
 
 
 class ReleaseResultDocument(BaseModel):
-    schema_version: Literal["1.0"]
+    schema_version: Literal["1.0", "1.1", "1.2", "1.3"]
     analysis_id: str
     created_at: datetime
     completed_at: datetime
@@ -124,4 +125,3 @@ class VideoReleasePointResultResponse(BaseModel):
     candidate_scores: list[ReleaseCandidateScore] = Field(default_factory=list)
     quality_summary: dict[str, Any] = Field(default_factory=dict)
     message: str
-

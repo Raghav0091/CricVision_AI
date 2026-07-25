@@ -1,18 +1,18 @@
 {
   "schema_version": "1.0",
-  "created_at": "2026-07-24T00:57:31.347972Z",
+  "created_at": "2026-07-24T02:43:22.124234Z",
   "dataset_clip_count": 14,
   "human_annotation_count": 14,
-  "valid_labeled_count": 0,
+  "valid_labeled_count": 14,
   "not_visible_or_uncertain_count": 0,
   "prediction_coverage": 0.571429,
   "unresolved_rate": 0.428571,
-  "exact_frame_accuracy": null,
-  "within_1_frame_accuracy": null,
-  "within_2_frame_accuracy": null,
-  "mean_absolute_frame_error": null,
-  "median_absolute_frame_error": null,
-  "catastrophic_failure_rate": null,
+  "exact_frame_accuracy": 0.0,
+  "within_1_frame_accuracy": 0.0,
+  "within_2_frame_accuracy": 0.0,
+  "mean_absolute_frame_error": 5.5,
+  "median_absolute_frame_error": 4.5,
+  "catastrophic_failure_rate": 0.142857,
   "confidence_bins": {
     "0.00-0.39": {
       "count": 0,
@@ -20,9 +20,9 @@
       "mae": null
     },
     "0.40-0.59": {
-      "count": 0,
-      "within_2_rate": null,
-      "mae": null
+      "count": 5,
+      "within_2_rate": 0.0,
+      "mae": 5.4
     },
     "0.60-0.79": {
       "count": 0,
@@ -30,63 +30,270 @@
       "mae": null
     },
     "0.80-1.00": {
-      "count": 0,
-      "within_2_rate": null,
-      "mae": null
+      "count": 3,
+      "within_2_rate": 0.0,
+      "mae": 5.666666666666667
     }
   },
   "method_breakdown": {
     "fallback_trajectory_only": {
       "baseline_count": 5,
-      "labelled_count": 0,
-      "within_2_rate": null,
-      "mae": null
+      "labelled_count": 5,
+      "within_2_rate": 0.0,
+      "mae": 5.4
     },
     "missing": {
       "baseline_count": 6,
-      "labelled_count": 0,
+      "labelled_count": 6,
       "within_2_rate": null,
       "mae": null
     },
     "trajectory_pose_inferred": {
       "baseline_count": 3,
-      "labelled_count": 0,
-      "within_2_rate": null,
-      "mae": null
+      "labelled_count": 3,
+      "within_2_rate": 0.0,
+      "mae": 5.666666666666667
     }
   },
   "pose_quality_breakdown": {
     "bowling_end_assignment_uncertain": {
       "baseline_count": 8,
-      "labelled_count": 0,
-      "within_2_rate": null,
-      "mae": null
+      "labelled_count": 8,
+      "within_2_rate": 0.0,
+      "mae": 5.5
     },
     "bowler_selection_uncertain": {
       "baseline_count": 3,
-      "labelled_count": 0,
-      "within_2_rate": null,
-      "mae": null
+      "labelled_count": 3,
+      "within_2_rate": 0.0,
+      "mae": 5.666666666666667
     },
     "low_confidence_wrist": {
       "baseline_count": 1,
-      "labelled_count": 0,
-      "within_2_rate": null,
-      "mae": null
+      "labelled_count": 1,
+      "within_2_rate": 0.0,
+      "mae": 11.0
     },
     "pose_unavailable_or_unreliable": {
       "baseline_count": 5,
-      "labelled_count": 0,
-      "within_2_rate": null,
-      "mae": null
+      "labelled_count": 5,
+      "within_2_rate": 0.0,
+      "mae": 5.4
     },
     "trajectory_only_estimate": {
       "baseline_count": 5,
-      "labelled_count": 0,
-      "within_2_rate": null,
-      "mae": null
+      "labelled_count": 5,
+      "within_2_rate": 0.0,
+      "mae": 5.4
     }
   },
   "failure_category_counts": {},
-  "labelled_records": []
+  "labelled_records": [
+    {
+      "validation_id": "rv1_001",
+      "analysis_id": "analysis_20260718_005833_bbaf9d",
+      "predicted_release_frame": null,
+      "human_release_frame": 7,
+      "absolute_frame_error": null,
+      "method": null,
+      "confidence": null,
+      "quality_flags": []
+    },
+    {
+      "validation_id": "rv1_002",
+      "analysis_id": "analysis_20260718_065149_af258b",
+      "predicted_release_frame": 63,
+      "human_release_frame": 52,
+      "absolute_frame_error": 11,
+      "method": "trajectory_pose_inferred",
+      "confidence": 0.811266,
+      "quality_flags": [
+        "outside_scene_roi",
+        "bowling_end_assignment_uncertain",
+        "bowler_selection_uncertain",
+        "low_confidence_wrist"
+      ]
+    },
+    {
+      "validation_id": "rv1_003",
+      "analysis_id": "analysis_20260718_085114_739b2f",
+      "predicted_release_frame": null,
+      "human_release_frame": 40,
+      "absolute_frame_error": null,
+      "method": null,
+      "confidence": null,
+      "quality_flags": []
+    },
+    {
+      "validation_id": "rv1_004",
+      "analysis_id": "analysis_20260718_235819_20a95d",
+      "predicted_release_frame": null,
+      "human_release_frame": 52,
+      "absolute_frame_error": null,
+      "method": null,
+      "confidence": null,
+      "quality_flags": []
+    },
+    {
+      "validation_id": "rv1_005",
+      "analysis_id": "analysis_20260719_132629_7400e0",
+      "predicted_release_frame": null,
+      "human_release_frame": 38,
+      "absolute_frame_error": null,
+      "method": null,
+      "confidence": null,
+      "quality_flags": []
+    },
+    {
+      "validation_id": "rv1_006",
+      "analysis_id": "analysis_20260720_131209_2c5403",
+      "predicted_release_frame": null,
+      "human_release_frame": 14,
+      "absolute_frame_error": null,
+      "method": null,
+      "confidence": null,
+      "quality_flags": []
+    },
+    {
+      "validation_id": "rv1_007",
+      "analysis_id": "analysis_20260721_011137_44c35d",
+      "predicted_release_frame": null,
+      "human_release_frame": 69,
+      "absolute_frame_error": null,
+      "method": null,
+      "confidence": null,
+      "quality_flags": []
+    },
+    {
+      "validation_id": "rv1_008",
+      "analysis_id": "analysis_20260722_012308_ddaddf",
+      "predicted_release_frame": 66,
+      "human_release_frame": 69,
+      "absolute_frame_error": 3,
+      "method": "trajectory_pose_inferred",
+      "confidence": 0.824478,
+      "quality_flags": [
+        "outside_scene_roi",
+        "bowling_end_assignment_uncertain",
+        "bowler_selection_uncertain",
+        "bowling_arm_ambiguous"
+      ]
+    },
+    {
+      "validation_id": "rv1_009",
+      "analysis_id": "analysis_20260722_014742_6864b7",
+      "predicted_release_frame": 51,
+      "human_release_frame": 56,
+      "absolute_frame_error": 5,
+      "method": "fallback_trajectory_only",
+      "confidence": 0.58,
+      "quality_flags": [
+        "pose_unavailable_or_unreliable",
+        "trajectory_only_estimate",
+        "bad_backward_trajectory_fit",
+        "outside_scene_roi",
+        "bowling_end_assignment_uncertain",
+        "insufficient_bowler_evidence",
+        "bowling_arm_ambiguous",
+        "pose_insufficient"
+      ]
+    },
+    {
+      "validation_id": "rv1_010",
+      "analysis_id": "analysis_20260722_015351_6e9a66",
+      "predicted_release_frame": 48,
+      "human_release_frame": 58,
+      "absolute_frame_error": 10,
+      "method": "fallback_trajectory_only",
+      "confidence": 0.58,
+      "quality_flags": [
+        "pose_unavailable_or_unreliable",
+        "trajectory_only_estimate",
+        "bad_backward_trajectory_fit",
+        "outside_scene_roi",
+        "bowling_end_assignment_uncertain",
+        "insufficient_bowler_evidence",
+        "bowling_arm_ambiguous",
+        "pose_insufficient"
+      ]
+    },
+    {
+      "validation_id": "rv1_011",
+      "analysis_id": "analysis_20260722_021751_ac6eb9",
+      "predicted_release_frame": 71,
+      "human_release_frame": 68,
+      "absolute_frame_error": 3,
+      "method": "fallback_trajectory_only",
+      "confidence": 0.58,
+      "quality_flags": [
+        "pose_unavailable_or_unreliable",
+        "trajectory_only_estimate",
+        "bad_backward_trajectory_fit",
+        "outside_scene_roi",
+        "bowling_end_assignment_uncertain",
+        "insufficient_bowler_evidence",
+        "bowling_arm_ambiguous",
+        "pose_insufficient"
+      ]
+    },
+    {
+      "validation_id": "rv1_012",
+      "analysis_id": "analysis_20260722_135522_7f6d13",
+      "predicted_release_frame": 66,
+      "human_release_frame": 69,
+      "absolute_frame_error": 3,
+      "method": "trajectory_pose_inferred",
+      "confidence": 0.824478,
+      "quality_flags": [
+        "outside_scene_roi",
+        "bowling_end_assignment_uncertain",
+        "bowler_selection_uncertain",
+        "bowling_arm_ambiguous"
+      ]
+    },
+    {
+      "validation_id": "rv1_013",
+      "analysis_id": "analysis_20260722_135910_b7f8ef",
+      "predicted_release_frame": 63,
+      "human_release_frame": 58,
+      "absolute_frame_error": 5,
+      "method": "fallback_trajectory_only",
+      "confidence": 0.58,
+      "quality_flags": [
+        "pose_unavailable_or_unreliable",
+        "trajectory_only_estimate",
+        "low_detector_confidence",
+        "outside_scene_roi",
+        "bowling_end_assignment_uncertain",
+        "insufficient_bowler_evidence",
+        "bowling_arm_ambiguous",
+        "pose_insufficient"
+      ]
+    },
+    {
+      "validation_id": "rv1_014",
+      "analysis_id": "analysis_20260723_001041_22593e",
+      "predicted_release_frame": 34,
+      "human_release_frame": 38,
+      "absolute_frame_error": 4,
+      "method": "fallback_trajectory_only",
+      "confidence": 0.58,
+      "quality_flags": [
+        "pose_unavailable_or_unreliable",
+        "trajectory_only_estimate",
+        "bad_backward_trajectory_fit",
+        "outside_scene_roi",
+        "bowling_end_assignment_uncertain",
+        "insufficient_bowler_evidence",
+        "bowling_arm_ambiguous",
+        "pose_insufficient"
+      ]
+    }
+  ],
+  "prediction_bias_counts": {
+    "early": 5,
+    "late": 3,
+    "exact": 0,
+    "no_prediction": 6
+  }
 }

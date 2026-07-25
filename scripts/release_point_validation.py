@@ -30,6 +30,26 @@ MANIFEST_CSV_PATH = VALIDATION_ROOT / "validation_manifest.csv"
 BASELINE_PATH = VALIDATION_ROOT / "baseline_release_v1_results.json"
 ANNOTATIONS_PATH = VALIDATION_ROOT / "release_annotations.json"
 METRICS_PATH = VALIDATION_ROOT / "release_point_v1_metrics.json"
+V1_1_RESULTS_PATH = VALIDATION_ROOT / "release_v1_1_results.json"
+V1_1_METRICS_PATH = VALIDATION_ROOT / "release_v1_1_metrics.json"
+V1_2_RESULTS_PATH = VALIDATION_ROOT / "release_v1_2_results.json"
+V1_2_METRICS_PATH = VALIDATION_ROOT / "release_v1_2_metrics.json"
+V1_3_RESULTS_PATH = VALIDATION_ROOT / "release_v1_3_results.json"
+V1_3_METRICS_PATH = VALIDATION_ROOT / "release_v1_3_metrics.json"
+V1_3_RECOVERY_RESULTS_PATH = VALIDATION_ROOT / "release_v1_3_observation_recovery_results.json"
+V1_3_RECOVERY_METRICS_PATH = VALIDATION_ROOT / "release_v1_3_observation_recovery_metrics.json"
+V1_COMPARE_PATH = VALIDATION_ROOT / "release_v1_vs_v1_1_comparison.json"
+V1_COMPARE_CSV_PATH = VALIDATION_ROOT / "release_v1_vs_v1_1_comparison.csv"
+V1_COMPARE_MD_PATH = VALIDATION_ROOT / "release_v1_vs_v1_1_comparison.md"
+V1_2_COMPARE_PATH = VALIDATION_ROOT / "release_v1_vs_v1_1_vs_v1_2_comparison.json"
+V1_2_COMPARE_CSV_PATH = VALIDATION_ROOT / "release_v1_vs_v1_1_vs_v1_2_comparison.csv"
+V1_2_COMPARE_MD_PATH = VALIDATION_ROOT / "release_v1_vs_v1_1_vs_v1_2_comparison.md"
+V1_3_COMPARE_PATH = VALIDATION_ROOT / "release_v1_vs_v1_1_vs_v1_2_vs_v1_3_comparison.json"
+V1_3_COMPARE_CSV_PATH = VALIDATION_ROOT / "release_v1_vs_v1_1_vs_v1_2_vs_v1_3_comparison.csv"
+V1_3_COMPARE_MD_PATH = VALIDATION_ROOT / "release_v1_vs_v1_1_vs_v1_2_vs_v1_3_comparison.md"
+V1_3_RECOVERY_COMPARE_PATH = VALIDATION_ROOT / "release_v1_3_vs_observation_recovery_comparison.json"
+V1_3_RECOVERY_COMPARE_CSV_PATH = VALIDATION_ROOT / "release_v1_3_vs_observation_recovery_comparison.csv"
+V1_3_RECOVERY_COMPARE_MD_PATH = VALIDATION_ROOT / "release_v1_3_vs_observation_recovery_comparison.md"
 REPORT_PATH = DOCS_VALIDATION_ROOT / "release_point_v1_validation.md"
 GUIDELINE_PATH = DOCS_VALIDATION_ROOT / "release_point_v1_annotation_guideline.md"
 
@@ -66,6 +86,21 @@ def main() -> int:
     )
 
     subparsers.add_parser("metrics", help="Compute metrics from annotations.")
+    v1_1 = subparsers.add_parser("v1_1", help="Run V1.1 validation comparison.")
+    v1_1.add_argument("--pose-provider", default="rtmpose")
+    v1_1.add_argument("--pose-device", default="cpu")
+    v1_2 = subparsers.add_parser("v1_2", help="Run V1.2 validation comparison.")
+    v1_2.add_argument("--pose-provider", default="rtmpose")
+    v1_2.add_argument("--pose-device", default="cpu")
+    v1_3 = subparsers.add_parser("v1_3", help="Run V1.3 validation comparison.")
+    v1_3.add_argument("--pose-provider", default="rtmpose")
+    v1_3.add_argument("--pose-device", default="cpu")
+    v1_3_recovery = subparsers.add_parser(
+        "v1_3_recovery",
+        help="Run V1.3 with Release-Region Observation Recovery V1.",
+    )
+    v1_3_recovery.add_argument("--pose-provider", default="rtmpose")
+    v1_3_recovery.add_argument("--pose-device", default="cpu")
     subparsers.add_parser("guideline", help="Write annotation guideline.")
     subparsers.add_parser("report", help="Write validation report.")
 
@@ -87,6 +122,26 @@ def main() -> int:
         command_annotations(window=args.window, overwrite=args.overwrite)
     elif args.command == "metrics":
         command_metrics()
+    elif args.command == "v1_1":
+        command_v1_1(
+            pose_provider=args.pose_provider,
+            pose_device=args.pose_device,
+        )
+    elif args.command == "v1_2":
+        command_v1_2(
+            pose_provider=args.pose_provider,
+            pose_device=args.pose_device,
+        )
+    elif args.command == "v1_3":
+        command_v1_3(
+            pose_provider=args.pose_provider,
+            pose_device=args.pose_device,
+        )
+    elif args.command == "v1_3_recovery":
+        command_v1_3_recovery(
+            pose_provider=args.pose_provider,
+            pose_device=args.pose_device,
+        )
     elif args.command == "guideline":
         write_guideline()
     elif args.command == "report":
@@ -230,10 +285,320 @@ def command_metrics() -> dict[str, Any]:
     annotations = _read_json(ANNOTATIONS_PATH) if ANNOTATIONS_PATH.is_file() else {
         "annotations": []
     }
+    metrics = _metrics_for_records(
+        records=baseline.get("records", []),
+        annotations=annotations,
+        output_path=METRICS_PATH,
+    )
+    return metrics
+
+
+def command_v1_1(*, pose_provider: str, pose_device: str) -> dict[str, Any]:
+    manifest = _read_json(MANIFEST_PATH)
+    baseline = _read_json(BASELINE_PATH)
+    annotations = _read_json(ANNOTATIONS_PATH)
+    records = []
+    for clip in manifest.get("clips", []):
+        started = perf_counter()
+        document = None
+        error_message = None
+        run_status = "ran_v1_1"
+        try:
+            document = _run_release_v1_1_for_validation(
+                clip["analysis_id"],
+                pose_provider=pose_provider,
+                pose_device=pose_device,
+            )
+        except Exception as exc:
+            run_status = "failed"
+            error_message = f"{type(exc).__name__}: {exc}"
+        elapsed = perf_counter() - started
+        record = _baseline_record(clip, document, run_status, error_message, elapsed)
+        record["algorithm_version"] = "release_point_v1_1"
+        record["release_result_path"] = (
+            str(VALIDATION_ROOT / "release_v1_1_documents" / f"{clip['validation_id']}.json")
+            if document
+            else None
+        )
+        records.append(record)
+        if document:
+            document_dir = VALIDATION_ROOT / "release_v1_1_documents"
+            document_dir.mkdir(parents=True, exist_ok=True)
+            _write_json(document_dir / f"{clip['validation_id']}.json", document)
+
+    v1_1 = {
+        "schema_version": "1.1",
+        "created_at": _utc_now(),
+        "algorithm": "Release Point V1.1 pre-track reconstruction",
+        "baseline_reference": str(BASELINE_PATH),
+        "human_annotations_reference": str(ANNOTATIONS_PATH),
+        "clip_count": len(records),
+        "ready_prediction_count": sum(
+            1 for item in records if item["prediction_status"] == "ready"
+        ),
+        "unresolved_or_failed_count": sum(
+            1 for item in records if item["prediction_status"] != "ready"
+        ),
+        "records": records,
+    }
+    _write_json(V1_1_RESULTS_PATH, v1_1)
+    v1_1_metrics = _metrics_for_records(
+        records=records,
+        annotations=annotations,
+        output_path=V1_1_METRICS_PATH,
+    )
+    v1_metrics = _read_json(METRICS_PATH)
+    comparison = _comparison_document(
+        v1_records=baseline.get("records", []),
+        v1_1_records=records,
+        annotations=annotations,
+        v1_metrics=v1_metrics,
+        v1_1_metrics=v1_1_metrics,
+    )
+    _write_json(V1_COMPARE_PATH, comparison)
+    _write_comparison_csv(comparison["per_delivery_comparison"])
+    V1_COMPARE_MD_PATH.write_text(_comparison_markdown(comparison), encoding="utf-8")
+    return v1_1
+
+
+def command_v1_2(*, pose_provider: str, pose_device: str) -> dict[str, Any]:
+    manifest = _read_json(MANIFEST_PATH)
+    baseline = _read_json(BASELINE_PATH)
+    v1_1 = _read_json(V1_1_RESULTS_PATH)
+    annotations = _read_json(ANNOTATIONS_PATH)
+    records = []
+    document_dir = VALIDATION_ROOT / "release_v1_2_documents"
+    for clip in manifest.get("clips", []):
+        started = perf_counter()
+        document = None
+        error_message = None
+        run_status = "ran_v1_2"
+        try:
+            document = _run_release_v1_2_for_validation(
+                clip["analysis_id"],
+                pose_provider=pose_provider,
+                pose_device=pose_device,
+            )
+        except Exception as exc:
+            run_status = "failed"
+            error_message = f"{type(exc).__name__}: {exc}"
+        elapsed = perf_counter() - started
+        record = _baseline_record(clip, document, run_status, error_message, elapsed)
+        record["algorithm_version"] = "release_point_v1_2"
+        record["release_result_path"] = (
+            str(document_dir / f"{clip['validation_id']}.json") if document else None
+        )
+        records.append(record)
+        if document:
+            document_dir.mkdir(parents=True, exist_ok=True)
+            _write_json(document_dir / f"{clip['validation_id']}.json", document)
+
+    v1_2 = {
+        "schema_version": "1.2",
+        "created_at": _utc_now(),
+        "algorithm": "Release Point V1.2 hypothesis arbitration",
+        "baseline_reference": str(BASELINE_PATH),
+        "v1_1_reference": str(V1_1_RESULTS_PATH),
+        "human_annotations_reference": str(ANNOTATIONS_PATH),
+        "clip_count": len(records),
+        "ready_prediction_count": sum(
+            1 for item in records if item["prediction_status"] == "ready"
+        ),
+        "unresolved_or_failed_count": sum(
+            1 for item in records if item["prediction_status"] != "ready"
+        ),
+        "records": records,
+    }
+    _write_json(V1_2_RESULTS_PATH, v1_2)
+    v1_2_metrics = _metrics_for_records(
+        records=records,
+        annotations=annotations,
+        output_path=V1_2_METRICS_PATH,
+    )
+    v1_metrics = _read_json(METRICS_PATH)
+    v1_1_metrics = _read_json(V1_1_METRICS_PATH)
+    comparison = _comparison_document_v1_v1_1_v1_2(
+        v1_records=baseline.get("records", []),
+        v1_1_records=v1_1.get("records", []),
+        v1_2_records=records,
+        annotations=annotations,
+        v1_metrics=v1_metrics,
+        v1_1_metrics=v1_1_metrics,
+        v1_2_metrics=v1_2_metrics,
+    )
+    _write_json(V1_2_COMPARE_PATH, comparison)
+    _write_comparison_v1_2_csv(comparison["per_delivery_comparison"])
+    V1_2_COMPARE_MD_PATH.write_text(
+        _comparison_v1_2_markdown(comparison),
+        encoding="utf-8",
+    )
+    return v1_2
+
+
+def command_v1_3(*, pose_provider: str, pose_device: str) -> dict[str, Any]:
+    manifest = _read_json(MANIFEST_PATH)
+    baseline = _read_json(BASELINE_PATH)
+    v1_1 = _read_json(V1_1_RESULTS_PATH)
+    v1_2 = _read_json(V1_2_RESULTS_PATH)
+    annotations = _read_json(ANNOTATIONS_PATH)
+    records = []
+    document_dir = VALIDATION_ROOT / "release_v1_3_documents"
+    for clip in manifest.get("clips", []):
+        started = perf_counter()
+        document = None
+        error_message = None
+        run_status = "ran_v1_3"
+        try:
+            document = _run_release_v1_3_for_validation(
+                clip["analysis_id"],
+                pose_provider=pose_provider,
+                pose_device=pose_device,
+            )
+        except Exception as exc:
+            run_status = "failed"
+            error_message = f"{type(exc).__name__}: {exc}"
+        elapsed = perf_counter() - started
+        record = _baseline_record(clip, document, run_status, error_message, elapsed)
+        record["algorithm_version"] = "release_point_v1_3"
+        record["release_result_path"] = (
+            str(document_dir / f"{clip['validation_id']}.json") if document else None
+        )
+        records.append(record)
+        if document:
+            document_dir.mkdir(parents=True, exist_ok=True)
+            _write_json(document_dir / f"{clip['validation_id']}.json", document)
+
+    v1_3 = {
+        "schema_version": "1.3",
+        "created_at": _utc_now(),
+        "algorithm": "Release Point V1.3 late free-flight bias guard",
+        "baseline_reference": str(BASELINE_PATH),
+        "v1_1_reference": str(V1_1_RESULTS_PATH),
+        "v1_2_reference": str(V1_2_RESULTS_PATH),
+        "human_annotations_reference": str(ANNOTATIONS_PATH),
+        "clip_count": len(records),
+        "ready_prediction_count": sum(
+            1 for item in records if item["prediction_status"] == "ready"
+        ),
+        "unresolved_or_failed_count": sum(
+            1 for item in records if item["prediction_status"] != "ready"
+        ),
+        "records": records,
+    }
+    _write_json(V1_3_RESULTS_PATH, v1_3)
+    v1_3_metrics = _metrics_for_records(
+        records=records,
+        annotations=annotations,
+        output_path=V1_3_METRICS_PATH,
+    )
+    comparison = _comparison_document_v1_v1_1_v1_2_v1_3(
+        v1_records=baseline.get("records", []),
+        v1_1_records=v1_1.get("records", []),
+        v1_2_records=v1_2.get("records", []),
+        v1_3_records=records,
+        annotations=annotations,
+        v1_metrics=_read_json(METRICS_PATH),
+        v1_1_metrics=_read_json(V1_1_METRICS_PATH),
+        v1_2_metrics=_read_json(V1_2_METRICS_PATH),
+        v1_3_metrics=v1_3_metrics,
+    )
+    _write_json(V1_3_COMPARE_PATH, comparison)
+    _write_comparison_v1_3_csv(comparison["per_delivery_comparison"])
+    V1_3_COMPARE_MD_PATH.write_text(
+        _comparison_v1_3_markdown(comparison),
+        encoding="utf-8",
+    )
+    return v1_3
+
+
+def command_v1_3_recovery(*, pose_provider: str, pose_device: str) -> dict[str, Any]:
+    manifest = _read_json(MANIFEST_PATH)
+    v1_3 = _read_json(V1_3_RESULTS_PATH)
+    annotations = _read_json(ANNOTATIONS_PATH)
+    records = []
+    document_dir = VALIDATION_ROOT / "release_v1_3_observation_recovery_documents"
+    for clip in manifest.get("clips", []):
+        started = perf_counter()
+        document = None
+        error_message = None
+        run_status = "ran_v1_3_observation_recovery"
+        try:
+            document = _run_release_v1_3_recovery_for_validation(
+                clip["analysis_id"],
+                pose_provider=pose_provider,
+                pose_device=pose_device,
+            )
+        except Exception as exc:
+            run_status = "failed"
+            error_message = f"{type(exc).__name__}: {exc}"
+        elapsed = perf_counter() - started
+        record = _baseline_record(clip, document, run_status, error_message, elapsed)
+        record["algorithm_version"] = "release_pipeline_v1_3_observation_recovery_v1"
+        record["input_compatibility_class"] = _input_compatibility_class(
+            run_status,
+            error_message,
+            document,
+        )
+        recovery = (document or {}).get("release_region_observation_recovery") or {}
+        record["recovery_status"] = recovery.get("status")
+        record["recovered_observation_count"] = len(
+            recovery.get("recovered_observed_points") or []
+        )
+        record["recovery_path_score"] = recovery.get("path_score")
+        record["release_result_path"] = (
+            str(document_dir / f"{clip['validation_id']}.json") if document else None
+        )
+        records.append(record)
+        if document:
+            document_dir.mkdir(parents=True, exist_ok=True)
+            _write_json(document_dir / f"{clip['validation_id']}.json", document)
+
+    output = {
+        "schema_version": "1.0",
+        "created_at": _utc_now(),
+        "algorithm": "Release Pipeline V1.3 + Observation Recovery V1",
+        "v1_3_reference": str(V1_3_RESULTS_PATH),
+        "human_annotations_reference": str(ANNOTATIONS_PATH),
+        "clip_count": len(records),
+        "ready_prediction_count": sum(
+            1 for item in records if item["prediction_status"] == "ready"
+        ),
+        "unresolved_or_failed_count": sum(
+            1 for item in records if item["prediction_status"] != "ready"
+        ),
+        "records": records,
+    }
+    _write_json(V1_3_RECOVERY_RESULTS_PATH, output)
+    recovery_metrics = _metrics_for_records(
+        records=records,
+        annotations=annotations,
+        output_path=V1_3_RECOVERY_METRICS_PATH,
+    )
+    comparison = _comparison_document_v1_3_recovery(
+        v1_3_records=v1_3.get("records", []),
+        recovery_records=records,
+        annotations=annotations,
+        v1_3_metrics=_read_json(V1_3_METRICS_PATH),
+        recovery_metrics=recovery_metrics,
+    )
+    _write_json(V1_3_RECOVERY_COMPARE_PATH, comparison)
+    _write_recovery_comparison_csv(comparison["per_delivery_comparison"])
+    V1_3_RECOVERY_COMPARE_MD_PATH.write_text(
+        _recovery_comparison_markdown(comparison),
+        encoding="utf-8",
+    )
+    return output
+
+
+def _metrics_for_records(
+    *,
+    records: list[dict[str, Any]],
+    annotations: dict[str, Any],
+    output_path: Path,
+) -> dict[str, Any]:
     annotation_by_id = {
         item["validation_id"]: item for item in annotations.get("annotations", [])
     }
-    records = baseline.get("records", [])
     evaluated = []
     for record in records:
         annotation = annotation_by_id.get(record["validation_id"])
@@ -293,8 +658,9 @@ def command_metrics() -> dict[str, Any]:
             }
             for item in evaluated
         ],
+        "prediction_bias_counts": _prediction_bias_counts(evaluated, records),
     }
-    _write_json(METRICS_PATH, metrics)
+    _write_json(output_path, metrics)
     return metrics
 
 
@@ -538,6 +904,7 @@ def _baseline_record(
 ) -> dict[str, Any]:
     result = (document or {}).get("result") or {}
     evidence = result.get("evidence") or {}
+    arbitration = evidence.get("arbitration") or {}
     provenance = result.get("provenance") or {}
     arm = provenance.get("bowling_arm") or {}
     frame_uncertainty = result.get("frame_uncertainty")
@@ -572,6 +939,13 @@ def _baseline_record(
         "pose_confidence": evidence.get("pose_confidence"),
         "pose_keypoint_confidence": evidence.get("pose_keypoint_confidence"),
         "wrist_confidence": evidence.get("wrist_confidence"),
+        "wrist_used": evidence.get("wrist_used"),
+        "arbitration_candidate_type": arbitration.get("selected_candidate_type"),
+        "arbitration_reason_codes": arbitration.get("selected_reason_codes") or [],
+        "arbitration_score": arbitration.get("selected_arbitration_score"),
+        "confidence_disagreement_penalty": arbitration.get(
+            "confidence_disagreement_penalty"
+        ),
         "detector_model": provenance.get("ball_detector_model_key"),
         "tracking_provenance": evidence.get("tracker_provenance"),
         "tracking_version": provenance.get("tracking_version"),
@@ -582,6 +956,33 @@ def _baseline_record(
             else None
         ),
     }
+
+
+def _input_compatibility_class(
+    run_status: str,
+    error_message: str | None,
+    document: dict[str, Any] | None,
+) -> str:
+    if error_message:
+        lowered = error_message.lower()
+        if (
+            "malformed" in lowered
+            or "incompatible" in lowered
+            or "ready primary ball track" in lowered
+            or "primary ball track is required" in lowered
+        ):
+            return "malformed_or_incompatible_historical_tracking_input"
+        if "missing" in lowered or "detections" in lowered:
+            return "missing_required_persisted_candidate_data"
+        return "failed_unknown"
+    recovery = (document or {}).get("release_region_observation_recovery") or {}
+    if recovery.get("status") == "NO_CREDIBLE_RELEASE_REGION_CHAIN":
+        return "valid_modern_inputs_insufficient_observation_evidence"
+    if recovery.get("status") == "ready":
+        return "valid_modern_inputs_recovery_ready"
+    if run_status == "failed":
+        return "failed_unknown"
+    return "valid_modern_inputs_no_recovery_needed_or_skipped"
 
 
 def _run_current_release_v1(
@@ -602,6 +1003,227 @@ def _run_current_release_v1(
         job_id=f"validation_baseline_{analysis_id}",
         bowler_pose_sequence=None,
     )
+
+
+def _run_release_v1_1_for_validation(
+    analysis_id: str,
+    *,
+    pose_provider: str,
+    pose_device: str,
+    schema_version: str = "1.1",
+    algorithm: str = "Release Point V1.1 pre-track reconstruction",
+) -> dict[str, Any]:
+    os.environ.setdefault("CRICVISION_RELEASE_POSE_PROVIDER", pose_provider)
+    os.environ.setdefault("CRICVISION_RELEASE_POSE_DEVICE", pose_device)
+    from Backends.src.release_point.release_engine import (
+        ReleaseEstimator,
+        candidate_score_to_dict,
+    )
+    from services.api.services.video_release_point_service import (
+        _load_detection_document,
+        _load_tracking_document,
+        _provenance,
+        _read_json as _service_read_json,
+        _resolve_pose_context,
+        load_release_analysis_input,
+    )
+
+    release_input = load_release_analysis_input(analysis_id)
+    detections = _load_detection_document(release_input)
+    tracking = _load_tracking_document(release_input)
+    calibration = _service_read_json(Path(release_input.calibration_path), "calibration.json")
+    calibration_v2 = (
+        _service_read_json(Path(release_input.calibration_v2_path), "calibration_v2.json")
+        if release_input.calibration_v2_path
+        else None
+    )
+    camera_pose = (
+        _service_read_json(Path(release_input.camera_pose_path), "camera_pose.json")
+        if release_input.camera_pose_path
+        else None
+    )
+    pose_context = _resolve_pose_context(
+        release_input,
+        calibration=calibration,
+        calibration_v2=calibration_v2,
+        camera_pose=camera_pose,
+        tracking=tracking,
+        bowler_pose_sequence=_persisted_bowler_pose_sequence(analysis_id),
+    )
+    started = _utc_now()
+    estimate = ReleaseEstimator().estimate(
+        analysis_id=analysis_id,
+        fps=release_input.fps,
+        detections_document=detections,
+        tracking_document=tracking,
+        bowler_pose_sequence=pose_context.bowler_pose_sequence,
+        provenance=_provenance(
+            detections,
+            tracking,
+            calibration,
+            calibration_v2,
+            camera_pose,
+            pose_context,
+        ),
+    )
+    return {
+        "schema_version": schema_version,
+        "analysis_id": analysis_id,
+        "created_at": started,
+        "completed_at": _utc_now(),
+        "algorithm": algorithm,
+        "result": estimate.result,
+        "candidate_scores": [
+            candidate_score_to_dict(score) for score in estimate.candidate_scores
+        ],
+        "quality_summary": estimate.quality_summary,
+        "message": estimate.message,
+    }
+
+
+def _run_release_v1_2_for_validation(
+    analysis_id: str,
+    *,
+    pose_provider: str,
+    pose_device: str,
+) -> dict[str, Any]:
+    return _run_release_v1_1_for_validation(
+        analysis_id,
+        pose_provider=pose_provider,
+        pose_device=pose_device,
+        schema_version="1.2",
+        algorithm="Release Point V1.2 hypothesis arbitration",
+    )
+
+
+def _run_release_v1_3_for_validation(
+    analysis_id: str,
+    *,
+    pose_provider: str,
+    pose_device: str,
+) -> dict[str, Any]:
+    return _run_release_v1_1_for_validation(
+        analysis_id,
+        pose_provider=pose_provider,
+        pose_device=pose_device,
+        schema_version="1.3",
+        algorithm="Release Point V1.3 late free-flight bias guard",
+    )
+
+
+def _run_release_v1_3_recovery_for_validation(
+    analysis_id: str,
+    *,
+    pose_provider: str,
+    pose_device: str,
+) -> dict[str, Any]:
+    os.environ.setdefault("CRICVISION_RELEASE_POSE_PROVIDER", pose_provider)
+    os.environ.setdefault("CRICVISION_RELEASE_POSE_DEVICE", pose_device)
+    from Backends.src.release_point.features import (
+        ReleasePointConfig,
+        parse_bowler_pose_sequence,
+        parse_detection_observations,
+        parse_track_observations,
+    )
+    from Backends.src.release_point.release_engine import (
+        ReleaseEstimator,
+        candidate_score_to_dict,
+    )
+    from Backends.src.release_point.release_region_recovery import (
+        augment_tracking_with_recovery,
+        recover_release_region_observations,
+    )
+    from services.api.services.video_release_point_service import (
+        _load_detection_document,
+        _load_tracking_document,
+        _provenance,
+        _read_json as _service_read_json,
+        _resolve_pose_context,
+        load_release_analysis_input,
+    )
+
+    release_input = load_release_analysis_input(analysis_id)
+    detections = _load_detection_document(release_input)
+    tracking = _load_tracking_document(release_input)
+    calibration = _service_read_json(Path(release_input.calibration_path), "calibration.json")
+    calibration_v2 = (
+        _service_read_json(Path(release_input.calibration_v2_path), "calibration_v2.json")
+        if release_input.calibration_v2_path
+        else None
+    )
+    camera_pose = (
+        _service_read_json(Path(release_input.camera_pose_path), "camera_pose.json")
+        if release_input.camera_pose_path
+        else None
+    )
+    pose_context = _resolve_pose_context(
+        release_input,
+        calibration=calibration,
+        calibration_v2=calibration_v2,
+        camera_pose=camera_pose,
+        tracking=tracking,
+        bowler_pose_sequence=_persisted_bowler_pose_sequence(analysis_id),
+    )
+    config = ReleasePointConfig()
+    recovery = recover_release_region_observations(
+        detections_by_frame=parse_detection_observations(detections),
+        primary_track=parse_track_observations(tracking),
+        pose_sequence=parse_bowler_pose_sequence(pose_context.bowler_pose_sequence),
+        config=config,
+    )
+    augmented_tracking = augment_tracking_with_recovery(tracking, recovery)
+    provenance = _provenance(
+        detections,
+        augmented_tracking,
+        calibration,
+        calibration_v2,
+        camera_pose,
+        pose_context,
+    )
+    provenance["release_region_observation_recovery"] = {
+        "status": recovery.status,
+        "recovered_observation_count": len(recovery.recovered_observations),
+        "path_score": recovery.path_score,
+    }
+    started = _utc_now()
+    estimate = ReleaseEstimator().estimate(
+        analysis_id=analysis_id,
+        fps=release_input.fps,
+        detections_document=detections,
+        tracking_document=augmented_tracking,
+        bowler_pose_sequence=pose_context.bowler_pose_sequence,
+        provenance=provenance,
+    )
+    return {
+        "schema_version": "1.0",
+        "analysis_id": analysis_id,
+        "created_at": started,
+        "completed_at": _utc_now(),
+        "algorithm": "Release Pipeline V1.3 + Observation Recovery V1",
+        "result": estimate.result,
+        "candidate_scores": [
+            candidate_score_to_dict(score) for score in estimate.candidate_scores
+        ],
+        "quality_summary": estimate.quality_summary,
+        "release_region_observation_recovery": recovery.diagnostics(),
+        "message": estimate.message,
+    }
+
+
+def _persisted_bowler_pose_sequence(analysis_id: str) -> dict[str, Any] | None:
+    path = VIDEO_ANALYSIS_ROOT / analysis_id / "reports" / "rtmpose_validation.json"
+    if not path.is_file():
+        return None
+    document = _read_json(path)
+    if document.get("status") != "ready":
+        return None
+    bowler = dict(document.get("bowler") or {})
+    if not bowler:
+        return None
+    bowler.setdefault("provider", document.get("pose_provider") or {})
+    if document.get("bowling_arm") and not bowler.get("bowling_arm"):
+        bowler["bowling_arm"] = document.get("bowling_arm")
+    return bowler
 
 
 def _annotation_template(record: dict[str, Any]) -> dict[str, Any]:
@@ -764,6 +1386,860 @@ def _confidence_bins(evaluated: list[dict[str, Any]]) -> dict[str, Any]:
         }
         for key, errors in bins.items()
     }
+
+
+def _prediction_bias_counts(
+    evaluated: list[dict[str, Any]],
+    records: list[dict[str, Any]],
+) -> dict[str, int]:
+    signed_errors = []
+    for item in evaluated:
+        predicted = item["record"].get("predicted_release_frame")
+        human = item["annotation"].get("human_release_frame")
+        if predicted is None or not isinstance(human, int):
+            continue
+        signed_errors.append(int(predicted) - human)
+    return {
+        "early": sum(1 for error in signed_errors if error < 0),
+        "late": sum(1 for error in signed_errors if error > 0),
+        "exact": sum(1 for error in signed_errors if error == 0),
+        "no_prediction": sum(
+            1 for record in records if record.get("predicted_release_frame") is None
+        ),
+    }
+
+
+def _comparison_document(
+    *,
+    v1_records: list[dict[str, Any]],
+    v1_1_records: list[dict[str, Any]],
+    annotations: dict[str, Any],
+    v1_metrics: dict[str, Any],
+    v1_1_metrics: dict[str, Any],
+) -> dict[str, Any]:
+    annotation_by_id = {
+        item["validation_id"]: item for item in annotations.get("annotations", [])
+    }
+    v1_by_id = {record["validation_id"]: record for record in v1_records}
+    v1_1_by_id = {record["validation_id"]: record for record in v1_1_records}
+    metric_keys = [
+        "prediction_coverage",
+        "unresolved_rate",
+        "exact_frame_accuracy",
+        "within_1_frame_accuracy",
+        "within_2_frame_accuracy",
+        "mean_absolute_frame_error",
+        "median_absolute_frame_error",
+        "catastrophic_failure_rate",
+    ]
+    metric_comparison = [
+        {
+            "metric": key,
+            "v1": v1_metrics.get(key),
+            "v1_1": v1_1_metrics.get(key),
+            "difference": _metric_difference(v1_metrics.get(key), v1_1_metrics.get(key)),
+        }
+        for key in metric_keys
+    ]
+    metric_comparison.append(
+        {
+            "metric": "early_prediction_count",
+            "v1": (v1_metrics.get("prediction_bias_counts") or {}).get("early"),
+            "v1_1": (v1_1_metrics.get("prediction_bias_counts") or {}).get("early"),
+            "difference": _metric_difference(
+                (v1_metrics.get("prediction_bias_counts") or {}).get("early"),
+                (v1_1_metrics.get("prediction_bias_counts") or {}).get("early"),
+            ),
+        }
+    )
+    metric_comparison.append(
+        {
+            "metric": "late_prediction_count",
+            "v1": (v1_metrics.get("prediction_bias_counts") or {}).get("late"),
+            "v1_1": (v1_1_metrics.get("prediction_bias_counts") or {}).get("late"),
+            "difference": _metric_difference(
+                (v1_metrics.get("prediction_bias_counts") or {}).get("late"),
+                (v1_1_metrics.get("prediction_bias_counts") or {}).get("late"),
+            ),
+        }
+    )
+    per_delivery = []
+    for validation_id in sorted(v1_by_id):
+        annotation = annotation_by_id.get(validation_id, {})
+        human = annotation.get("human_release_frame")
+        v1 = v1_by_id[validation_id]
+        v1_1 = v1_1_by_id.get(validation_id, {})
+        v1_error = _absolute_error(v1.get("predicted_release_frame"), human)
+        v1_1_error = _absolute_error(v1_1.get("predicted_release_frame"), human)
+        per_delivery.append(
+            {
+                "validation_id": validation_id,
+                "analysis_id": v1.get("analysis_id"),
+                "human_frame": human,
+                "v1_prediction": v1.get("predicted_release_frame"),
+                "v1_error": v1_error,
+                "v1_1_prediction": v1_1.get("predicted_release_frame"),
+                "v1_1_error": v1_1_error,
+                "v1_1_status": v1_1.get("prediction_status"),
+                "v1_1_confidence": v1_1.get("confidence"),
+                "change": _delivery_change(v1_error, v1_1_error),
+                "v1_1_quality_flags": v1_1.get("quality_flags", []),
+            }
+        )
+    return {
+        "schema_version": "1.1",
+        "created_at": _utc_now(),
+        "metric_comparison": metric_comparison,
+        "per_delivery_comparison": per_delivery,
+        "improved_validation_ids": [
+            item["validation_id"] for item in per_delivery if item["change"] == "improved"
+        ],
+        "regressed_validation_ids": [
+            item["validation_id"] for item in per_delivery if item["change"] == "regressed"
+        ],
+        "unchanged_validation_ids": [
+            item["validation_id"] for item in per_delivery if item["change"] == "unchanged"
+        ],
+        "new_predictions": [
+            item["validation_id"]
+            for item in per_delivery
+            if item["v1_prediction"] is None and item["v1_1_prediction"] is not None
+        ],
+        "lost_predictions": [
+            item["validation_id"]
+            for item in per_delivery
+            if item["v1_prediction"] is not None and item["v1_1_prediction"] is None
+        ],
+    }
+
+
+def _comparison_document_v1_v1_1_v1_2(
+    *,
+    v1_records: list[dict[str, Any]],
+    v1_1_records: list[dict[str, Any]],
+    v1_2_records: list[dict[str, Any]],
+    annotations: dict[str, Any],
+    v1_metrics: dict[str, Any],
+    v1_1_metrics: dict[str, Any],
+    v1_2_metrics: dict[str, Any],
+) -> dict[str, Any]:
+    annotation_by_id = {
+        item["validation_id"]: item for item in annotations.get("annotations", [])
+    }
+    v1_by_id = {record["validation_id"]: record for record in v1_records}
+    v1_1_by_id = {record["validation_id"]: record for record in v1_1_records}
+    v1_2_by_id = {record["validation_id"]: record for record in v1_2_records}
+    metric_keys = [
+        "prediction_coverage",
+        "unresolved_rate",
+        "exact_frame_accuracy",
+        "within_1_frame_accuracy",
+        "within_2_frame_accuracy",
+        "mean_absolute_frame_error",
+        "median_absolute_frame_error",
+        "catastrophic_failure_rate",
+    ]
+    metric_comparison = [
+        {
+            "metric": key,
+            "v1": v1_metrics.get(key),
+            "v1_1": v1_1_metrics.get(key),
+            "v1_2": v1_2_metrics.get(key),
+            "v1_2_change_from_v1": _metric_difference(
+                v1_metrics.get(key), v1_2_metrics.get(key)
+            ),
+            "v1_2_change_from_v1_1": _metric_difference(
+                v1_1_metrics.get(key), v1_2_metrics.get(key)
+            ),
+        }
+        for key in metric_keys
+    ]
+    for bias_key in ("early", "late", "exact", "no_prediction"):
+        v1_bias = (v1_metrics.get("prediction_bias_counts") or {}).get(bias_key)
+        v1_1_bias = (v1_1_metrics.get("prediction_bias_counts") or {}).get(bias_key)
+        v1_2_bias = (v1_2_metrics.get("prediction_bias_counts") or {}).get(bias_key)
+        metric_comparison.append(
+            {
+                "metric": f"{bias_key}_prediction_count",
+                "v1": v1_bias,
+                "v1_1": v1_1_bias,
+                "v1_2": v1_2_bias,
+                "v1_2_change_from_v1": _metric_difference(v1_bias, v1_2_bias),
+                "v1_2_change_from_v1_1": _metric_difference(v1_1_bias, v1_2_bias),
+            }
+        )
+
+    per_delivery = []
+    for validation_id in sorted(v1_by_id):
+        annotation = annotation_by_id.get(validation_id, {})
+        human = annotation.get("human_release_frame")
+        v1 = v1_by_id[validation_id]
+        v1_1 = v1_1_by_id.get(validation_id, {})
+        v1_2 = v1_2_by_id.get(validation_id, {})
+        v1_error = _absolute_error(v1.get("predicted_release_frame"), human)
+        v1_1_error = _absolute_error(v1_1.get("predicted_release_frame"), human)
+        v1_2_error = _absolute_error(v1_2.get("predicted_release_frame"), human)
+        per_delivery.append(
+            {
+                "validation_id": validation_id,
+                "analysis_id": v1.get("analysis_id"),
+                "human_frame": human,
+                "v1_prediction": v1.get("predicted_release_frame"),
+                "v1_error": v1_error,
+                "v1_1_prediction": v1_1.get("predicted_release_frame"),
+                "v1_1_error": v1_1_error,
+                "v1_2_prediction": v1_2.get("predicted_release_frame"),
+                "v1_2_error": v1_2_error,
+                "v1_2_status": v1_2.get("prediction_status"),
+                "v1_2_confidence": v1_2.get("confidence"),
+                "change_from_v1": _delivery_change(v1_error, v1_2_error),
+                "change_from_v1_1": _delivery_change(v1_1_error, v1_2_error),
+                "v1_2_arbitration_candidate_type": v1_2.get(
+                    "arbitration_candidate_type"
+                ),
+                "v1_2_arbitration_reason_codes": v1_2.get(
+                    "arbitration_reason_codes",
+                    [],
+                ),
+                "v1_2_quality_flags": v1_2.get("quality_flags", []),
+            }
+        )
+    return {
+        "schema_version": "1.2",
+        "created_at": _utc_now(),
+        "metric_comparison": metric_comparison,
+        "per_delivery_comparison": per_delivery,
+        "improved_from_v1_validation_ids": [
+            item["validation_id"]
+            for item in per_delivery
+            if item["change_from_v1"] == "improved"
+        ],
+        "regressed_from_v1_validation_ids": [
+            item["validation_id"]
+            for item in per_delivery
+            if item["change_from_v1"] == "regressed"
+        ],
+        "improved_from_v1_1_validation_ids": [
+            item["validation_id"]
+            for item in per_delivery
+            if item["change_from_v1_1"] == "improved"
+        ],
+        "regressed_from_v1_1_validation_ids": [
+            item["validation_id"]
+            for item in per_delivery
+            if item["change_from_v1_1"] == "regressed"
+        ],
+        "unresolved_v1_2_validation_ids": [
+            item["validation_id"]
+            for item in per_delivery
+            if item["v1_2_prediction"] is None
+        ],
+    }
+
+
+def _comparison_document_v1_v1_1_v1_2_v1_3(
+    *,
+    v1_records: list[dict[str, Any]],
+    v1_1_records: list[dict[str, Any]],
+    v1_2_records: list[dict[str, Any]],
+    v1_3_records: list[dict[str, Any]],
+    annotations: dict[str, Any],
+    v1_metrics: dict[str, Any],
+    v1_1_metrics: dict[str, Any],
+    v1_2_metrics: dict[str, Any],
+    v1_3_metrics: dict[str, Any],
+) -> dict[str, Any]:
+    annotation_by_id = {
+        item["validation_id"]: item for item in annotations.get("annotations", [])
+    }
+    by_version = {
+        "v1": {record["validation_id"]: record for record in v1_records},
+        "v1_1": {record["validation_id"]: record for record in v1_1_records},
+        "v1_2": {record["validation_id"]: record for record in v1_2_records},
+        "v1_3": {record["validation_id"]: record for record in v1_3_records},
+    }
+    metric_sources = {
+        "v1": v1_metrics,
+        "v1_1": v1_1_metrics,
+        "v1_2": v1_2_metrics,
+        "v1_3": v1_3_metrics,
+    }
+    metric_keys = [
+        "prediction_coverage",
+        "unresolved_rate",
+        "exact_frame_accuracy",
+        "within_1_frame_accuracy",
+        "within_2_frame_accuracy",
+        "mean_absolute_frame_error",
+        "median_absolute_frame_error",
+        "catastrophic_failure_rate",
+    ]
+    metric_comparison = []
+    for key in metric_keys:
+        row = {"metric": key}
+        for version, metrics in metric_sources.items():
+            row[version] = metrics.get(key)
+        row["v1_3_change_from_v1"] = _metric_difference(row["v1"], row["v1_3"])
+        row["v1_3_change_from_v1_2"] = _metric_difference(row["v1_2"], row["v1_3"])
+        metric_comparison.append(row)
+    for bias_key in ("early", "late", "exact", "no_prediction"):
+        row = {"metric": f"{bias_key}_prediction_count"}
+        for version, metrics in metric_sources.items():
+            row[version] = (metrics.get("prediction_bias_counts") or {}).get(bias_key)
+        row["v1_3_change_from_v1"] = _metric_difference(row["v1"], row["v1_3"])
+        row["v1_3_change_from_v1_2"] = _metric_difference(row["v1_2"], row["v1_3"])
+        metric_comparison.append(row)
+
+    per_delivery = []
+    for validation_id in sorted(by_version["v1"]):
+        annotation = annotation_by_id.get(validation_id, {})
+        human = annotation.get("human_release_frame")
+        v1 = by_version["v1"][validation_id]
+        v1_1 = by_version["v1_1"].get(validation_id, {})
+        v1_2 = by_version["v1_2"].get(validation_id, {})
+        v1_3 = by_version["v1_3"].get(validation_id, {})
+        v1_error = _absolute_error(v1.get("predicted_release_frame"), human)
+        v1_1_error = _absolute_error(v1_1.get("predicted_release_frame"), human)
+        v1_2_error = _absolute_error(v1_2.get("predicted_release_frame"), human)
+        v1_3_error = _absolute_error(v1_3.get("predicted_release_frame"), human)
+        per_delivery.append(
+            {
+                "validation_id": validation_id,
+                "analysis_id": v1.get("analysis_id"),
+                "human_frame": human,
+                "v1_prediction": v1.get("predicted_release_frame"),
+                "v1_error": v1_error,
+                "v1_1_prediction": v1_1.get("predicted_release_frame"),
+                "v1_1_error": v1_1_error,
+                "v1_2_prediction": v1_2.get("predicted_release_frame"),
+                "v1_2_error": v1_2_error,
+                "v1_3_prediction": v1_3.get("predicted_release_frame"),
+                "v1_3_error": v1_3_error,
+                "v1_3_status": v1_3.get("prediction_status"),
+                "v1_3_confidence": v1_3.get("confidence"),
+                "change_from_v1": _delivery_change(v1_error, v1_3_error),
+                "change_from_v1_2": _delivery_change(v1_2_error, v1_3_error),
+                "v1_3_arbitration_candidate_type": v1_3.get(
+                    "arbitration_candidate_type"
+                ),
+                "v1_3_arbitration_reason_codes": v1_3.get(
+                    "arbitration_reason_codes",
+                    [],
+                ),
+                "v1_3_quality_flags": v1_3.get("quality_flags", []),
+            }
+        )
+    return {
+        "schema_version": "1.3",
+        "created_at": _utc_now(),
+        "metric_comparison": metric_comparison,
+        "per_delivery_comparison": per_delivery,
+        "improved_from_v1_validation_ids": [
+            item["validation_id"]
+            for item in per_delivery
+            if item["change_from_v1"] == "improved"
+        ],
+        "regressed_from_v1_validation_ids": [
+            item["validation_id"]
+            for item in per_delivery
+            if item["change_from_v1"] == "regressed"
+        ],
+        "improved_from_v1_2_validation_ids": [
+            item["validation_id"]
+            for item in per_delivery
+            if item["change_from_v1_2"] == "improved"
+        ],
+        "regressed_from_v1_2_validation_ids": [
+            item["validation_id"]
+            for item in per_delivery
+            if item["change_from_v1_2"] == "regressed"
+        ],
+        "unresolved_v1_3_validation_ids": [
+            item["validation_id"]
+            for item in per_delivery
+            if item["v1_3_prediction"] is None
+        ],
+    }
+
+
+def _comparison_document_v1_3_recovery(
+    *,
+    v1_3_records: list[dict[str, Any]],
+    recovery_records: list[dict[str, Any]],
+    annotations: dict[str, Any],
+    v1_3_metrics: dict[str, Any],
+    recovery_metrics: dict[str, Any],
+) -> dict[str, Any]:
+    annotation_by_id = {
+        item["validation_id"]: item for item in annotations.get("annotations", [])
+    }
+    v1_3_by_id = {record["validation_id"]: record for record in v1_3_records}
+    recovery_by_id = {record["validation_id"]: record for record in recovery_records}
+    metric_keys = [
+        "prediction_coverage",
+        "unresolved_rate",
+        "exact_frame_accuracy",
+        "within_1_frame_accuracy",
+        "within_2_frame_accuracy",
+        "mean_absolute_frame_error",
+        "median_absolute_frame_error",
+        "catastrophic_failure_rate",
+    ]
+    metric_comparison = []
+    for key in metric_keys:
+        metric_comparison.append(
+            {
+                "metric": key,
+                "v1_3": v1_3_metrics.get(key),
+                "v1_3_observation_recovery": recovery_metrics.get(key),
+                "difference": _metric_difference(
+                    v1_3_metrics.get(key),
+                    recovery_metrics.get(key),
+                ),
+            }
+        )
+    for bias_key in ("early", "late", "exact", "no_prediction"):
+        v1_3_value = (v1_3_metrics.get("prediction_bias_counts") or {}).get(bias_key)
+        recovery_value = (recovery_metrics.get("prediction_bias_counts") or {}).get(bias_key)
+        metric_comparison.append(
+            {
+                "metric": f"{bias_key}_prediction_count",
+                "v1_3": v1_3_value,
+                "v1_3_observation_recovery": recovery_value,
+                "difference": _metric_difference(v1_3_value, recovery_value),
+            }
+        )
+
+    per_delivery = []
+    for validation_id in sorted(v1_3_by_id):
+        annotation = annotation_by_id.get(validation_id, {})
+        human = annotation.get("human_release_frame")
+        v1_3 = v1_3_by_id[validation_id]
+        recovery = recovery_by_id.get(validation_id, {})
+        v1_3_error = _absolute_error(v1_3.get("predicted_release_frame"), human)
+        recovery_error = _absolute_error(recovery.get("predicted_release_frame"), human)
+        prediction_changed = (
+            v1_3.get("predicted_release_frame")
+            != recovery.get("predicted_release_frame")
+        )
+        per_delivery.append(
+            {
+                "validation_id": validation_id,
+                "analysis_id": v1_3.get("analysis_id"),
+                "human_frame": human,
+                "v1_3_prediction": v1_3.get("predicted_release_frame"),
+                "v1_3_error": v1_3_error,
+                "recovery_prediction": recovery.get("predicted_release_frame"),
+                "recovery_error": recovery_error,
+                "prediction_changed": prediction_changed,
+                "change": _delivery_change(v1_3_error, recovery_error),
+                "recovery_status": recovery.get("recovery_status"),
+                "recovered_observation_count": recovery.get("recovered_observation_count"),
+                "recovery_path_score": recovery.get("recovery_path_score"),
+                "input_compatibility_class": recovery.get("input_compatibility_class"),
+                "recovery_quality_flags": recovery.get("quality_flags", []),
+            }
+        )
+
+    changed = [item for item in per_delivery if item["prediction_changed"]]
+    return {
+        "schema_version": "1.0",
+        "created_at": _utc_now(),
+        "metric_comparison": metric_comparison,
+        "observation_recovery_summary": {
+            "clips_with_recovered_candidates": sum(
+                1 for item in per_delivery if (item.get("recovered_observation_count") or 0) > 0
+            ),
+            "total_recovered_observations": sum(
+                item.get("recovered_observation_count") or 0 for item in per_delivery
+            ),
+            "paths_connected_to_primary_free_flight": sum(
+                1 for item in per_delivery if item.get("recovery_status") == "ready"
+            ),
+            "prediction_changed_count": len(changed),
+            "changed_predictions_improved": sum(
+                1 for item in changed if item["change"] == "improved"
+            ),
+            "changed_predictions_regressed": sum(
+                1 for item in changed if item["change"] == "regressed"
+            ),
+            "changed_predictions_unchanged_error": sum(
+                1 for item in changed if item["change"] == "unchanged"
+            ),
+            "input_compatibility_counts": _count_by(
+                per_delivery,
+                "input_compatibility_class",
+            ),
+        },
+        "per_delivery_comparison": per_delivery,
+        "improved_validation_ids": [
+            item["validation_id"] for item in per_delivery if item["change"] == "improved"
+        ],
+        "regressed_validation_ids": [
+            item["validation_id"] for item in per_delivery if item["change"] == "regressed"
+        ],
+        "unchanged_validation_ids": [
+            item["validation_id"] for item in per_delivery if item["change"] == "unchanged"
+        ],
+    }
+
+
+def _write_comparison_csv(rows: list[dict[str, Any]]) -> None:
+    fieldnames = [
+        "validation_id",
+        "analysis_id",
+        "human_frame",
+        "v1_prediction",
+        "v1_error",
+        "v1_1_prediction",
+        "v1_1_error",
+        "v1_1_status",
+        "v1_1_confidence",
+        "change",
+        "v1_1_quality_flags",
+    ]
+    with V1_COMPARE_CSV_PATH.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(
+                {
+                    key: json.dumps(row.get(key)) if isinstance(row.get(key), list) else row.get(key)
+                    for key in fieldnames
+                }
+            )
+
+
+def _write_comparison_v1_2_csv(rows: list[dict[str, Any]]) -> None:
+    fieldnames = [
+        "validation_id",
+        "analysis_id",
+        "human_frame",
+        "v1_prediction",
+        "v1_error",
+        "v1_1_prediction",
+        "v1_1_error",
+        "v1_2_prediction",
+        "v1_2_error",
+        "v1_2_status",
+        "v1_2_confidence",
+        "change_from_v1",
+        "change_from_v1_1",
+        "v1_2_arbitration_candidate_type",
+        "v1_2_arbitration_reason_codes",
+        "v1_2_quality_flags",
+    ]
+    with V1_2_COMPARE_CSV_PATH.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(
+                {
+                    key: json.dumps(row.get(key)) if isinstance(row.get(key), list) else row.get(key)
+                    for key in fieldnames
+                }
+            )
+
+
+def _write_comparison_v1_3_csv(rows: list[dict[str, Any]]) -> None:
+    fieldnames = [
+        "validation_id",
+        "analysis_id",
+        "human_frame",
+        "v1_prediction",
+        "v1_error",
+        "v1_1_prediction",
+        "v1_1_error",
+        "v1_2_prediction",
+        "v1_2_error",
+        "v1_3_prediction",
+        "v1_3_error",
+        "v1_3_status",
+        "v1_3_confidence",
+        "change_from_v1",
+        "change_from_v1_2",
+        "v1_3_arbitration_candidate_type",
+        "v1_3_arbitration_reason_codes",
+        "v1_3_quality_flags",
+    ]
+    with V1_3_COMPARE_CSV_PATH.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(
+                {
+                    key: json.dumps(row.get(key)) if isinstance(row.get(key), list) else row.get(key)
+                    for key in fieldnames
+                }
+            )
+
+
+def _write_recovery_comparison_csv(rows: list[dict[str, Any]]) -> None:
+    fieldnames = [
+        "validation_id",
+        "analysis_id",
+        "human_frame",
+        "v1_3_prediction",
+        "v1_3_error",
+        "recovery_prediction",
+        "recovery_error",
+        "prediction_changed",
+        "change",
+        "recovery_status",
+        "recovered_observation_count",
+        "recovery_path_score",
+        "input_compatibility_class",
+        "recovery_quality_flags",
+    ]
+    with V1_3_RECOVERY_COMPARE_CSV_PATH.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(
+                {
+                    key: json.dumps(row.get(key)) if isinstance(row.get(key), list) else row.get(key)
+                    for key in fieldnames
+                }
+            )
+
+
+def _comparison_markdown(comparison: dict[str, Any]) -> str:
+    lines = [
+        "# Release Point V1 vs V1.1 Validation",
+        "",
+        f"Generated: {comparison['created_at']}",
+        "",
+        "## Metrics",
+        "",
+        "| Metric | V1 | V1.1 | Difference |",
+        "|---|---:|---:|---:|",
+    ]
+    for row in comparison["metric_comparison"]:
+        lines.append(
+            f"| {row['metric']} | {_fmt_md(row['v1'])} | {_fmt_md(row['v1_1'])} | {_fmt_md(row['difference'])} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Per Delivery",
+            "",
+            "| Validation | Human | V1 Pred | V1 Err | V1.1 Pred | V1.1 Err | Change |",
+            "|---|---:|---:|---:|---:|---:|---|",
+        ]
+    )
+    for row in comparison["per_delivery_comparison"]:
+        lines.append(
+            "| {validation_id} | {human_frame} | {v1_prediction} | {v1_error} | "
+            "{v1_1_prediction} | {v1_1_error} | {change} |".format(
+                **{key: _fmt_md(value) for key, value in row.items()}
+            )
+        )
+    lines.extend(
+        [
+            "",
+            f"- Improved: {', '.join(comparison['improved_validation_ids']) or 'none'}",
+            f"- Regressed: {', '.join(comparison['regressed_validation_ids']) or 'none'}",
+            f"- New predictions: {', '.join(comparison['new_predictions']) or 'none'}",
+            f"- Lost predictions: {', '.join(comparison['lost_predictions']) or 'none'}",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _comparison_v1_2_markdown(comparison: dict[str, Any]) -> str:
+    lines = [
+        "# Release Point V1 vs V1.1 vs V1.2 Validation",
+        "",
+        f"Generated: {comparison['created_at']}",
+        "",
+        "## Metrics",
+        "",
+        "| Metric | V1 | V1.1 | V1.2 | V1.2 - V1 | V1.2 - V1.1 |",
+        "|---|---:|---:|---:|---:|---:|",
+    ]
+    for row in comparison["metric_comparison"]:
+        lines.append(
+            "| {metric} | {v1} | {v1_1} | {v1_2} | {from_v1} | {from_v1_1} |".format(
+                metric=row["metric"],
+                v1=_fmt_md(row["v1"]),
+                v1_1=_fmt_md(row["v1_1"]),
+                v1_2=_fmt_md(row["v1_2"]),
+                from_v1=_fmt_md(row["v1_2_change_from_v1"]),
+                from_v1_1=_fmt_md(row["v1_2_change_from_v1_1"]),
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "## Per Delivery",
+            "",
+            "| Validation | Human | V1 Pred | V1 Err | V1.1 Pred | V1.1 Err | V1.2 Pred | V1.2 Err | From V1.1 | Type |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---|---|",
+        ]
+    )
+    for row in comparison["per_delivery_comparison"]:
+        lines.append(
+            "| {validation_id} | {human_frame} | {v1_prediction} | {v1_error} | "
+            "{v1_1_prediction} | {v1_1_error} | {v1_2_prediction} | {v1_2_error} | "
+            "{change_from_v1_1} | {v1_2_arbitration_candidate_type} |".format(
+                **{key: _fmt_md(value) for key, value in row.items()}
+            )
+        )
+    lines.extend(
+        [
+            "",
+            f"- Improved from V1: {', '.join(comparison['improved_from_v1_validation_ids']) or 'none'}",
+            f"- Regressed from V1: {', '.join(comparison['regressed_from_v1_validation_ids']) or 'none'}",
+            f"- Improved from V1.1: {', '.join(comparison['improved_from_v1_1_validation_ids']) or 'none'}",
+            f"- Regressed from V1.1: {', '.join(comparison['regressed_from_v1_1_validation_ids']) or 'none'}",
+            f"- V1.2 unresolved: {', '.join(comparison['unresolved_v1_2_validation_ids']) or 'none'}",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _comparison_v1_3_markdown(comparison: dict[str, Any]) -> str:
+    lines = [
+        "# Release Point V1 vs V1.1 vs V1.2 vs V1.3 Validation",
+        "",
+        f"Generated: {comparison['created_at']}",
+        "",
+        "## Metrics",
+        "",
+        "| Metric | V1 | V1.1 | V1.2 | V1.3 | V1.3 - V1 | V1.3 - V1.2 |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in comparison["metric_comparison"]:
+        lines.append(
+            "| {metric} | {v1} | {v1_1} | {v1_2} | {v1_3} | {from_v1} | {from_v1_2} |".format(
+                metric=row["metric"],
+                v1=_fmt_md(row["v1"]),
+                v1_1=_fmt_md(row["v1_1"]),
+                v1_2=_fmt_md(row["v1_2"]),
+                v1_3=_fmt_md(row["v1_3"]),
+                from_v1=_fmt_md(row["v1_3_change_from_v1"]),
+                from_v1_2=_fmt_md(row["v1_3_change_from_v1_2"]),
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "## Per Delivery",
+            "",
+            "| Validation | Human | V1 | V1 Err | V1.1 | V1.1 Err | V1.2 | V1.2 Err | V1.3 | V1.3 Err | From V1.2 | Type |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
+        ]
+    )
+    for row in comparison["per_delivery_comparison"]:
+        lines.append(
+            "| {validation_id} | {human_frame} | {v1_prediction} | {v1_error} | "
+            "{v1_1_prediction} | {v1_1_error} | {v1_2_prediction} | {v1_2_error} | "
+            "{v1_3_prediction} | {v1_3_error} | {change_from_v1_2} | "
+            "{v1_3_arbitration_candidate_type} |".format(
+                **{key: _fmt_md(value) for key, value in row.items()}
+            )
+        )
+    lines.extend(
+        [
+            "",
+            f"- Improved from V1: {', '.join(comparison['improved_from_v1_validation_ids']) or 'none'}",
+            f"- Regressed from V1: {', '.join(comparison['regressed_from_v1_validation_ids']) or 'none'}",
+            f"- Improved from V1.2: {', '.join(comparison['improved_from_v1_2_validation_ids']) or 'none'}",
+            f"- Regressed from V1.2: {', '.join(comparison['regressed_from_v1_2_validation_ids']) or 'none'}",
+            f"- V1.3 unresolved: {', '.join(comparison['unresolved_v1_3_validation_ids']) or 'none'}",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _recovery_comparison_markdown(comparison: dict[str, Any]) -> str:
+    summary = comparison["observation_recovery_summary"]
+    lines = [
+        "# Release Point V1.3 vs Observation Recovery V1",
+        "",
+        f"Generated: {comparison['created_at']}",
+        "",
+        "## Metrics",
+        "",
+        "| Metric | V1.3 | V1.3 + Recovery | Difference |",
+        "|---|---:|---:|---:|",
+    ]
+    for row in comparison["metric_comparison"]:
+        lines.append(
+            f"| {row['metric']} | {_fmt_md(row['v1_3'])} | {_fmt_md(row['v1_3_observation_recovery'])} | {_fmt_md(row['difference'])} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Observation Recovery",
+            "",
+            f"- Clips with recovered candidates: {summary['clips_with_recovered_candidates']}",
+            f"- Total recovered observations: {summary['total_recovered_observations']}",
+            f"- Paths connected to primary free flight: {summary['paths_connected_to_primary_free_flight']}",
+            f"- Predictions changed: {summary['prediction_changed_count']}",
+            f"- Changed improved/regressed/unchanged: {summary['changed_predictions_improved']}/{summary['changed_predictions_regressed']}/{summary['changed_predictions_unchanged_error']}",
+            f"- Input compatibility counts: {summary['input_compatibility_counts']}",
+            "",
+            "## Per Delivery",
+            "",
+            "| Validation | Human | V1.3 | V1.3 Err | Recovery | Recovery Err | Change | Recovery Status | Recovered Obs |",
+            "|---|---:|---:|---:|---:|---:|---|---|---:|",
+        ]
+    )
+    for row in comparison["per_delivery_comparison"]:
+        lines.append(
+            "| {validation_id} | {human_frame} | {v1_3_prediction} | {v1_3_error} | "
+            "{recovery_prediction} | {recovery_error} | {change} | {recovery_status} | "
+            "{recovered_observation_count} |".format(
+                **{key: _fmt_md(value) for key, value in row.items()}
+            )
+        )
+    lines.extend(
+        [
+            "",
+            f"- Improved: {', '.join(comparison['improved_validation_ids']) or 'none'}",
+            f"- Regressed: {', '.join(comparison['regressed_validation_ids']) or 'none'}",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _metric_difference(v1: Any, v1_1: Any) -> float | int | None:
+    if isinstance(v1, (int, float)) and isinstance(v1_1, (int, float)):
+        return round(v1_1 - v1, 6)
+    return None
+
+
+def _absolute_error(predicted: Any, human: Any) -> int | None:
+    if predicted is None or not isinstance(human, int):
+        return None
+    return abs(int(predicted) - human)
+
+
+def _delivery_change(v1_error: int | None, v1_1_error: int | None) -> str:
+    if v1_error is None and v1_1_error is None:
+        return "unchanged"
+    if v1_error is None and v1_1_error is not None:
+        return "new_prediction"
+    if v1_error is not None and v1_1_error is None:
+        return "regressed"
+    if v1_1_error < v1_error:
+        return "improved"
+    if v1_1_error > v1_error:
+        return "regressed"
+    return "unchanged"
+
+
+def _fmt_md(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        return f"{value:.6g}"
+    return str(value)
 
 
 def _method_breakdown(

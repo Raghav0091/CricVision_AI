@@ -29,6 +29,15 @@ outputs/
 outputs/release_validation/frame_packages/
 outputs/debug/
 outputs/review_frames/
+# Generated release-region dataset media stays local.
+datasets/release_region_v1/full_frames/
+datasets/release_region_v1/bowler_rois/
+datasets/release_region_v1/hand_rois/
+datasets/release_region_v1/metadata/
+datasets/release_region_v1/sources/
+datasets/release_region_v1/manifest.json
+datasets/release_region_v1/annotations.json
+datasets/release_region_v1/quality_summary.json
 data/session_results.json
 data/clips/
 runs/

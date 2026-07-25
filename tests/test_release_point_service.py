@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from services.api.schemas.release_point import ReleaseAnalysisInput
@@ -12,6 +14,7 @@ from Backends.src.release_point.pose_provider import (
 from services.api.services.video_release_point_service import (
     POSE_PROVIDER_ENV,
     VideoReleasePointError,
+    _load_tracking_document,
     _provenance,
     _resolve_pose_context,
 )
@@ -144,6 +147,39 @@ def test_release_provenance_preserves_detector_metadata(monkeypatch):
     assert provenance["pose_provider"] is None
     assert provenance["pose_evidence_real"] is False
     assert provenance["quality_flags"] == ["pose_not_run"]
+
+
+def test_malformed_historical_tracking_input_remains_compatibility_failure(tmp_path):
+    tracking_path = tmp_path / "tracking_result.json"
+    tracking_path.write_text(
+        json.dumps(
+            {
+                "analysis_id": "analysis_test",
+                "status": "ready",
+                "primary_track": [
+                    {
+                        "frame_index": 10,
+                        "timestamp_seconds": 10 / 30,
+                        "source": "observed",
+                        "candidate_id": "frame_000010_candidate_001",
+                        "x": 300,
+                        "y": 250,
+                        "normalized_x": 300 / 1280,
+                        "normalized_y": 250 / 720,
+                        "confidence": 0.8,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    release_input = _release_input()
+    release_input = release_input.model_copy(
+        update={"tracking_path": str(tracking_path)}
+    )
+
+    with pytest.raises(VideoReleasePointError, match="tracking_result.json is malformed"):
+        _load_tracking_document(release_input)
 
 
 def test_configured_real_provider_can_create_real_pose_context(monkeypatch):

@@ -15,9 +15,14 @@ from typing import Any
 
 @dataclass(frozen=True)
 class ReleasePointConfig:
-    schema_version: str = "1.0"
+    schema_version: str = "1.3"
     search_back_frames: int = 8
     search_forward_frames: int = 6
+    pretrack_search_back_frames: int = 14
+    pretrack_projection_base_gate_px: float = 28.0
+    pretrack_projection_gate_growth_px: float = 8.0
+    pretrack_min_candidate_score: float = 0.46
+    bowling_arm_confidence_threshold: float = 0.25
     track_fit_points: int = 5
     minimum_track_points: int = 3
     minimum_free_flight_points: int = 3
@@ -90,12 +95,17 @@ class BowlerPoseSequence:
     poses_by_frame: dict[int, PoseFrame]
     quality_flags: list[str] = field(default_factory=list)
     provider: dict[str, str | None] = field(default_factory=dict)
+    bowling_arm: str | None = None
+    arm_confidence: float | None = None
+    arm_ambiguous: bool = False
 
 
 @dataclass(frozen=True)
 class ReleaseCandidate:
     frame_index: int
     source: str
+    ball: BallObservation | None = None
+    track_point: TrackObservation | None = None
 
 
 @dataclass(frozen=True)
@@ -206,12 +216,32 @@ def parse_bowler_pose_sequence(data: dict[str, Any] | None) -> BowlerPoseSequenc
             confidence=float(pose.get("confidence", 0.0)),
             keypoints=keypoints,
         )
+    arm = data.get("bowling_arm") or {}
+    if not isinstance(arm, dict):
+        arm = {}
+    arm_name = arm.get("bowling_arm")
+    arm_confidence = arm.get("confidence")
+    try:
+        parsed_arm_confidence = (
+            None if arm_confidence is None else float(arm_confidence)
+        )
+    except (TypeError, ValueError):
+        parsed_arm_confidence = None
     return BowlerPoseSequence(
         bowler_id=data.get("bowler_id"),
         selection_confidence=float(data.get("selection_confidence", 0.0)),
         poses_by_frame=poses_by_frame,
         quality_flags=list(data.get("quality_flags", []) or []),
         provider=dict(data.get("provider", {}) or {}),
+        bowling_arm=str(arm_name) if arm_name in {"left", "right"} else None,
+        arm_confidence=parsed_arm_confidence,
+        arm_ambiguous=(
+            "bowling_arm_ambiguous" in set(data.get("quality_flags", []) or [])
+            or any(
+                flag == "bowling_arm_ambiguous"
+                for flag in arm.get("quality_flags", []) or []
+            )
+        ),
     )
 
 
@@ -222,16 +252,20 @@ def extract_release_features(
     primary_track: list[TrackObservation],
     pose_sequence: BowlerPoseSequence | None,
     config: ReleasePointConfig,
+    wrist_keypoint_name: str | None = None,
 ) -> ReleaseFeatures:
-    track_by_frame = {point.frame_index: point for point in primary_track}
-    track_point = nearest_track_point(candidate.frame_index, primary_track)
-    ball = best_ball_for_candidate(
+    track_point = candidate.track_point or nearest_track_point(candidate.frame_index, primary_track)
+    ball = candidate.ball or best_ball_for_candidate(
         candidate.frame_index,
         detections_by_frame,
         track_point,
     )
     pose = nearest_pose(candidate.frame_index, pose_sequence)
-    wrist_name, wrist = best_wrist(pose) if pose else (None, None)
+    wrist_name, wrist = (
+        selected_wrist(pose, wrist_keypoint_name)
+        if pose
+        else (None, None)
+    )
     scale = body_scale_px(pose)
     distance_px = (
         math.hypot(ball.x - wrist.x, ball.y - wrist.y)
@@ -250,6 +284,7 @@ def extract_release_features(
         detections_by_frame,
         pose_sequence,
         config,
+        wrist_keypoint_name=wrist_name,
     )
     wrist_velocity = keypoint_velocity(
         pose_sequence,
@@ -366,6 +401,17 @@ def best_wrist(pose: PoseFrame) -> tuple[str | None, Keypoint | None]:
     return max(wrists, key=lambda item: item[1].confidence)
 
 
+def selected_wrist(
+    pose: PoseFrame,
+    wrist_keypoint_name: str | None,
+) -> tuple[str | None, Keypoint | None]:
+    if wrist_keypoint_name:
+        wrist = pose.keypoints.get(wrist_keypoint_name)
+        if wrist is not None:
+            return wrist_keypoint_name, wrist
+    return best_wrist(pose)
+
+
 def body_scale_px(pose: PoseFrame | None) -> float | None:
     if pose is None:
         return None
@@ -391,6 +437,7 @@ def separation_evidence(
     detections_by_frame: dict[int, list[BallObservation]],
     pose_sequence: BowlerPoseSequence | None,
     config: ReleasePointConfig,
+    wrist_keypoint_name: str | None = None,
 ) -> tuple[int, float | None]:
     if ball is None or wrist is None:
         return 0, None
@@ -401,7 +448,11 @@ def separation_evidence(
         next_frame = frame_index + offset
         next_ball = (detections_by_frame.get(next_frame) or [None])[0]
         next_pose = nearest_pose(next_frame, pose_sequence)
-        _, next_wrist = best_wrist(next_pose) if next_pose else (None, None)
+        _, next_wrist = (
+            selected_wrist(next_pose, wrist_keypoint_name)
+            if next_pose
+            else (None, None)
+        )
         if next_ball is None or next_wrist is None:
             continue
         distance = math.hypot(next_ball.x - next_wrist.x, next_ball.y - next_wrist.y)
@@ -514,7 +565,14 @@ def forward_free_flight(
     observed_or_recovered = [
         point
         for point in after
-        if point.provenance in {"OBSERVED", "TRACKER_RECOVERED", "PHYSICS_RECONSTRUCTED"}
+        if point.provenance
+        in {
+            "OBSERVED",
+            "TRACKER_RECOVERED",
+            "PHYSICS_RECONSTRUCTED",
+            "PRETRACK_RECOVERED",
+            "OBSERVED_RELEASE_RECOVERED",
+        }
     ]
     direction = trajectory_direction_consistency(after, config)
     density = min(1.0, len(observed_or_recovered) / config.minimum_free_flight_points)
@@ -615,4 +673,3 @@ def _clamp(value: float) -> float:
 
 def _round_optional(value: float | None) -> float | None:
     return None if value is None else round(float(value), 6)
-

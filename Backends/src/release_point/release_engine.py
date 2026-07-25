@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 import statistics
 from typing import Any
@@ -19,9 +19,84 @@ from .features import (
     parse_detection_observations,
     parse_track_observations,
 )
+from .pretrack_reconstruction import (
+    PRETRACK_RECOVERED,
+    PretrackHypothesis,
+    reconstruct_pretrack_hypothesis,
+)
 
 
-METHOD = "release_point_v1_heuristic_fusion"
+METHOD = "release_point_v1_3_late_free_flight_bias_guard"
+
+
+@dataclass(frozen=True)
+class ReleaseHypothesis:
+    frame_index: int
+    candidate_type: str
+    exact_observation: bool
+    trajectory_compatibility: float
+    hand_association: str
+    hand_association_score: float | None
+    separation_transition: str
+    separation_score: float
+    pose_quality: float | None
+    bowling_arm_confidence: float | None
+    forward_flight: float
+    backward_fit_quality: float
+    detector_evidence: float
+    free_flight_onset_frame: int | None
+    free_flight_age_frames: int | None
+    established_free_flight: bool
+    future_confirmation_strength: float
+    event_localization_strength: float
+    late_flight_penalty: float
+    release_temporal_eligibility: str
+    ambiguity_flags: list[str]
+    eligible: bool
+    arbitration_score: float
+    reason_codes: list[str]
+    source_score: CandidateScore
+
+    def diagnostics(self) -> dict[str, Any]:
+        return {
+            "candidate_frame": self.frame_index,
+            "candidate_type": self.candidate_type,
+            "observed_recovered_reconstructed_status": self.candidate_type,
+            "exact_observation": self.exact_observation,
+            "trajectory_compatibility": round(self.trajectory_compatibility, 6),
+            "hand_association_evidence": self.hand_association,
+            "hand_association_score": None
+            if self.hand_association_score is None
+            else round(self.hand_association_score, 6),
+            "separation_transition_evidence": self.separation_transition,
+            "separation_score": round(self.separation_score, 6),
+            "pose_quality": None if self.pose_quality is None else round(self.pose_quality, 6),
+            "bowling_arm_confidence": self.bowling_arm_confidence,
+            "forward_flight_evidence": round(self.forward_flight, 6),
+            "backward_fit_quality": round(self.backward_fit_quality, 6),
+            "detector_evidence": round(self.detector_evidence, 6),
+            "free_flight_onset_frame": self.free_flight_onset_frame,
+            "free_flight_age_frames": self.free_flight_age_frames,
+            "established_free_flight": self.established_free_flight,
+            "future_confirmation_strength": round(
+                self.future_confirmation_strength,
+                6,
+            ),
+            "event_localization_strength": round(
+                self.event_localization_strength,
+                6,
+            ),
+            "late_flight_penalty": round(self.late_flight_penalty, 6),
+            "release_temporal_eligibility": self.release_temporal_eligibility,
+            "ambiguity_flags": self.ambiguity_flags,
+            "final_arbitration_eligibility": self.eligible,
+            "arbitration_score": round(self.arbitration_score, 6),
+            "arbitration_reason_codes": self.reason_codes,
+            "release_feature_score": self.source_score.score,
+            "release_feature_mode": self.source_score.method,
+            "source": self.source_score.source,
+            "features": feature_dict(self.source_score.features),
+        }
 
 
 @dataclass(frozen=True)
@@ -35,6 +110,7 @@ class CandidateScore:
     features: ReleaseFeatures
     score_components: dict[str, float]
     quality_flags: list[str]
+    diagnostics: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +147,7 @@ class ReleaseEstimator:
         pose_evidence_real = _pose_evidence_is_real(provenance, pose_sequence)
         if not pose_evidence_real:
             pose_sequence = None
+        wrist_context = self._wrist_context(pose_sequence)
 
         if len(primary_track) < self.config.minimum_track_points:
             return self._unresolved(
@@ -81,17 +158,28 @@ class ReleaseEstimator:
                 provenance,
             )
 
+        pretrack_hypothesis = reconstruct_pretrack_hypothesis(
+            detections_by_frame=detections_by_frame,
+            primary_track=primary_track,
+            pose_sequence=pose_sequence,
+            wrist_keypoint_name=wrist_context["wrist_used"],
+            config=self.config,
+        )
+        release_track = self._release_hypothesis_track(primary_track, pretrack_hypothesis)
+
         candidates = self._generate_candidates(
             detections_by_frame=detections_by_frame,
             primary_track=primary_track,
             pose_sequence=pose_sequence,
+            pretrack_hypothesis=pretrack_hypothesis,
         )
         scores = [
             self._score_candidate(
                 candidate,
                 detections_by_frame=detections_by_frame,
-                primary_track=primary_track,
+                primary_track=release_track,
                 pose_sequence=pose_sequence,
+                wrist_context=wrist_context,
             )
             for candidate in candidates
         ]
@@ -106,15 +194,38 @@ class ReleaseEstimator:
                 scores,
             )
 
-        best = scores[0]
+        best, arbitration = self._arbitrate_scores(
+            scores,
+            primary_track=primary_track,
+            pretrack_hypothesis=pretrack_hypothesis,
+            wrist_context=wrist_context,
+        )
+        if best is None:
+            return self._unresolved(
+                analysis_id,
+                fps,
+                "no_arbitration_eligible_release_hypothesis",
+                "Release Point V1.3 could not find an arbitration-eligible release hypothesis.",
+                provenance,
+                scores,
+            )
         result = self._result_from_score(
             analysis_id=analysis_id,
             fps=fps,
             score=best,
             all_scores=scores,
             provenance=provenance,
+            pretrack_hypothesis=pretrack_hypothesis,
+            wrist_context=wrist_context,
+            arbitration=arbitration,
         )
-        quality_summary = self._quality_summary(scores, pose_sequence)
+        quality_summary = self._quality_summary(
+            scores,
+            pose_sequence,
+            pretrack_hypothesis=pretrack_hypothesis,
+            wrist_context=wrist_context,
+            arbitration=arbitration,
+        )
         return ReleaseEstimate(
             status=result["status"],
             result=result,
@@ -133,14 +244,22 @@ class ReleaseEstimator:
         detections_by_frame: dict[int, list[Any]],
         primary_track: list[TrackObservation],
         pose_sequence: BowlerPoseSequence | None,
+        pretrack_hypothesis: PretrackHypothesis | None = None,
     ) -> list[ReleaseCandidate]:
         start_frame = primary_track[0].frame_index
         candidate_sources: dict[int, set[str]] = {}
+        candidate_by_frame: dict[int, ReleaseCandidate] = {}
 
-        def add(frame_index: int, source: str) -> None:
+        def add(
+            frame_index: int,
+            source: str,
+            candidate: ReleaseCandidate | None = None,
+        ) -> None:
             if frame_index < 0:
                 return
             candidate_sources.setdefault(frame_index, set()).add(source)
+            if candidate is not None:
+                candidate_by_frame[frame_index] = candidate
 
         for frame in range(
             start_frame - self.config.search_back_frames,
@@ -178,8 +297,32 @@ class ReleaseEstimator:
             add(max(0, start_frame - 1), "backward_trajectory_intersection")
             add(max(0, start_frame - 2), "backward_trajectory_intersection")
 
+        if pretrack_hypothesis is not None:
+            for point in pretrack_hypothesis.recovered_points:
+                if point.provenance != PRETRACK_RECOVERED or point.observation is None:
+                    continue
+                add(
+                    point.frame_index,
+                    "pretrack_recovered_candidate",
+                    ReleaseCandidate(
+                        frame_index=point.frame_index,
+                        source="pretrack_recovered_candidate",
+                        ball=point.observation,
+                        track_point=point.track_point,
+                    ),
+                )
+
         return [
-            ReleaseCandidate(frame_index=frame, source="+".join(sorted(sources)))
+            (
+                ReleaseCandidate(
+                    frame_index=frame,
+                    source="+".join(sorted(sources)),
+                    ball=candidate_by_frame[frame].ball,
+                    track_point=candidate_by_frame[frame].track_point,
+                )
+                if frame in candidate_by_frame
+                else ReleaseCandidate(frame_index=frame, source="+".join(sorted(sources)))
+            )
             for frame, sources in sorted(candidate_sources.items())
         ]
 
@@ -223,6 +366,7 @@ class ReleaseEstimator:
         detections_by_frame: dict[int, list[Any]],
         primary_track: list[TrackObservation],
         pose_sequence: BowlerPoseSequence | None,
+        wrist_context: dict[str, Any],
     ) -> CandidateScore:
         features = extract_release_features(
             candidate,
@@ -230,6 +374,7 @@ class ReleaseEstimator:
             primary_track=primary_track,
             pose_sequence=pose_sequence,
             config=self.config,
+            wrist_keypoint_name=wrist_context["wrist_used"],
         )
         pose_usable = self._pose_usable(features, pose_sequence)
         close = self._close_hand_score(features)
@@ -315,7 +460,16 @@ class ReleaseEstimator:
             )
             score = min(score, 0.58)
 
+        score, confidence_flags = self._confidence_safety_adjustment(
+            candidate,
+            features,
+            score,
+            close=close,
+            separation=separation,
+            wrist_context=wrist_context,
+        )
         flags = self._quality_flags(features, pose_usable, mode, score)
+        flags.extend(confidence_flags)
         return CandidateScore(
             frame_index=candidate.frame_index,
             score=round(max(0.0, min(1.0, score)), 6),
@@ -325,7 +479,12 @@ class ReleaseEstimator:
             observed=mode == "observed_pose_ball_separation",
             features=features,
             score_components={key: round(value, 6) for key, value in components.items()},
-            quality_flags=flags,
+            quality_flags=_unique_flags(flags),
+            diagnostics={
+                "wrist_context": wrist_context,
+                "candidate_provenance": features.tracker_provenance,
+                "confidence_safety_flags": confidence_flags,
+            },
         )
 
     def _close_hand_score(self, features: ReleaseFeatures) -> float:
@@ -363,6 +522,8 @@ class ReleaseEstimator:
     ) -> bool:
         if pose_sequence is None:
             return False
+        if pose_sequence.arm_ambiguous:
+            return False
         pose_confidence = features.pose_confidence or 0.0
         wrist_confidence = features.wrist_confidence or 0.0
         selection = pose_sequence.selection_confidence
@@ -383,6 +544,644 @@ class ReleaseEstimator:
             if value is not None
         ]
         return max(0.0, min(1.0, statistics.fmean(values))) if values else 0.0
+
+    def _confidence_safety_adjustment(
+        self,
+        candidate: ReleaseCandidate,
+        features: ReleaseFeatures,
+        score: float,
+        *,
+        close: float,
+        separation: float,
+        wrist_context: dict[str, Any],
+    ) -> tuple[float, list[str]]:
+        flags: list[str] = []
+        adjusted = score
+        if wrist_context.get("arm_ambiguous"):
+            adjusted *= 0.88
+            flags.append("ambiguous_bowling_arm_confidence_penalty")
+        if (
+            features.tracker_provenance == PRETRACK_RECOVERED
+            and candidate.track_point is not None
+            and candidate.track_point.uncertainty > 85.0
+        ):
+            adjusted *= 0.9
+            flags.append("large_backward_extrapolation")
+        if (
+            features.ball_candidate_id is None
+            or features.tracker_provenance is None
+            or features.tracker_provenance == "RECONSTRUCTED"
+        ):
+            adjusted *= 0.82
+            flags.append("no_observed_or_recovered_ball_near_release")
+        if close < 0.15 and separation <= 0.0 and features.forward_free_flight_confirmation >= 0.8:
+            adjusted *= 0.82
+            flags.append("weak_hand_ball_transition_despite_free_flight")
+        if features.separation_persistence_frames == 0 and features.separation_velocity is not None and features.separation_velocity <= 0:
+            adjusted *= 0.92
+            flags.append("no_increasing_hand_ball_separation")
+        return max(0.0, min(1.0, adjusted)), flags
+
+    def _arbitrate_scores(
+        self,
+        scores: list[CandidateScore],
+        *,
+        primary_track: list[TrackObservation],
+        pretrack_hypothesis: PretrackHypothesis,
+        wrist_context: dict[str, Any],
+    ) -> tuple[CandidateScore | None, dict[str, Any]]:
+        observed_frames = {point.frame_index for point in primary_track}
+        recovered_frames = {
+            point.frame_index
+            for point in pretrack_hypothesis.recovered_points
+            if point.provenance == PRETRACK_RECOVERED
+        }
+        free_flight_onset = self._free_flight_onset_frame(
+            primary_track,
+            pretrack_hypothesis,
+        )
+        hypotheses = [
+            self._build_release_hypothesis(
+                score,
+                observed_frames=observed_frames,
+                recovered_frames=recovered_frames,
+                recovered_count=len(recovered_frames),
+                wrist_context=wrist_context,
+                free_flight_onset=free_flight_onset,
+                first_primary_track_frame=primary_track[0].frame_index,
+            )
+            for score in scores
+        ]
+        hypotheses = self._suppress_weak_single_recovered_overrides(hypotheses)
+        eligible = [item for item in hypotheses if item.eligible]
+        if not eligible:
+            return None, {
+                "status": "unresolved",
+                "reason": "no_eligible_hypothesis",
+                "release_hypotheses": [item.diagnostics() for item in hypotheses],
+            }
+        best_hypothesis = max(
+            eligible,
+            key=lambda item: (item.arbitration_score, item.source_score.score, -item.frame_index),
+        )
+        disagreement_penalty = self._hypothesis_disagreement_penalty(
+            best_hypothesis,
+            eligible,
+        )
+        if disagreement_penalty:
+            adjusted = max(0.0, best_hypothesis.source_score.score - disagreement_penalty)
+            best_score = CandidateScore(
+                frame_index=best_hypothesis.source_score.frame_index,
+                score=round(adjusted, 6),
+                method=best_hypothesis.source_score.method,
+                release_type=best_hypothesis.source_score.release_type,
+                source=best_hypothesis.source_score.source,
+                observed=best_hypothesis.source_score.observed,
+                features=best_hypothesis.source_score.features,
+                score_components=best_hypothesis.source_score.score_components,
+                quality_flags=_unique_flags(
+                    [
+                        *best_hypothesis.source_score.quality_flags,
+                        "competing_hypotheses_disagree",
+                        *self._selected_temporal_quality_flags(best_hypothesis),
+                    ]
+                ),
+                diagnostics=best_hypothesis.source_score.diagnostics,
+            )
+        else:
+            temporal_flags = self._selected_temporal_quality_flags(best_hypothesis)
+            if temporal_flags:
+                best_score = replace(
+                    best_hypothesis.source_score,
+                    quality_flags=_unique_flags(
+                        [*best_hypothesis.source_score.quality_flags, *temporal_flags]
+                    ),
+                )
+            else:
+                best_score = best_hypothesis.source_score
+        return best_score, {
+            "status": "ready",
+            "selected_frame": best_score.frame_index,
+            "selected_candidate_type": best_hypothesis.candidate_type,
+            "selected_arbitration_score": round(best_hypothesis.arbitration_score, 6),
+            "confidence_disagreement_penalty": round(disagreement_penalty, 6),
+            "selected_reason_codes": best_hypothesis.reason_codes,
+            "free_flight_onset_frame": free_flight_onset,
+            "selected_free_flight_age_frames": best_hypothesis.free_flight_age_frames,
+            "selected_event_localization_strength": round(
+                best_hypothesis.event_localization_strength,
+                6,
+            ),
+            "selected_future_confirmation_strength": round(
+                best_hypothesis.future_confirmation_strength,
+                6,
+            ),
+            "selected_late_flight_penalty": round(
+                best_hypothesis.late_flight_penalty,
+                6,
+            ),
+            "selected_release_temporal_eligibility": (
+                best_hypothesis.release_temporal_eligibility
+            ),
+            "release_hypotheses": [item.diagnostics() for item in hypotheses],
+        }
+
+    def _free_flight_onset_frame(
+        self,
+        primary_track: list[TrackObservation],
+        pretrack_hypothesis: PretrackHypothesis,
+    ) -> int | None:
+        del pretrack_hypothesis
+        ordered = sorted(primary_track, key=lambda point: point.frame_index)
+        if not ordered:
+            return None
+        for index, point in enumerate(ordered):
+            after = [
+                later
+                for later in ordered[index + 1 :]
+                if later.frame_index - point.frame_index <= self.config.search_forward_frames
+            ]
+            if len(after) < max(2, self.config.minimum_free_flight_points - 1):
+                continue
+            segment = [point, *after[: self.config.minimum_free_flight_points]]
+            direction = self._track_direction_consistency(segment)
+            if direction >= 0.65:
+                return point.frame_index
+        return ordered[0].frame_index
+
+    def _track_direction_consistency(self, points: list[TrackObservation]) -> float:
+        if len(points) < 3:
+            return 0.0
+        vectors = []
+        for first, second in zip(points, points[1:]):
+            dx = second.x - first.x
+            dy = second.y - first.y
+            magnitude = math.hypot(dx, dy)
+            if magnitude > 0:
+                vectors.append((dx / magnitude, dy / magnitude))
+        if len(vectors) < 2:
+            return 0.0
+        similarities = [
+            max(-1.0, min(1.0, ax * bx + ay * by))
+            for (ax, ay), (bx, by) in zip(vectors, vectors[1:])
+        ]
+        return max(0.0, min(1.0, statistics.fmean(similarities)))
+
+    def _selected_temporal_quality_flags(
+        self,
+        hypothesis: ReleaseHypothesis,
+    ) -> list[str]:
+        flags: list[str] = []
+        if hypothesis.late_flight_penalty > 0:
+            flags.append("established_free_flight_bias_guard")
+        if hypothesis.release_temporal_eligibility == "weak_localization":
+            flags.append("release_localization_weak")
+        if (
+            hypothesis.free_flight_onset_frame is not None
+            and hypothesis.frame_index < hypothesis.free_flight_onset_frame
+        ):
+            flags.append("release_precedes_first_reliable_observation")
+            flags.append("observational_gap_near_release")
+        return flags
+
+    def _suppress_weak_single_recovered_overrides(
+        self,
+        hypotheses: list[ReleaseHypothesis],
+    ) -> list[ReleaseHypothesis]:
+        observed_floor = max(
+            (
+                item.arbitration_score
+                for item in hypotheses
+                if item.candidate_type == "OBSERVED" and item.eligible
+            ),
+            default=0.0,
+        )
+        if observed_floor < 0.5:
+            return hypotheses
+        adjusted: list[ReleaseHypothesis] = []
+        for item in hypotheses:
+            weak_single_recovered = (
+                item.candidate_type == PRETRACK_RECOVERED
+                and item.hand_association == "UNAVAILABLE"
+                and item.separation_transition == "UNAVAILABLE"
+                and "RECOVERED_SINGLE_FRAME" in item.reason_codes
+                and (
+                    item.free_flight_age_frames is None
+                    or item.free_flight_age_frames >= -self.config.max_track_gap_frames
+                )
+            )
+            if weak_single_recovered:
+                adjusted.append(
+                    replace(
+                        item,
+                        eligible=False,
+                        reason_codes=_unique_flags(
+                            [
+                                *item.reason_codes,
+                                "RECOVERED_REJECTED_BY_ARBITRATION",
+                            ]
+                        ),
+                    )
+                )
+            else:
+                adjusted.append(item)
+        return adjusted
+
+    def _build_release_hypothesis(
+        self,
+        score: CandidateScore,
+        *,
+        observed_frames: set[int],
+        recovered_frames: set[int],
+        recovered_count: int,
+        wrist_context: dict[str, Any],
+        free_flight_onset: int | None,
+        first_primary_track_frame: int,
+    ) -> ReleaseHypothesis:
+        features = score.features
+        candidate_type = self._candidate_type(score, observed_frames, recovered_frames)
+        exact = candidate_type in {"OBSERVED", PRETRACK_RECOVERED}
+        hand_label, hand_score = self._hand_association(features, wrist_context)
+        separation_label, separation_score = self._separation_transition(features)
+        trajectory = self._trajectory_score(features)
+        backward_quality = self._backward_fit_quality(features)
+        detector = max(0.0, min(1.0, features.detector_confidence))
+        pose_quality = self._pose_score(features) if features.pose_confidence is not None else None
+        free_flight_age = (
+            None if free_flight_onset is None else score.frame_index - free_flight_onset
+        )
+        future_confirmation = features.forward_free_flight_confirmation
+        event_localization = self._event_localization_strength(
+            score=score,
+            candidate_type=candidate_type,
+            hand_label=hand_label,
+            separation_label=separation_label,
+            backward_quality=backward_quality,
+            free_flight_age=free_flight_age,
+        )
+        late_penalty = self._late_flight_penalty(
+            candidate_type=candidate_type,
+            hand_label=hand_label,
+            separation_label=separation_label,
+            event_localization=event_localization,
+            free_flight_age=free_flight_age,
+        )
+        temporal_eligibility = self._release_temporal_eligibility(
+            candidate_type=candidate_type,
+            hand_label=hand_label,
+            separation_label=separation_label,
+            event_localization=event_localization,
+            late_penalty=late_penalty,
+            free_flight_age=free_flight_age,
+        )
+        ambiguity_flags = []
+        if wrist_context.get("arm_ambiguous"):
+            ambiguity_flags.append("RECOVERED_ARM_AMBIGUOUS")
+        if "bad_backward_trajectory_fit" in score.quality_flags:
+            ambiguity_flags.append("BAD_BACKWARD_FIT")
+        reason_codes: list[str] = []
+        arbitration = score.score
+        if exact:
+            arbitration += 0.06
+        else:
+            arbitration -= 0.16
+            reason_codes.append("NON_EXACT_TRACK_HYPOTHESIS")
+        if candidate_type == "OBSERVED":
+            reason_codes.append("OBSERVED_FREE_FLIGHT_SUPPORTED")
+            if "ball_wrist_proximity" in score.source:
+                arbitration += 0.13
+                reason_codes.append("OBSERVED_HAND_REGION_CANDIDATE")
+        elif candidate_type == PRETRACK_RECOVERED:
+            reason_codes.append("PRETRACK_RECOVERED_CANDIDATE")
+            if recovered_count >= 2:
+                arbitration += 0.14
+                reason_codes.append("RECOVERED_MULTI_FRAME_SUPPORTED")
+            else:
+                arbitration -= 0.05
+                reason_codes.append("RECOVERED_SINGLE_FRAME")
+        else:
+            reason_codes.append("RECOVERED_REJECTED_BY_ARBITRATION")
+        if hand_label == "STRONG":
+            arbitration += 0.16
+            reason_codes.append("RECOVERED_HAND_ASSOCIATED")
+        elif hand_label == "WEAK":
+            arbitration += 0.04
+        else:
+            reason_codes.append("HAND_ASSOCIATION_UNAVAILABLE")
+        if separation_label == "CONFIRMED":
+            arbitration += 0.14
+            reason_codes.append("RECOVERED_SEPARATION_CONFIRMED")
+        elif separation_label == "WEAK":
+            arbitration += 0.04
+        elif separation_label == "NEGATIVE":
+            arbitration -= 0.12
+        if (
+            candidate_type == PRETRACK_RECOVERED
+            and "pretrack_recovered_candidate" in score.source
+            and "earliest_reliable_moving_segment" in score.source
+            and hand_label == "UNAVAILABLE"
+            and separation_label == "UNAVAILABLE"
+        ):
+            arbitration += 0.12
+            reason_codes.append("RECOVERED_EXACT_TRACK_CANDIDATE")
+        if backward_quality >= 0.8:
+            arbitration += 0.06
+        elif backward_quality <= 0.2:
+            arbitration -= 0.12
+        if features.forward_free_flight_confirmation >= 0.8:
+            arbitration += 0.03
+        if wrist_context.get("arm_ambiguous"):
+            arbitration -= 0.08
+        arbitration += 0.12 * event_localization
+        arbitration -= late_penalty
+        if temporal_eligibility == "onset_region":
+            reason_codes.append("FREE_FLIGHT_ONSET_REGION")
+        elif temporal_eligibility == "late_requires_direct_release_evidence":
+            reason_codes.append("ESTABLISHED_FREE_FLIGHT_BIAS_GUARD")
+        elif temporal_eligibility == "late_direct_release_supported":
+            reason_codes.append("LATE_FRAME_DIRECT_RELEASE_SUPPORTED")
+        if (
+            score.frame_index < first_primary_track_frame
+            and candidate_type == PRETRACK_RECOVERED
+        ):
+            reason_codes.append("RELEASE_PRECEDES_FIRST_RELIABLE_OBSERVATION")
+        eligible = self._hypothesis_eligible(
+            candidate_type=candidate_type,
+            exact=exact,
+            hand_label=hand_label,
+            separation_label=separation_label,
+            backward_quality=backward_quality,
+            recovered_count=recovered_count,
+            wrist_context=wrist_context,
+            score=score,
+        )
+        if temporal_eligibility == "late_requires_direct_release_evidence":
+            eligible = False
+        if not eligible and candidate_type == PRETRACK_RECOVERED:
+            reason_codes.append("RECOVERED_REJECTED_BY_ARBITRATION")
+        if candidate_type == PRETRACK_RECOVERED and not (
+            "RECOVERED_MULTI_FRAME_SUPPORTED" in reason_codes
+            or "RECOVERED_HAND_ASSOCIATED" in reason_codes
+            or "RECOVERED_SEPARATION_CONFIRMED" in reason_codes
+        ):
+            reason_codes.append("RECOVERED_TRAJECTORY_ONLY_WEAK")
+        return ReleaseHypothesis(
+            frame_index=score.frame_index,
+            candidate_type=candidate_type,
+            exact_observation=exact,
+            trajectory_compatibility=trajectory,
+            hand_association=hand_label,
+            hand_association_score=hand_score,
+            separation_transition=separation_label,
+            separation_score=separation_score,
+            pose_quality=pose_quality,
+            bowling_arm_confidence=wrist_context.get("arm_confidence"),
+            forward_flight=features.forward_free_flight_confirmation,
+            backward_fit_quality=backward_quality,
+            detector_evidence=detector,
+            free_flight_onset_frame=free_flight_onset,
+            free_flight_age_frames=free_flight_age,
+            established_free_flight=(
+                free_flight_age is not None
+                and free_flight_age >= self.config.minimum_free_flight_points
+            ),
+            future_confirmation_strength=future_confirmation,
+            event_localization_strength=event_localization,
+            late_flight_penalty=late_penalty,
+            release_temporal_eligibility=temporal_eligibility,
+            ambiguity_flags=ambiguity_flags,
+            eligible=eligible,
+            arbitration_score=max(0.0, min(1.0, arbitration)),
+            reason_codes=_unique_flags(reason_codes),
+            source_score=score,
+        )
+
+    def _event_localization_strength(
+        self,
+        *,
+        score: CandidateScore,
+        candidate_type: str,
+        hand_label: str,
+        separation_label: str,
+        backward_quality: float,
+        free_flight_age: int | None,
+    ) -> float:
+        strength = 0.0
+        if free_flight_age is not None:
+            if free_flight_age <= 0:
+                strength += 0.38
+            elif free_flight_age <= 2:
+                strength += 0.24
+            else:
+                strength += max(0.0, 0.18 - 0.05 * (free_flight_age - 2))
+        if hand_label == "STRONG":
+            strength += 0.30
+        elif hand_label == "WEAK":
+            strength += 0.14
+        if separation_label == "CONFIRMED":
+            strength += 0.24
+        elif separation_label == "WEAK":
+            strength += 0.10
+        if candidate_type == PRETRACK_RECOVERED:
+            strength += 0.10
+        elif candidate_type == "OBSERVED" and "earliest_reliable_moving_segment" in score.source:
+            strength += 0.10
+        elif candidate_type == "OBSERVED" and "track_start_window" in score.source:
+            strength += 0.05
+        if backward_quality >= 0.8:
+            strength += 0.08
+        return max(0.0, min(1.0, strength))
+
+    def _late_flight_penalty(
+        self,
+        *,
+        candidate_type: str,
+        hand_label: str,
+        separation_label: str,
+        event_localization: float,
+        free_flight_age: int | None,
+    ) -> float:
+        if free_flight_age is None or free_flight_age <= 2:
+            return 0.0
+        direct_release_evidence = (
+            hand_label in {"STRONG", "WEAK"}
+            and separation_label in {"CONFIRMED", "WEAK"}
+        )
+        if direct_release_evidence and event_localization >= 0.58:
+            return 0.0
+        base = min(0.42, 0.11 * (free_flight_age - 2))
+        if candidate_type != "OBSERVED":
+            base *= 0.5
+        return round(base, 6)
+
+    def _release_temporal_eligibility(
+        self,
+        *,
+        candidate_type: str,
+        hand_label: str,
+        separation_label: str,
+        event_localization: float,
+        late_penalty: float,
+        free_flight_age: int | None,
+    ) -> str:
+        if free_flight_age is None:
+            return "unknown"
+        if free_flight_age <= 2:
+            return "onset_region"
+        direct_release_evidence = (
+            hand_label in {"STRONG", "WEAK"}
+            and separation_label in {"CONFIRMED", "WEAK"}
+            and event_localization >= 0.58
+        )
+        if direct_release_evidence:
+            return "late_direct_release_supported"
+        if candidate_type == "OBSERVED" and late_penalty > 0:
+            return "late_requires_direct_release_evidence"
+        return "weak_localization"
+
+    def _candidate_type(
+        self,
+        score: CandidateScore,
+        observed_frames: set[int],
+        recovered_frames: set[int],
+    ) -> str:
+        frame = score.frame_index
+        if frame in recovered_frames and score.features.ball_candidate_id is not None:
+            return PRETRACK_RECOVERED
+        if frame in observed_frames and score.features.ball_candidate_id is not None:
+            return "OBSERVED"
+        if score.features.ball_candidate_id is not None:
+            return "DETECTOR_CANDIDATE_ONLY"
+        return "RECONSTRUCTED_OR_POSE_ONLY"
+
+    def _hand_association(
+        self,
+        features: ReleaseFeatures,
+        wrist_context: dict[str, Any],
+    ) -> tuple[str, float | None]:
+        if (
+            wrist_context.get("arm_ambiguous")
+            or features.wrist_confidence is None
+            or features.normalized_ball_wrist_distance is None
+        ):
+            return "UNAVAILABLE", None
+        if (
+            features.wrist_confidence >= self.config.wrist_confidence_threshold
+            and features.normalized_ball_wrist_distance <= 0.8
+        ):
+            return "STRONG", 1.0
+        if features.normalized_ball_wrist_distance <= 2.4 and features.wrist_confidence >= 0.2:
+            return "WEAK", max(
+                0.0,
+                1.0 - features.normalized_ball_wrist_distance / 2.4,
+            )
+        return "UNAVAILABLE", None
+
+    def _separation_transition(
+        self,
+        features: ReleaseFeatures,
+    ) -> tuple[str, float]:
+        persistence_score = min(
+            1.0,
+            features.separation_persistence_frames
+            / max(1, self.config.persistent_separation_frames),
+        )
+        velocity = features.separation_velocity
+        velocity_score = 0.0
+        if velocity is not None:
+            velocity_score = max(0.0, min(1.0, velocity / 55.0))
+        score = max(persistence_score, velocity_score)
+        if persistence_score >= 0.66 and velocity_score > 0.05:
+            return "CONFIRMED", score
+        if score > 0.15:
+            return "WEAK", score
+        if velocity is not None and velocity <= 0 and features.separation_persistence_frames == 0:
+            return "NEGATIVE", 0.0
+        return "UNAVAILABLE", 0.0
+
+    def _backward_fit_quality(self, features: ReleaseFeatures) -> float:
+        fit = features.backward_trajectory_fit_error_px
+        if fit is None:
+            return 0.0
+        if fit <= self.config.backward_fit_good_px:
+            return 1.0
+        if fit >= self.config.backward_fit_weak_px:
+            return 0.0
+        span = self.config.backward_fit_weak_px - self.config.backward_fit_good_px
+        return max(0.0, min(1.0, 1.0 - (fit - self.config.backward_fit_good_px) / span))
+
+    def _hypothesis_eligible(
+        self,
+        *,
+        candidate_type: str,
+        exact: bool,
+        hand_label: str,
+        separation_label: str,
+        backward_quality: float,
+        recovered_count: int,
+        wrist_context: dict[str, Any],
+        score: CandidateScore,
+    ) -> bool:
+        if candidate_type == "OBSERVED":
+            return exact
+        if candidate_type == PRETRACK_RECOVERED:
+            reliable_arm = not wrist_context.get("arm_ambiguous")
+            strong_independent = (
+                backward_quality >= 0.8
+                and reliable_arm
+                and hand_label in {"STRONG", "WEAK"}
+                and separation_label in {"CONFIRMED", "WEAK"}
+            )
+            multi_frame_temporal = (
+                backward_quality >= 0.8
+                and recovered_count >= 2
+                and separation_label in {"CONFIRMED", "WEAK", "UNAVAILABLE"}
+            )
+            trajectory_only_supporting = (
+                backward_quality >= 0.95
+                and recovered_count >= 1
+                and score.source == "pretrack_recovered_candidate"
+                and score.features.forward_free_flight_confirmation <= 0.2
+            )
+            exact_recovered_temporal_support = (
+                wrist_context.get("arm_ambiguous")
+                and hand_label == "UNAVAILABLE"
+                and separation_label == "UNAVAILABLE"
+                and recovered_count >= 1
+                and "pretrack_recovered_candidate" in score.source
+                and "earliest_reliable_moving_segment" in score.source
+                and score.score >= self.config.low_confidence_threshold
+            )
+            return (
+                strong_independent
+                or multi_frame_temporal
+                or trajectory_only_supporting
+                or exact_recovered_temporal_support
+            )
+        if candidate_type == "DETECTOR_CANDIDATE_ONLY":
+            return (
+                hand_label == "STRONG"
+                and separation_label in {"CONFIRMED", "WEAK"}
+                and backward_quality >= 0.4
+            )
+        return (
+            score.observed
+            and hand_label == "STRONG"
+            and separation_label in {"CONFIRMED", "WEAK"}
+        )
+
+    def _hypothesis_disagreement_penalty(
+        self,
+        best: ReleaseHypothesis,
+        eligible: list[ReleaseHypothesis],
+    ) -> float:
+        competing = [
+            item
+            for item in eligible
+            if abs(item.frame_index - best.frame_index) >= 3
+            and item.arbitration_score >= best.arbitration_score - 0.12
+        ]
+        return 0.015 if competing else 0.0
 
     def _quality_flags(
         self,
@@ -421,8 +1220,11 @@ class ReleaseEstimator:
         score: CandidateScore,
         all_scores: list[CandidateScore],
         provenance: dict[str, Any],
+        pretrack_hypothesis: PretrackHypothesis | None = None,
+        wrist_context: dict[str, Any] | None = None,
+        arbitration: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        uncertainty = self._uncertainty(score, all_scores)
+        uncertainty = self._uncertainty(score, all_scores, arbitration=arbitration)
         status = "ready" if score.score >= self.config.low_confidence_threshold else "unresolved"
         features = score.features
         evidence = feature_dict(features)
@@ -432,6 +1234,23 @@ class ReleaseEstimator:
                 "candidate_source": score.source,
                 "observed": score.observed,
                 "bowler_person_id": provenance.get("bowler_id"),
+                "inferred_bowling_arm": (wrist_context or {}).get("inferred_bowling_arm"),
+                "arm_confidence": (wrist_context or {}).get("arm_confidence"),
+                "wrist_used": (wrist_context or {}).get("wrist_used"),
+                "arm_ambiguous": (wrist_context or {}).get("arm_ambiguous"),
+                "pretrack_reconstruction": None
+                if pretrack_hypothesis is None
+                else pretrack_hypothesis.diagnostics(),
+                "release_hypotheses": []
+                if arbitration is None
+                else arbitration.get("release_hypotheses", []),
+                "arbitration": None
+                if arbitration is None
+                else {
+                    key: value
+                    for key, value in arbitration.items()
+                    if key != "release_hypotheses"
+                },
             }
         )
         quality_flags = _unique_flags(
@@ -462,6 +1281,7 @@ class ReleaseEstimator:
         self,
         score: CandidateScore,
         all_scores: list[CandidateScore],
+        arbitration: dict[str, Any] | None = None,
     ) -> dict[str, int]:
         base = 1 if score.method == "observed_pose_ball_separation" else 2
         if score.method == "fallback_trajectory_only":
@@ -475,12 +1295,24 @@ class ReleaseEstimator:
         ]
         start = min([score.frame_index - base, *near_scores])
         end = max([score.frame_index + base, *near_scores])
+        if arbitration:
+            onset = arbitration.get("free_flight_onset_frame")
+            temporal = arbitration.get("selected_release_temporal_eligibility")
+            if isinstance(onset, int) and score.frame_index < onset:
+                start = min(start, score.frame_index - 4)
+                end = max(end, onset + 2)
+            if temporal in {"weak_localization", "late_requires_direct_release_evidence"}:
+                start = min(start, score.frame_index - 4)
+                end = max(end, score.frame_index + 4)
         return {"start": max(0, start), "end": max(0, end)}
 
     def _quality_summary(
         self,
         scores: list[CandidateScore],
         pose_sequence: BowlerPoseSequence | None,
+        pretrack_hypothesis: PretrackHypothesis | None = None,
+        wrist_context: dict[str, Any] | None = None,
+        arbitration: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         best = scores[0] if scores else None
         flags = sorted({flag for score in scores[:5] for flag in score.quality_flags})
@@ -492,7 +1324,53 @@ class ReleaseEstimator:
             "pose_available": pose_sequence is not None,
             "quality_flags": flags,
             "config": self.config.__dict__,
+            "pretrack_reconstruction": None
+            if pretrack_hypothesis is None
+            else pretrack_hypothesis.diagnostics(),
+            "wrist_context": wrist_context or {},
+            "arbitration": arbitration,
         }
+
+    def _wrist_context(
+        self,
+        pose_sequence: BowlerPoseSequence | None,
+    ) -> dict[str, Any]:
+        if pose_sequence is None:
+            return {
+                "inferred_bowling_arm": None,
+                "arm_confidence": None,
+                "wrist_used": None,
+                "arm_ambiguous": True,
+            }
+        arm = pose_sequence.bowling_arm
+        confidence = pose_sequence.arm_confidence
+        ambiguous = (
+            pose_sequence.arm_ambiguous
+            or arm not in {"left", "right"}
+            or confidence is None
+            or confidence < self.config.bowling_arm_confidence_threshold
+        )
+        return {
+            "inferred_bowling_arm": arm,
+            "arm_confidence": confidence,
+            "wrist_used": None if ambiguous or arm is None else f"{arm}_wrist",
+            "arm_ambiguous": ambiguous,
+        }
+
+    def _release_hypothesis_track(
+        self,
+        primary_track: list[TrackObservation],
+        pretrack_hypothesis: PretrackHypothesis,
+    ) -> list[TrackObservation]:
+        recovered = [
+            point.track_point
+            for point in pretrack_hypothesis.recovered_points
+            if point.provenance == PRETRACK_RECOVERED
+        ]
+        return sorted(
+            [*recovered, *primary_track],
+            key=lambda point: point.frame_index,
+        )
 
     def _unresolved(
         self,
@@ -577,4 +1455,5 @@ def candidate_score_to_dict(score: CandidateScore) -> dict[str, Any]:
         "features": feature_dict(score.features),
         "score_components": score.score_components,
         "quality_flags": score.quality_flags,
+        "diagnostics": score.diagnostics or {},
     }

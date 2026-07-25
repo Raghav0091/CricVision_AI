@@ -276,7 +276,7 @@ def _process_video_release_point(
     _update_job(job_id, "saving_results", 88, "Saving Release Point V1 result.")
     completed_at = utc_now()
     document = ReleaseResultDocument(
-        schema_version="1.0",
+        schema_version=estimate.result.get("schema_version", "1.0"),
         analysis_id=analysis_id,
         created_at=started_at,
         completed_at=completed_at,
@@ -357,6 +357,7 @@ def _provenance(
         "pose_schema": pose_provider.get("schema"),
         "pose_evidence_real": bool(pose_provider.get("evidence_real")),
         "pose_status": pose_provider.get("status"),
+        "bowling_arm": pose_provider.get("bowling_arm"),
         "bowler_id": bowler_pose_sequence.get("bowler_id"),
         "ball_detector_model_key": (
             detections.get("ball_detector_model_key")
@@ -406,6 +407,7 @@ def _resolve_pose_context(
                 "schema": provider.get("schema"),
                 "status": "ran",
                 "evidence_real": True,
+                "bowling_arm": bowler_pose_sequence.get("bowling_arm"),
             },
             quality_flags=list(bowler_pose_sequence.get("quality_flags") or []),
         )
