@@ -8,6 +8,23 @@ const API_BASE_URL = (
 ).replace(/\/$/, "");
 
 
+export type BallDetectorModelKey = "automatic" | "e2" | "e3" | "e4c";
+
+
+export type BallDetectorModelOption = {
+  key: BallDetectorModelKey;
+  display_name: string;
+  description: string;
+  available: boolean;
+};
+
+
+export type BallDetectorModelsResponse = {
+  models: BallDetectorModelOption[];
+  default_key: "automatic";
+};
+
+
 export type BallDetectionClipResponse = {
   success: boolean;
   status: "processing" | "ready" | "failed" | "ball_detector_missing" | "invalid_upload" | "upload_too_large" | "video_processing_failed" | "model_inference_failed" | "video_writer_failed";
@@ -1113,6 +1130,8 @@ export type VideoBallDetectionStartResponse = {
   progress: number;
   current_frame: number;
   total_frames: number;
+  ball_detector_model_key: string;
+  ball_detector_model_name: string;
   message: string;
 };
 
@@ -1128,6 +1147,8 @@ export type VideoBallDetectionJobResponse = {
   created_at: string;
   updated_at: string;
   model_path_used?: string | null;
+  ball_detector_model_key: string;
+  ball_detector_model_name: string;
   error_message?: string | null;
   result?: VideoBallDetectionResultLinks | null;
   message: string;
@@ -1144,6 +1165,12 @@ export type VideoBallDetectionSummary = {
   detections_json_url: string;
   detections_csv_url: string;
   detection_summary_url: string;
+  detector?: {
+    requested_key: string;
+    selected_key: string;
+    display_name: string;
+    model_file: string;
+  } | null;
   model_path_used: string;
   model_warning?: string | null;
   model_class_names: string[];
@@ -1215,16 +1242,33 @@ function withBrowserSafeVideoBallDetectionResult(
 
 
 export async function startVideoBallDetection(
-  analysisId: string
+  analysisId: string,
+  ballDetectorModelKey: BallDetectorModelKey = "automatic"
 ): Promise<VideoBallDetectionStartResponse> {
   const response = await fetch(
     `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/ball-detection/start`,
-    { method: "POST" }
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ball_detector_model_key: ballDetectorModelKey })
+    }
   );
   if (!response.ok) {
     throw await videoAnalysisError(response, `Ball detection start returned ${response.status}.`);
   }
   return response.json() as Promise<VideoBallDetectionStartResponse>;
+}
+
+
+export async function getBallDetectorModels(): Promise<BallDetectorModelsResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/detector-models`,
+    { cache: "no-store" }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(response, `Detector model lookup returned ${response.status}.`);
+  }
+  return response.json() as Promise<BallDetectorModelsResponse>;
 }
 
 

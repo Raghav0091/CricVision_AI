@@ -4,6 +4,8 @@ from typing import Annotated
 from fastapi import APIRouter, BackgroundTasks, Body, File, HTTPException, UploadFile
 
 from ..schemas.video_analysis import (
+    BallDetectorModelOption,
+    BallDetectorModelsResponse,
     CalibrationV2ConfirmRequest,
     CalibrationV2InitialiseResponse,
     CalibrationV2Result,
@@ -11,6 +13,7 @@ from ..schemas.video_analysis import (
     VideoAnalysisPreparedResponse,
     VideoBallDetectionJobResponse,
     VideoBallDetectionResultResponse,
+    VideoBallDetectionStartRequest,
     VideoBallDetectionStartResponse,
     VideoBallTrackingJobResponse,
     VideoBallTrackingResultResponse,
@@ -21,6 +24,11 @@ from ..schemas.video_analysis import (
     WicketCameraPoseInitialiseResponse,
     WicketCameraPoseResult,
     WicketCameraPoseSolveRequest,
+)
+from ..services.ball_detector_registry import (
+    BallDetectorModelMissing,
+    list_ball_detector_models,
+    resolve_ball_detector_model,
 )
 from ..services.video_analysis_service import (
     VideoAnalysisServiceError,
@@ -67,6 +75,24 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/video-analysis", tags=["video-analysis"])
 
 
+@router.get(
+    "/detector-models",
+    response_model=BallDetectorModelsResponse,
+)
+def get_detector_models() -> BallDetectorModelsResponse:
+    return BallDetectorModelsResponse(
+        models=[
+            BallDetectorModelOption(
+                key=model.key,
+                display_name=model.display_name,
+                description=model.description,
+                available=model.available,
+            )
+            for model in list_ball_detector_models()
+        ]
+    )
+
+
 @router.post(
     "/prepare",
     response_model=VideoAnalysisPreparedResponse,
@@ -99,13 +125,21 @@ def prepare_video_analysis(
 def start_analysis_ball_detection(
     analysis_id: str,
     background_tasks: BackgroundTasks,
+    request: VideoBallDetectionStartRequest = Body(
+        default=VideoBallDetectionStartRequest()
+    ),
 ) -> VideoBallDetectionStartResponse:
     job = None
     try:
         analysis = load_video_analysis(analysis_id)
+        selected_model = resolve_ball_detector_model(
+            request.ball_detector_model_key
+        )
         job = video_ball_detection_job_store.create(
             analysis_id,
             analysis.frame_count,
+            selected_model.model_key,
+            selected_model.display_name,
         )
         if job is None:
             raise HTTPException(
@@ -115,7 +149,12 @@ def start_analysis_ball_detection(
                     "for this analysis."
                 ),
             )
-        mark_video_ball_detection_queued(analysis_id, job["job_id"])
+        mark_video_ball_detection_queued(
+            analysis_id,
+            job["job_id"],
+            selected_model.model_key,
+            selected_model.display_name,
+        )
         background_tasks.add_task(
             run_video_ball_detection_job,
             analysis_id,
@@ -127,6 +166,8 @@ def start_analysis_ball_detection(
             analysis_id,
         )
         return VideoBallDetectionStartResponse.model_validate(job)
+    except BallDetectorModelMissing as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except VideoAnalysisServiceError as exc:
         raise HTTPException(
             status_code=exc.status_code,

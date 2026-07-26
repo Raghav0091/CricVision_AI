@@ -1,6 +1,7 @@
 # Python environments
 .env
 .venv/
+.venv_*/
 venv/
 env/
 ENV/
@@ -15,6 +16,7 @@ __pycache__/
 *.pyo
 *.pyd
 .pytest_cache/
+.ruff_cache/
 
 # Streamlit secrets
 .streamlit/secrets.toml
@@ -23,6 +25,7 @@ __pycache__/
 outputs/
 outputs/debug/
 outputs/review_frames/
+datasets/release_region_v1/
 data/session_results.json
 data/clips/
 runs/

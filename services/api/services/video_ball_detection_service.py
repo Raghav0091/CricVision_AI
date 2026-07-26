@@ -13,6 +13,7 @@ from typing import Any
 import cv2
 
 from ..schemas.video_analysis import (
+    BallDetectorResultMetadata,
     BallCandidate,
     FrameDetectionRecord,
     NormalizedBox,
@@ -27,11 +28,13 @@ from ..schemas.video_analysis import (
 from .ball_detection_clip import (
     BALL_INFERENCE_LOCK,
     PROJECT_ROOT,
-    VIDEO_ANALYSIS_BALL_MODEL_PATHS,
     extract_ball_candidates,
     load_ball_model,
-    resolve_video_analysis_ball_model_path,
     transcode_browser_mp4,
+)
+from .ball_detector_registry import (
+    BallDetectorModelMissing,
+    resolve_ball_detector_model,
 )
 from .video_analysis_service import (
     VIDEO_ANALYSIS_ROOT,
@@ -53,12 +56,6 @@ DETECTIONS_JSON_FILENAME = "detections.json"
 DETECTIONS_CSV_FILENAME = "detections.csv"
 DETECTION_SUMMARY_FILENAME = "detection_summary.json"
 DETECTION_OVERLAY_FILENAME = "detection_overlay.mp4"
-PRIMARY_MODEL_DISPLAY_PATH = (
-    "Models/Copy of ball_only_E2_1280_baseline.pt"
-)
-FALLBACK_MODEL_DISPLAY_PATH = "Models/ball_detector/best.pt"
-
-
 class VideoBallDetectionError(Exception):
     def __init__(
         self,
@@ -76,6 +73,8 @@ class VideoBallDetectionError(Exception):
 def mark_video_ball_detection_queued(
     analysis_id: str,
     job_id: str,
+    ball_detector_model_key: str,
+    ball_detector_model_name: str,
 ) -> None:
     now = utc_now()
     _update_analysis_metadata(
@@ -84,6 +83,8 @@ def mark_video_ball_detection_queued(
         ball_detection_job_id=job_id,
         ball_detection_started_at=_iso(now),
         ball_detection_completed_at=None,
+        ball_detector_model_key=ball_detector_model_key,
+        ball_detector_model_name=ball_detector_model_name,
         detection_summary_url=None,
         detection_overlay_url=None,
         updated_at=_iso(now),
@@ -236,20 +237,23 @@ def _process_video_ball_detection(
         status="loading_model",
         message="Loading ball model...",
     )
-    model_path = resolve_video_analysis_ball_model_path()
-    if model_path is None:
+    try:
+        selected_model = resolve_ball_detector_model(
+            job.get("ball_detector_model_key")
+        )
+    except BallDetectorModelMissing as exc:
         raise VideoBallDetectionError(
-            f"Ball detector model not found at {PRIMARY_MODEL_DISPLAY_PATH}",
+            str(exc),
             status="ball_detector_missing",
-        )
+        ) from exc
+    model_path = selected_model.path
     model_path_used = model_path.relative_to(PROJECT_ROOT).as_posix()
-    model_warning = (
-        (
-            f"Primary ball model missing at {PRIMARY_MODEL_DISPLAY_PATH}; "
-            f"fallback used: {FALLBACK_MODEL_DISPLAY_PATH}."
-        )
-        if model_path == VIDEO_ANALYSIS_BALL_MODEL_PATHS[1]
-        else None
+    model_warning = selected_model.fallback_reason
+    detector_metadata = BallDetectorResultMetadata(
+        requested_key=selected_model.requested_key,
+        selected_key=selected_model.selected_key,
+        display_name=selected_model.display_name,
+        model_file=model_path.name,
     )
     try:
         model = load_ball_model(model_path)
@@ -263,6 +267,8 @@ def _process_video_ball_detection(
         job_id,
         status="processing",
         model_path_used=model_path_used,
+        ball_detector_model_key=selected_model.model_key,
+        ball_detector_model_name=selected_model.display_name,
         message=f"Processing frame 0 of {total_frames}.",
     )
     _update_analysis_metadata(
@@ -447,6 +453,7 @@ def _process_video_ball_detection(
     )
     document = VideoBallDetectionsDocument(
         analysis_id=analysis_id,
+        detector=detector_metadata,
         model_path_used=model_path_used,
         model_class_names=model_class_names,
         settings=settings,
@@ -482,6 +489,7 @@ def _process_video_ball_detection(
         detections_json_url=f"{relative_base}/{DETECTIONS_JSON_FILENAME}",
         detections_csv_url=f"{relative_base}/{DETECTIONS_CSV_FILENAME}",
         detection_summary_url=f"{relative_base}/{DETECTION_SUMMARY_FILENAME}",
+        detector=detector_metadata,
         model_path_used=model_path_used,
         model_warning=model_warning,
         model_class_names=model_class_names,

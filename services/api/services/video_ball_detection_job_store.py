@@ -31,6 +31,8 @@ class VideoBallDetectionJobStore:
         self,
         analysis_id: str,
         total_frames: int,
+        ball_detector_model_key: str,
+        ball_detector_model_name: str,
     ) -> dict[str, Any] | None:
         with self._lock:
             if any(
@@ -50,6 +52,8 @@ class VideoBallDetectionJobStore:
                 "progress": 0,
                 "current_frame": 0,
                 "total_frames": total_frames,
+                "ball_detector_model_key": ball_detector_model_key,
+                "ball_detector_model_name": ball_detector_model_name,
                 "created_at": now,
                 "updated_at": now,
                 "model_path_used": None,

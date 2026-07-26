@@ -715,6 +715,24 @@ class VideoBallDetectionResultLinks(BaseModel):
     detection_summary_url: str
 
 
+class BallDetectorModelOption(BaseModel):
+    key: str
+    display_name: str
+    description: str
+    available: bool
+
+
+class BallDetectorModelsResponse(BaseModel):
+    models: list[BallDetectorModelOption]
+    default_key: Literal["automatic"] = "automatic"
+
+
+class VideoBallDetectionStartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ball_detector_model_key: str = "automatic"
+
+
 class VideoBallDetectionStartResponse(BaseModel):
     success: bool
     status: Literal["queued"]
@@ -723,6 +741,8 @@ class VideoBallDetectionStartResponse(BaseModel):
     progress: int = Field(ge=0, le=100)
     current_frame: int = Field(ge=0)
     total_frames: int = Field(gt=0)
+    ball_detector_model_key: str
+    ball_detector_model_name: str
     message: str
 
 
@@ -737,6 +757,8 @@ class VideoBallDetectionJobResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     model_path_used: str | None = None
+    ball_detector_model_key: str
+    ball_detector_model_name: str
     error_message: str | None = None
     result: VideoBallDetectionResultLinks | None = None
     message: str
@@ -776,8 +798,16 @@ class VideoBallDetectionSettings(BaseModel):
     max_det: Literal[20]
 
 
+class BallDetectorResultMetadata(BaseModel):
+    requested_key: str
+    selected_key: str
+    display_name: str
+    model_file: str
+
+
 class VideoBallDetectionsDocument(BaseModel):
     analysis_id: str
+    detector: BallDetectorResultMetadata | None = None
     model_path_used: str
     model_class_names: list[str]
     settings: VideoBallDetectionSettings
@@ -794,6 +824,7 @@ class VideoBallDetectionSummary(BaseModel):
     detections_json_url: str
     detections_csv_url: str
     detection_summary_url: str
+    detector: BallDetectorResultMetadata | None = None
     model_path_used: str
     model_warning: str | None = None
     model_class_names: list[str]

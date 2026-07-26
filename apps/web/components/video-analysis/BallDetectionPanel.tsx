@@ -6,9 +6,12 @@ import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import {
+  getBallDetectorModels,
   getVideoBallDetectionJob,
   getVideoBallDetectionResult,
   startVideoBallDetection,
+  type BallDetectorModelKey,
+  type BallDetectorModelOption,
   type VideoAnalysisPreparedResponse,
   type VideoBallDetectionJobStatus,
   type VideoBallDetectionResultResponse
@@ -34,6 +37,19 @@ const ACTIVE_JOB_STATUSES = new Set<VideoBallDetectionJobStatus>([
   "writing_video",
   "saving_results"
 ]);
+
+
+const AUTOMATIC_MODEL: BallDetectorModelOption = {
+  key: "automatic",
+  display_name: "Automatic",
+  description: "Prefer E2, then use the legacy detector when E2 is unavailable.",
+  available: true
+};
+
+
+function isModelKey(value: string | undefined): value is BallDetectorModelKey {
+  return value === "automatic" || value === "e2" || value === "e3" || value === "e4c";
+}
 
 
 function statusLabel(status: VideoBallDetectionJobStatus): string {
@@ -179,7 +195,7 @@ function DetectionResult({
             ))}
           </div>
           <div className="grid gap-3 rounded-lg border border-white/10 bg-black/20 p-3 sm:grid-cols-2 xl:grid-cols-4">
-            <div><span className="block text-[10px] text-white/35">Model</span><strong className="mt-0.5 block break-all text-xs">{summary.model_path_used}</strong></div>
+            <div><span className="block text-[10px] text-white/35">Detector</span><strong className="mt-0.5 block text-xs">{summary.detector?.display_name ?? summary.model_path_used}</strong><span className="mt-0.5 block break-all text-[10px] text-white/35">{summary.detector?.model_file ?? summary.model_path_used}</span></div>
             <div><span className="block text-[10px] text-white/35">Device</span><strong className="mt-0.5 block text-xs">{summary.device_used}</strong></div>
             <div><span className="block text-[10px] text-white/35">Settings</span><strong className="mt-0.5 block text-xs">{summary.imgsz}px · conf {summary.confidence_threshold} · stride {summary.frame_stride}</strong></div>
             <div><span className="block text-[10px] text-white/35">Duration</span><strong className="mt-0.5 block text-xs">{summary.processing_duration_seconds.toFixed(2)}s</strong></div>
@@ -213,6 +229,13 @@ export function BallDetectionPanel({
   const [result, setResult] = useState(initialResult);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  const [modelOptions, setModelOptions] = useState<BallDetectorModelOption[]>([
+    AUTOMATIC_MODEL
+  ]);
+  const initialModelKey = initialResult?.summary.detector?.requested_key;
+  const [selectedModelKey, setSelectedModelKey] = useState<BallDetectorModelKey>(
+    isModelKey(initialModelKey) ? initialModelKey : "automatic"
+  );
 
   function stopPolling() {
     pollGeneration.current += 1;
@@ -276,7 +299,10 @@ export function BallDetectionPanel({
     setStarting(true);
     setError(null);
     try {
-      const started = await startVideoBallDetection(analysis.analysis_id);
+      const started = await startVideoBallDetection(
+        analysis.analysis_id,
+        selectedModelKey
+      );
       setResult(null);
       onResult?.(null);
       setJob({
@@ -296,6 +322,18 @@ export function BallDetectionPanel({
   }
 
   useEffect(() => {
+    void getBallDetectorModels()
+      .then((response) => {
+        setModelOptions(response.models);
+        const selected = response.models.find(
+          (option) => option.key === selectedModelKey
+        );
+        if (!selected?.available) setSelectedModelKey(response.default_key);
+      })
+      .catch(() => {
+        setModelOptions([AUTOMATIC_MODEL]);
+        setSelectedModelKey("automatic");
+      });
     if (!initialResult && initialJobId) pollJob(initialJobId);
     return () => {
       pollGeneration.current += 1;
@@ -326,6 +364,35 @@ export function BallDetectionPanel({
         <Button disabled={isActive} onClick={() => void runDetection()}>
           {starting ? "Starting…" : isActive ? "Detection running…" : result ? "Run Again" : "Run Detection"}
         </Button>
+      </div>
+
+      <div className="mt-4 max-w-xl">
+        <label
+          className="block text-xs font-black uppercase text-white/65"
+          htmlFor={`ball-detector-${analysis.analysis_id}`}
+        >
+          Detector model
+        </label>
+        <select
+          id={`ball-detector-${analysis.analysis_id}`}
+          className="mt-2 w-full rounded-lg border border-white/15 bg-[#07100d] px-3 py-2 text-sm font-bold text-white outline-none focus:border-lime/60 disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={isActive}
+          value={selectedModelKey}
+          onChange={(event) => setSelectedModelKey(event.target.value as BallDetectorModelKey)}
+        >
+          {modelOptions.map((option) => (
+            <option
+              key={option.key}
+              disabled={!option.available}
+              value={option.key}
+            >
+              {option.display_name}{option.available ? "" : " (unavailable)"}
+            </option>
+          ))}
+        </select>
+        <p className="mt-2 text-xs text-white/45">
+          {modelOptions.find((option) => option.key === selectedModelKey)?.description}
+        </p>
       </div>
 
       {job && (
