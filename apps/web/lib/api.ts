@@ -1614,6 +1614,152 @@ export type SyntheticPitchPreviewResponse = {
 };
 
 
+export type RealPitchRegistrationStatus =
+  | "METRIC_3D_CANDIDATE"
+  | "GROUND_PLANE_CANDIDATE"
+  | "VISUAL_ONLY"
+  | "AMBIGUOUS"
+  | "REGISTRATION_FAILED"
+  | "NOT_ATTEMPTED";
+
+export type RealPitchProjection = Omit<ProjectedPitchGeometry, "synthetic_only"> & {
+  registered_to_real_setup_frame: true;
+};
+
+export type RegistrationCorrespondence = {
+  correspondence_id: string;
+  observed_wicket_role: "near" | "far";
+  observed_semantic_id: string;
+  virtual_semantic_id?: string | null;
+  mapping_type: string;
+  constraint_category:
+    | "EXACT_OR_POINTLIKE_ANCHOR"
+    | "SOFT_GEOMETRIC_CONSTRAINT";
+  exactness: "EXACT" | "POINTLIKE" | "SOFT";
+  observed_pixel?: VirtualPitchPixelPoint | null;
+  observed_line_start?: VirtualPitchPixelPoint | null;
+  observed_line_end?: VirtualPitchPixelPoint | null;
+  observed_bbox?: { x: number; y: number; width: number; height: number } | null;
+  confidence: number;
+  uncertainty_px: number;
+  registration_weight: number;
+  source_frames: number[];
+  status: "USED" | "SOFT_ONLY" | "REJECTED" | "UNAVAILABLE";
+  rejection_reason?: string | null;
+};
+
+export type RegistrationCandidate = {
+  candidate_id: string;
+  assignment_hypothesis: "A" | "B";
+  near_semantic_end: "bowler" | "striker";
+  far_semantic_end: "bowler" | "striker";
+  lateral_mapping: "image_left_to_world_left" | "image_left_to_world_right";
+  setup_frame_index: number;
+  intrinsics: {
+    candidate_id: string;
+    focal_length_x_px: number;
+    focal_length_y_px: number;
+    principal_point_x_px: number;
+    principal_point_y_px: number;
+    source: string;
+    confidence: "HIGH" | "MEDIUM" | "LOW";
+    horizontal_fov_degrees: number;
+    focal_bound_reached: boolean;
+    distortion_assumption: string;
+  };
+  attempted: boolean;
+  solver_success: boolean;
+  pnp_method: string;
+  refinement: {
+    converged: boolean;
+    method: string;
+    robust_loss: string;
+    initial_cost?: number | null;
+    final_cost?: number | null;
+    parameters_reaching_bounds: string[];
+  };
+  camera_world_position?: number[] | null;
+  inlier_correspondence_ids: string[];
+  outlier_correspondence_ids: string[];
+  reprojection_residuals: Array<{
+    correspondence_id: string;
+    observed_pixel: VirtualPitchPixelPoint;
+    projected_pixel: VirtualPitchPixelPoint;
+    residual_px: number;
+    inlier: boolean;
+  }>;
+  reprojection_rmse_px?: number | null;
+  median_reprojection_error_px?: number | null;
+  maximum_inlier_error_px?: number | null;
+  independent_validation?: {
+    anchor_fit_score: number;
+    independent_scene_score: number;
+    geometry_plausibility_score: number;
+    projected_wicket_envelope_score: number;
+    crease_edge_support_score?: number | null;
+    perspective_convergence_score: number;
+    warnings: string[];
+  } | null;
+  temporal_validation?: {
+    supporting_frame_count: number;
+    mean_wicket_alignment_iou?: number | null;
+    stability_score: number;
+    warnings: string[];
+  } | null;
+  uncertainty?: {
+    perturbation_count: number;
+    camera_position_spread_m?: number | null;
+    rotation_spread_degrees?: number | null;
+    maximum_overlay_movement_px?: number | null;
+    projected_bounce_location_sensitivity_px?: number | null;
+    stable_for_future_metric_use: boolean;
+    warnings: string[];
+  } | null;
+  score: number;
+  classification: RealPitchRegistrationStatus;
+  eligible_for_selection: boolean;
+  failure_reasons: string[];
+  warnings: string[];
+};
+
+export type RealPitchRegistrationResult = {
+  real_pitch_registration_version: "v1";
+  analysis_id: string;
+  status: RealPitchRegistrationStatus;
+  attempted: boolean;
+  setup_frame?: {
+    frame_index: number;
+    timestamp_seconds: number;
+    image_width: number;
+    image_height: number;
+  } | null;
+  correspondences: RegistrationCorrespondence[];
+  candidates: RegistrationCandidate[];
+  selected_candidate?: RegistrationCandidate | null;
+  competing_candidate?: RegistrationCandidate | null;
+  ambiguity_score: number;
+  projected_pitch_geometry?: RealPitchProjection | null;
+  competing_projected_pitch_geometry?: RealPitchProjection | null;
+  warnings: string[];
+  metrics_locked: true;
+  acceptance_required: true;
+  failure_reasons: string[];
+  diagnostics: {
+    setup_frame_image_url?: string | null;
+    projected_overlay_url?: string | null;
+    anchor_residual_overlay_url?: string | null;
+    alternate_assignment_overlay_url?: string | null;
+    result_json_url?: string | null;
+    focal_candidate_count: number;
+    pose_candidate_count: number;
+    eligibility_reasons: string[];
+    rejected_correspondence_count: number;
+  };
+  message: string;
+  developer_only: true;
+};
+
+
 export type DeliveryPhysicsStatus =
   | "SUCCESS"
   | "PARTIAL"
@@ -1926,6 +2072,64 @@ export async function getWicketObservations(
   }
   return withBrowserSafeWicketObservation(
     await response.json() as WicketObservationResult
+  );
+}
+
+
+function withBrowserSafePitchRegistration(
+  result: RealPitchRegistrationResult
+): RealPitchRegistrationResult {
+  return {
+    ...result,
+    diagnostics: {
+      ...result.diagnostics,
+      setup_frame_image_url: resolveApiUrl(result.diagnostics.setup_frame_image_url),
+      projected_overlay_url: resolveApiUrl(result.diagnostics.projected_overlay_url),
+      anchor_residual_overlay_url: resolveApiUrl(result.diagnostics.anchor_residual_overlay_url),
+      alternate_assignment_overlay_url: resolveApiUrl(
+        result.diagnostics.alternate_assignment_overlay_url
+      ),
+      result_json_url: resolveApiUrl(result.diagnostics.result_json_url)
+    }
+  };
+}
+
+
+export async function runRealPitchRegistration(
+  analysisId: string
+): Promise<RealPitchRegistrationResult> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/pitch-registration/run`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(
+      response,
+      `Real pitch registration returned ${response.status}.`
+    );
+  }
+  return withBrowserSafePitchRegistration(
+    await response.json() as RealPitchRegistrationResult
+  );
+}
+
+
+export async function getRealPitchRegistration(
+  analysisId: string
+): Promise<RealPitchRegistrationResult | null> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/pitch-registration`,
+    { cache: "no-store" }
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw await videoAnalysisError(
+      response,
+      `Real pitch registration lookup returned ${response.status}.`
+    );
+  }
+  return withBrowserSafePitchRegistration(
+    await response.json() as RealPitchRegistrationResult
   );
 }
 

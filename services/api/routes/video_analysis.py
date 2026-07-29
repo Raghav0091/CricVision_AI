@@ -29,6 +29,7 @@ from ..schemas.virtual_pitch import (
     SyntheticPitchPreviewResponse,
     VirtualPitchSpecification,
 )
+from ..schemas.real_pitch_registration import RealPitchRegistrationResult
 from ..schemas.wicket_observation import WicketObservationResult
 from ..services.ball_detector_registry import (
     BallDetectorModelMissing,
@@ -77,6 +78,10 @@ from ..services.video_camera_pose_service import (
 from ..services.virtual_pitch_service import (
     build_synthetic_preview,
     build_virtual_pitch_specification,
+)
+from ..services.real_pitch_registration_service import (
+    load_real_pitch_registration,
+    run_real_pitch_registration,
 )
 from ..services.wicket_observation_service import (
     load_wicket_observation,
@@ -141,6 +146,43 @@ def get_analysis_wicket_observations(
 ) -> WicketObservationResult:
     try:
         return load_wicket_observation(analysis_id)
+    except VideoAnalysisServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.post(
+    "/{analysis_id}/pitch-registration/run",
+    response_model=RealPitchRegistrationResult,
+)
+def run_analysis_pitch_registration(
+    analysis_id: str,
+) -> RealPitchRegistrationResult:
+    try:
+        return run_real_pitch_registration(analysis_id)
+    except VideoAnalysisServiceError as exc:
+        logger.warning(
+            "Real pitch registration rejected for %s: %s",
+            analysis_id,
+            exc.message,
+        )
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.get(
+    "/{analysis_id}/pitch-registration",
+    response_model=RealPitchRegistrationResult,
+)
+def get_analysis_pitch_registration(
+    analysis_id: str,
+) -> RealPitchRegistrationResult:
+    try:
+        return load_real_pitch_registration(analysis_id)
     except VideoAnalysisServiceError as exc:
         raise HTTPException(
             status_code=exc.status_code,

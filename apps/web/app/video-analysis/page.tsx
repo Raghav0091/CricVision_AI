@@ -5,6 +5,7 @@ import { type ChangeEvent, useEffect, useRef, useState } from "react";
 import { BallDetectionPanel } from "@/components/video-analysis/BallDetectionPanel";
 import { BallTrackingPanel } from "@/components/video-analysis/BallTrackingPanel";
 import { MEDIA_FIT_CLASS } from "@/components/video-analysis/AnalysisMediaStage";
+import { RealPitchRegistrationPanel } from "@/components/video-analysis/RealPitchRegistrationPanel";
 import { SceneCalibrationPanel } from "@/components/video-analysis/SceneCalibrationPanel";
 import { VirtualPitchOverlay } from "@/components/video-analysis/VirtualPitchOverlay";
 import { WicketObservationPanel } from "@/components/video-analysis/WicketObservationPanel";
@@ -615,6 +616,15 @@ export default function VideoAnalysisPage() {
             </summary>
             <div className="mt-3">
               <VirtualPitchOverlay />
+            </div>
+          </details>
+
+          <details className="rounded-xl border border-white/10 bg-panel/60 px-4 py-3">
+            <summary className="cursor-pointer text-sm font-bold text-white/60">
+              Developer: Real Camera Pose Candidate
+            </summary>
+            <div className="mt-3">
+              <RealPitchRegistrationPanel analysisId={analysis.analysis_id} />
             </div>
           </details>
 
