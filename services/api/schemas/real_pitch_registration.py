@@ -45,6 +45,7 @@ class RegistrationCorrespondence(RegistrationModel):
         "OUTER_AXIS",
         "WICKET_ENVELOPE",
         "WICKET_CENTRE",
+        "CREASE_POINT",
     ]
     constraint_category: Literal[
         "EXACT_OR_POINTLIKE_ANCHOR",

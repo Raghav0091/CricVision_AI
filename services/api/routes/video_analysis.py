@@ -30,6 +30,12 @@ from ..schemas.virtual_pitch import (
     VirtualPitchSpecification,
 )
 from ..schemas.real_pitch_registration import RealPitchRegistrationResult
+from ..schemas.scene_calibration import (
+    SceneCalibrationActionRequest,
+    SceneCalibrationAnchorUpdateRequest,
+    SceneCalibrationRefineRequest,
+    SceneCalibrationResult,
+)
 from ..schemas.wicket_observation import WicketObservationResult
 from ..services.ball_detector_registry import (
     BallDetectorModelMissing,
@@ -82,6 +88,15 @@ from ..services.virtual_pitch_service import (
 from ..services.real_pitch_registration_service import (
     load_real_pitch_registration,
     run_real_pitch_registration,
+)
+from ..services.scene_calibration_service import (
+    accept_scene_calibration,
+    load_scene_calibration,
+    refine_scene_calibration,
+    reject_scene_calibration,
+    run_scene_calibration,
+    update_scene_calibration_anchors,
+    use_visual_overlay_only,
 )
 from ..services.wicket_observation_service import (
     load_wicket_observation,
@@ -183,6 +198,123 @@ def get_analysis_pitch_registration(
 ) -> RealPitchRegistrationResult:
     try:
         return load_real_pitch_registration(analysis_id)
+    except VideoAnalysisServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.post(
+    "/{analysis_id}/scene-calibration/run",
+    response_model=SceneCalibrationResult,
+)
+def run_analysis_scene_calibration(
+    analysis_id: str,
+) -> SceneCalibrationResult:
+    try:
+        return run_scene_calibration(analysis_id)
+    except VideoAnalysisServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.get(
+    "/{analysis_id}/scene-calibration",
+    response_model=SceneCalibrationResult,
+)
+def get_analysis_scene_calibration(
+    analysis_id: str,
+) -> SceneCalibrationResult:
+    try:
+        return load_scene_calibration(analysis_id)
+    except VideoAnalysisServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.post(
+    "/{analysis_id}/scene-calibration/anchors",
+    response_model=SceneCalibrationResult,
+)
+def update_analysis_scene_calibration_anchors(
+    analysis_id: str,
+    request: SceneCalibrationAnchorUpdateRequest,
+) -> SceneCalibrationResult:
+    try:
+        return update_scene_calibration_anchors(analysis_id, request)
+    except VideoAnalysisServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.post(
+    "/{analysis_id}/scene-calibration/refine",
+    response_model=SceneCalibrationResult,
+)
+def refine_analysis_scene_calibration(
+    analysis_id: str,
+    request: SceneCalibrationRefineRequest,
+) -> SceneCalibrationResult:
+    try:
+        return refine_scene_calibration(analysis_id, request)
+    except VideoAnalysisServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.post(
+    "/{analysis_id}/scene-calibration/accept",
+    response_model=SceneCalibrationResult,
+)
+def accept_analysis_scene_calibration(
+    analysis_id: str,
+    request: SceneCalibrationActionRequest,
+) -> SceneCalibrationResult:
+    try:
+        return accept_scene_calibration(analysis_id, request)
+    except VideoAnalysisServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.post(
+    "/{analysis_id}/scene-calibration/reject",
+    response_model=SceneCalibrationResult,
+)
+def reject_analysis_scene_calibration(
+    analysis_id: str,
+    request: SceneCalibrationActionRequest,
+) -> SceneCalibrationResult:
+    try:
+        return reject_scene_calibration(analysis_id, request)
+    except VideoAnalysisServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.post(
+    "/{analysis_id}/scene-calibration/use-visual-only",
+    response_model=SceneCalibrationResult,
+)
+def use_analysis_visual_calibration_only(
+    analysis_id: str,
+    request: SceneCalibrationActionRequest,
+) -> SceneCalibrationResult:
+    try:
+        return use_visual_overlay_only(analysis_id, request)
     except VideoAnalysisServiceError as exc:
         raise HTTPException(
             status_code=exc.status_code,

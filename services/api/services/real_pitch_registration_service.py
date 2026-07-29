@@ -56,6 +56,7 @@ FOCAL_FOV_HYPOTHESES = (45.0, 60.0, 75.0)
 PNP_RANSAC_ITERATIONS = 500
 PNP_CONFIDENCE = 0.999
 MIN_POINTLIKE_ANCHORS = 8
+MIN_ASSISTED_POINTLIKE_ANCHORS = 6
 MIN_ANCHORS_PER_WICKET = 4
 AMBIGUITY_SCORE_GAP = 0.08
 PERTURBATION_SEED = 1729
@@ -393,6 +394,123 @@ def build_registration_correspondences(
             )
         )
     return correspondences
+
+
+def apply_assisted_anchor_overrides(
+    correspondences: list[RegistrationCorrespondence],
+    *,
+    assignment_hypothesis: str,
+    lateral_mapping: str,
+    point_overrides: dict[str, PixelPoint],
+    crease_overrides: dict[str, PixelPoint] | None = None,
+    manual_override_ids: set[str] | None = None,
+) -> list[RegistrationCorrespondence]:
+    """Apply native-pixel user anchors without warping projected geometry."""
+    wicket_mapping = {
+        "near_left_base": "near:wicket_outer_left_base",
+        "near_right_base": "near:wicket_outer_right_base",
+        "near_top_center": "near:wicket_top_center",
+        "far_left_base": "far:wicket_outer_left_base",
+        "far_right_base": "far:wicket_outer_right_base",
+        "far_top_center": "far:wicket_top_center",
+    }
+    overrides_by_id = {
+        correspondence_id: point_overrides[semantic_id]
+        for semantic_id, correspondence_id in wicket_mapping.items()
+        if semantic_id in point_overrides
+    }
+    manual_override_ids = manual_override_ids or set()
+    fully_manual_roles = {
+        role
+        for role in ("near", "far")
+        if {
+            f"{role}_left_base",
+            f"{role}_right_base",
+            f"{role}_top_center",
+        }.issubset(manual_override_ids)
+    }
+    updated = [
+        item.model_copy(
+            update={
+                "observed_pixel": overrides_by_id[item.correspondence_id],
+                "confidence": 0.92,
+                "uncertainty_px": 2.0,
+                "registration_weight": 0.58,
+                "exactness": "EXACT",
+                "status": "USED",
+                "rejection_reason": None,
+            }
+        )
+        if item.correspondence_id in overrides_by_id
+        else item.model_copy(
+            update={
+                "status": "REJECTED",
+                "registration_weight": 0.0,
+                "rejection_reason": (
+                    "superseded_by_complete_manual_wicket_anchors"
+                ),
+            }
+        )
+        if (
+            item.observed_wicket_role in fully_manual_roles
+            and item.status in {"USED", "SOFT_ONLY"}
+        )
+        else item
+        for item in correspondences
+    ]
+    if not crease_overrides:
+        return updated
+
+    assignment = (
+        {"near": "bowler", "far": "striker"}
+        if assignment_hypothesis == "A"
+        else {"near": "striker", "far": "bowler"}
+    )
+    side_mapping = (
+        {"left": "left", "right": "right"}
+        if lateral_mapping == "image_left_to_world_left"
+        else {"left": "right", "right": "left"}
+    )
+    landmarks = {
+        item.semantic_id: item.point
+        for item in build_virtual_pitch_specification().landmarks
+    }
+    for semantic_id, point in sorted(crease_overrides.items()):
+        parts = semantic_id.split("_")
+        if (
+            len(parts) != 4
+            or parts[0] not in {"near", "far"}
+            or parts[1] != "popping"
+            or parts[2] != "crease"
+            or parts[3] not in {"left", "right"}
+        ):
+            continue
+        role, side = parts[0], parts[3]
+        end = assignment[role]
+        virtual_id = (
+            f"{end}_popping_crease_{side_mapping[side]}_endpoint"
+        )
+        world_point = landmarks.get(virtual_id)
+        if world_point is None:
+            continue
+        updated.append(
+            RegistrationCorrespondence(
+                correspondence_id=f"{role}:{semantic_id}",
+                observed_wicket_role=role,
+                observed_semantic_id=semantic_id,
+                virtual_semantic_id=virtual_id,
+                mapping_type="CREASE_POINT",
+                constraint_category="EXACT_OR_POINTLIKE_ANCHOR",
+                exactness="POINTLIKE",
+                observed_pixel=point,
+                world_point=world_point,
+                confidence=0.72,
+                uncertainty_px=4.0,
+                registration_weight=0.12,
+                status="USED",
+            )
+        )
+    return updated
 
 
 def _camera_matrix(intrinsics: CameraIntrinsicsCandidate, focal: float | None = None):
@@ -1125,9 +1243,11 @@ def solve_pose_candidate(
     correspondences: list[RegistrationCorrespondence],
     frame: np.ndarray,
     observation: WicketObservationResult,
+    *,
+    minimum_pointlike_anchors: int = MIN_POINTLIKE_ANCHORS,
 ) -> CameraPoseCandidate:
     world, image, used = _point_arrays(correspondences)
-    if len(used) < MIN_POINTLIKE_ANCHORS:
+    if len(used) < minimum_pointlike_anchors:
         return _failed_candidate(
             candidate_id,
             assignment,
@@ -1175,6 +1295,30 @@ def solve_pose_candidate(
         )
     except cv2.error:
         success, rotation, translation, inliers = False, None, None, None
+    if (
+        not success
+        and minimum_pointlike_anchors == MIN_ASSISTED_POINTLIKE_ANCHORS
+    ):
+        try:
+            success, rotation, translation = cv2.solvePnP(
+                world,
+                image,
+                camera_matrix,
+                np.zeros(5, dtype=np.float64),
+                flags=cv2.SOLVEPNP_SQPNP,
+            )
+            inliers = (
+                np.arange(len(used), dtype=np.int32).reshape(-1, 1)
+                if success
+                else None
+            )
+        except cv2.error:
+            success, rotation, translation, inliers = (
+                False,
+                None,
+                None,
+                None,
+            )
     if not success or rotation is None or translation is None:
         return _failed_candidate(
             candidate_id,
@@ -1388,9 +1532,14 @@ def _perturbation_uncertainty(
     correspondences: Sequence[RegistrationCorrespondence],
     width: int,
     height: int,
+    *,
+    minimum_pointlike_anchors: int = MIN_POINTLIKE_ANCHORS,
 ) -> PoseUncertainty:
     world, image, used = _point_arrays(correspondences)
-    if not candidate.solver_success or len(used) < MIN_POINTLIKE_ANCHORS:
+    if (
+        not candidate.solver_success
+        or len(used) < minimum_pointlike_anchors
+    ):
         return PoseUncertainty(
             perturbation_count=0,
             deterministic_seed=PERTURBATION_SEED,
@@ -1638,6 +1787,8 @@ def _not_attempted(
     analysis_id: str,
     observation: WicketObservationResult,
     reasons: list[str],
+    *,
+    result_filename: str = RESULT_FILENAME,
 ) -> RealPitchRegistrationResult:
     result = RealPitchRegistrationResult(
         analysis_id=analysis_id,
@@ -1658,13 +1809,13 @@ def _not_attempted(
         ],
         diagnostics=RegistrationDiagnostics(
             result_json_url=(
-                f"/static/video-analysis/{analysis_id}/reports/{RESULT_FILENAME}"
+            f"/static/video-analysis/{analysis_id}/reports/{result_filename}"
             ),
             eligibility_reasons=reasons,
         ),
         message="Real camera registration was not attempted.",
     )
-    destination = VIDEO_ANALYSIS_ROOT / analysis_id / "reports" / RESULT_FILENAME
+    destination = VIDEO_ANALYSIS_ROOT / analysis_id / "reports" / result_filename
     destination.parent.mkdir(parents=True, exist_ok=True)
     _write_result(destination, result)
     return result
@@ -1672,11 +1823,22 @@ def _not_attempted(
 
 def run_real_pitch_registration(
     analysis_id: str,
+    *,
+    point_overrides: dict[str, PixelPoint] | None = None,
+    crease_overrides: dict[str, PixelPoint] | None = None,
+    manual_override_ids: set[str] | None = None,
+    result_filename: str = RESULT_FILENAME,
+    debug_directory: str = DEBUG_DIRECTORY,
 ) -> RealPitchRegistrationResult:
     observation = load_wicket_observation(analysis_id)
     eligibility = check_registration_eligibility(observation)
     if not eligibility.eligible:
-        return _not_attempted(analysis_id, observation, eligibility.reasons)
+        return _not_attempted(
+            analysis_id,
+            observation,
+            eligibility.reasons,
+            result_filename=result_filename,
+        )
     assert observation.setup_frame is not None
     frame, _ = _read_setup_frame(
         analysis_id, observation.setup_frame.frame_index
@@ -1696,6 +1858,15 @@ def run_real_pitch_registration(
                 assignment_hypothesis=assignment,
                 lateral_mapping=lateral_mapping,
             )
+            if point_overrides or crease_overrides:
+                correspondences = apply_assisted_anchor_overrides(
+                    correspondences,
+                    assignment_hypothesis=assignment,
+                    lateral_mapping=lateral_mapping,
+                    point_overrides=point_overrides or {},
+                    crease_overrides=crease_overrides,
+                    manual_override_ids=manual_override_ids,
+                )
             for intrinsics in intrinsics_candidates:
                 candidate_id = (
                     f"{assignment}:{lateral_mapping}:{intrinsics.candidate_id}"
@@ -1709,6 +1880,11 @@ def run_real_pitch_registration(
                     correspondences,
                     frame,
                     observation,
+                    minimum_pointlike_anchors=(
+                        MIN_ASSISTED_POINTLIKE_ANCHORS
+                        if manual_override_ids
+                        else MIN_POINTLIKE_ANCHORS
+                    ),
                 )
                 candidates.append(candidate)
                 correspondences_by_candidate[candidate_id] = correspondences
@@ -1744,6 +1920,11 @@ def run_real_pitch_registration(
                     selected_correspondences,
                     frame.shape[1],
                     frame.shape[0],
+                    minimum_pointlike_anchors=(
+                        MIN_ASSISTED_POINTLIKE_ANCHORS
+                        if manual_override_ids
+                        else MIN_POINTLIKE_ANCHORS
+                    ),
                 )
             }
         )
@@ -1781,7 +1962,7 @@ def run_real_pitch_registration(
         failure_reasons = []
 
     analysis_dir = VIDEO_ANALYSIS_ROOT / analysis_id
-    debug_dir = analysis_dir / "calibration" / DEBUG_DIRECTORY
+    debug_dir = analysis_dir / "calibration" / debug_directory
     debug_dir.mkdir(parents=True, exist_ok=True)
     setup_filename = "setup_frame.jpg"
     cv2.imwrite(str(debug_dir / setup_filename), frame)
@@ -1798,7 +1979,7 @@ def run_real_pitch_registration(
         )
         overlay_url = (
             f"/static/video-analysis/{analysis_id}/calibration/"
-            f"{DEBUG_DIRECTORY}/{overlay_filename}"
+            f"{debug_directory}/{overlay_filename}"
         )
     if competing is not None and competing_projection is not None:
         alternate_filename = "alternate_assignment_overlay.jpg"
@@ -1811,7 +1992,7 @@ def run_real_pitch_registration(
         )
         alternate_overlay_url = (
             f"/static/video-analysis/{analysis_id}/calibration/"
-            f"{DEBUG_DIRECTORY}/{alternate_filename}"
+            f"{debug_directory}/{alternate_filename}"
         )
     warnings = [
         "Real camera pose candidate only; metric analytics remain locked.",
@@ -1843,13 +2024,13 @@ def run_real_pitch_registration(
         diagnostics=RegistrationDiagnostics(
             setup_frame_image_url=(
                 f"/static/video-analysis/{analysis_id}/calibration/"
-                f"{DEBUG_DIRECTORY}/{setup_filename}"
+                f"{debug_directory}/{setup_filename}"
             ),
             projected_overlay_url=overlay_url,
             anchor_residual_overlay_url=overlay_url,
             alternate_assignment_overlay_url=alternate_overlay_url,
             result_json_url=(
-                f"/static/video-analysis/{analysis_id}/reports/{RESULT_FILENAME}"
+                f"/static/video-analysis/{analysis_id}/reports/{result_filename}"
             ),
             focal_candidate_count=len(intrinsics_candidates),
             pose_candidate_count=len(candidates),
@@ -1866,7 +2047,7 @@ def run_real_pitch_registration(
     )
     reports = analysis_dir / "reports"
     reports.mkdir(parents=True, exist_ok=True)
-    _write_result(reports / RESULT_FILENAME, result)
+    _write_result(reports / result_filename, result)
     return result
 
 

@@ -1733,6 +1733,8 @@ export type RealPitchRegistrationResult = {
     image_width: number;
     image_height: number;
   } | null;
+  setup_frame_image_url?: string | null;
+  raw_wicket_overlay_url?: string | null;
   correspondences: RegistrationCorrespondence[];
   candidates: RegistrationCandidate[];
   selected_candidate?: RegistrationCandidate | null;
@@ -1757,6 +1759,166 @@ export type RealPitchRegistrationResult = {
   };
   message: string;
   developer_only: true;
+};
+
+
+export type SceneCalibrationStage =
+  | "NOT_STARTED"
+  | "DETECTING_WICKETS"
+  | "OBSERVING_WICKETS"
+  | "GENERATING_POSE"
+  | "NEEDS_ADJUSTMENT"
+  | "GROUND_PLANE_READY"
+  | "METRIC_3D_READY"
+  | "INSUFFICIENT_EVIDENCE"
+  | "FAILED";
+
+export type SceneCalibrationLevel =
+  | "UNAVAILABLE"
+  | "VISUAL_ONLY"
+  | "GROUND_PLANE_READY"
+  | "METRIC_3D_READY";
+
+export type SceneCalibrationAnchorSource =
+  | "automatic"
+  | "manually_adjusted"
+  | "manually_added";
+
+export type SceneCalibrationAnchor = {
+  semantic_id: string;
+  kind: "wicket" | "crease";
+  wicket_role?: "near" | "far" | null;
+  video_point?: VirtualPitchPixelPoint | null;
+  source: SceneCalibrationAnchorSource;
+  original_automatic_point?: VirtualPitchPixelPoint | null;
+  confidence: number;
+  uncertainty_px: number;
+  adjustment_distance_px: number;
+  frame_index: number;
+  valid: boolean;
+  used_for_refinement: boolean;
+  used_for_validation: boolean;
+  validation_messages: string[];
+};
+
+export type SceneCalibrationValidation = {
+  eligible_level: SceneCalibrationLevel;
+  checks: Array<{
+    threshold_id: string;
+    passed: boolean;
+    value?: number | boolean | string | null;
+    requirement: string;
+    reason: string;
+  }>;
+  accepted_anchor_count: number;
+  manually_adjusted_anchor_count: number;
+  manually_added_anchor_count: number;
+  all_required_checks_passed: boolean;
+  failure_reasons: string[];
+};
+
+export type SceneCalibrationRegistrationSummary = {
+  status: string;
+  attempted: boolean;
+  selected_candidate_id?: string | null;
+  assignment_hypothesis?: "A" | "B" | null;
+  focal_length_px?: number | null;
+  reprojection_rmse_px?: number | null;
+  median_reprojection_error_px?: number | null;
+  maximum_inlier_error_px?: number | null;
+  inlier_count: number;
+  outlier_count: number;
+  wicket_envelope_score?: number | null;
+  temporal_stability_score?: number | null;
+  independent_scene_score?: number | null;
+  ambiguity_score: number;
+  result_url?: string | null;
+};
+
+export type SceneCalibrationResult = {
+  scene_calibration_version: "v1";
+  analysis_id: string;
+  workflow: "ASSISTED_SCENE_CALIBRATION_V1";
+  stage: SceneCalibrationStage;
+  started_at?: string | null;
+  completed_at?: string | null;
+  updated_at: string;
+  stage_history: Array<{ stage: SceneCalibrationStage; at: string; message: string }>;
+  setup_frame?: {
+    frame_index: number;
+    timestamp_seconds: number;
+    image_width: number;
+    image_height: number;
+  } | null;
+  supporting_frames: Array<{
+    frame_index: number;
+    timestamp_seconds: number;
+    image_width: number;
+    image_height: number;
+    score: number;
+    sharpness: number;
+    brightness: number;
+    wicket_detection_count: number;
+    mean_detector_confidence: number;
+    detection_stability: number;
+    obstruction_score: number;
+    selected: boolean;
+    rejection_reasons: string[];
+  }>;
+  setup_frame_image_url?: string | null;
+  raw_wicket_overlay_url?: string | null;
+  raw_stump_detection_summary?: {
+    detector_model?: string | null;
+    sampled_frame_count: number;
+    raw_detection_count: number;
+    rejected_detection_count: number;
+    reused_persisted_result: boolean;
+  } | null;
+  wicket_observation_summary?: {
+    status: string;
+    setup_frame_index?: number | null;
+    supporting_frame_count: number;
+    near_wicket_available: boolean;
+    far_wicket_available: boolean;
+    available_anchor_count: number;
+    result_url?: string | null;
+  } | null;
+  automatic_registration_summary?: SceneCalibrationRegistrationSummary | null;
+  refined_registration_summary?: SceneCalibrationRegistrationSummary | null;
+  current_anchor_set: SceneCalibrationAnchor[];
+  optional_crease_anchors: SceneCalibrationAnchor[];
+  anchor_version: number;
+  selected_candidate?: RegistrationCandidate | null;
+  projected_pitch_geometry?: RealPitchProjection | null;
+  validation?: SceneCalibrationValidation | null;
+  accepted_calibration?: {
+    revision: number;
+    accepted_by_user: true;
+    accepted_at: string;
+    accepted_level: "GROUND_PLANE_READY" | "METRIC_3D_READY";
+    accepted_candidate_id: string;
+    anchor_version: number;
+    virtual_pitch_version: "v1";
+    registration_version: "v1";
+    snapshot_url: string;
+  } | null;
+  calibration_level: SceneCalibrationLevel;
+  metrics_unlocked: string[];
+  metrics_locked_reasons: string[];
+  warnings: string[];
+  failure_reasons: string[];
+  developer_diagnostics_available: boolean;
+  legacy_fallback_available: boolean;
+  visual_overlay_enabled: boolean;
+  message: string;
+};
+
+export type SceneCalibrationAnchorInput = {
+  semantic_id: string;
+  video_point?: VirtualPitchPixelPoint | null;
+  source: SceneCalibrationAnchorSource;
+  used_for_refinement?: boolean;
+  used_for_validation?: boolean;
 };
 
 
@@ -2131,6 +2293,125 @@ export async function getRealPitchRegistration(
   return withBrowserSafePitchRegistration(
     await response.json() as RealPitchRegistrationResult
   );
+}
+
+
+function withBrowserSafeSceneCalibration(
+  result: SceneCalibrationResult
+): SceneCalibrationResult {
+  const rewriteSummary = (
+    summary: SceneCalibrationResult["automatic_registration_summary"]
+  ) => summary ? { ...summary, result_url: resolveApiUrl(summary.result_url) } : summary;
+  return {
+    ...result,
+    setup_frame_image_url: resolveApiUrl(result.setup_frame_image_url),
+    raw_wicket_overlay_url: resolveApiUrl(result.raw_wicket_overlay_url),
+    automatic_registration_summary: rewriteSummary(result.automatic_registration_summary),
+    refined_registration_summary: rewriteSummary(result.refined_registration_summary),
+    accepted_calibration: result.accepted_calibration
+      ? {
+          ...result.accepted_calibration,
+          snapshot_url: resolveApiUrl(result.accepted_calibration.snapshot_url) ?? ""
+        }
+      : result.accepted_calibration
+  };
+}
+
+
+async function sceneCalibrationRequest(
+  analysisId: string,
+  suffix: string,
+  body?: object
+): Promise<SceneCalibrationResult> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/scene-calibration${suffix}`,
+    {
+      method: "POST",
+      headers: body ? { "Content-Type": "application/json" } : undefined,
+      body: body ? JSON.stringify(body) : undefined
+    }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(
+      response,
+      `Scene calibration returned ${response.status}.`
+    );
+  }
+  return withBrowserSafeSceneCalibration(
+    await response.json() as SceneCalibrationResult
+  );
+}
+
+
+export async function getSceneCalibration(
+  analysisId: string
+): Promise<SceneCalibrationResult> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/scene-calibration`,
+    { cache: "no-store" }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(
+      response,
+      `Scene calibration lookup returned ${response.status}.`
+    );
+  }
+  return withBrowserSafeSceneCalibration(
+    await response.json() as SceneCalibrationResult
+  );
+}
+
+
+export function runSceneCalibration(analysisId: string) {
+  return sceneCalibrationRequest(analysisId, "/run");
+}
+
+
+export function saveSceneCalibrationAnchors(
+  analysisId: string,
+  anchorVersion: number,
+  anchors: SceneCalibrationAnchorInput[]
+) {
+  return sceneCalibrationRequest(analysisId, "/anchors", {
+    anchor_version: anchorVersion,
+    anchors
+  });
+}
+
+
+export function refineSceneCalibration(analysisId: string, anchorVersion: number) {
+  return sceneCalibrationRequest(analysisId, "/refine", {
+    anchor_version: anchorVersion
+  });
+}
+
+
+export function acceptSceneCalibration(
+  analysisId: string,
+  anchorVersion: number,
+  candidateId?: string | null
+) {
+  return sceneCalibrationRequest(analysisId, "/accept", {
+    anchor_version: anchorVersion,
+    candidate_id: candidateId ?? null
+  });
+}
+
+
+export function rejectSceneCalibration(analysisId: string, anchorVersion: number) {
+  return sceneCalibrationRequest(analysisId, "/reject", {
+    anchor_version: anchorVersion
+  });
+}
+
+
+export function enableVisualSceneCalibration(
+  analysisId: string,
+  anchorVersion: number
+) {
+  return sceneCalibrationRequest(analysisId, "/use-visual-only", {
+    anchor_version: anchorVersion
+  });
 }
 
 

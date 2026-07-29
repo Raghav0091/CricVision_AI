@@ -178,6 +178,102 @@ def load_physics_calibration(
     height: int,
 ) -> CameraCalibration:
     """Load the strongest already-confirmed calibration without fabricating it."""
+    try:
+        from .scene_calibration_service import (
+            load_scene_calibration,
+            load_active_accepted_scene_calibration,
+        )
+
+        assisted = load_scene_calibration(analysis_id)
+        if assisted.accepted_calibration is not None:
+            accepted = load_active_accepted_scene_calibration(analysis_id)
+            confidence_score = _clamp(
+                1.0 - accepted.reprojection_rmse_px / 20.0
+            )
+            if accepted.calibration_level == "METRIC_3D_READY":
+                return CameraCalibration(
+                    mode="METRIC_3D",
+                    confidence=_grade(confidence_score),
+                    image_width=width,
+                    image_height=height,
+                    camera_matrix=accepted.camera_matrix,
+                    distortion_coefficients=accepted.distortion_coefficients,
+                    rotation_vector=accepted.rotation_vector,
+                    rotation_matrix=accepted.rotation_matrix,
+                    translation_vector=accepted.translation_vector,
+                    projection_matrix=accepted.projection_matrix,
+                    image_to_pitch_homography=(
+                        accepted.image_to_pitch_homography
+                    ),
+                    pitch_to_image_homography=(
+                        accepted.pitch_to_image_homography
+                    ),
+                    correspondences_used=accepted.correspondence_count,
+                    reprojection_error_px=accepted.reprojection_rmse_px,
+                    calibration_confidence=confidence_score,
+                    warnings=[
+                        "Using accepted assisted calibration revision "
+                        f"{accepted.revision}."
+                    ],
+                )
+            return CameraCalibration(
+                mode="METRIC_GROUND_PLANE",
+                confidence=_grade(confidence_score),
+                image_width=width,
+                image_height=height,
+                image_to_pitch_homography=(
+                    accepted.image_to_pitch_homography
+                ),
+                pitch_to_image_homography=(
+                    accepted.pitch_to_image_homography
+                ),
+                correspondences_used=accepted.correspondence_count,
+                reprojection_error_px=accepted.reprojection_rmse_px,
+                calibration_confidence=confidence_score,
+                failure_reason=(
+                    "Accepted assisted calibration supports ground-plane "
+                    "metrics only."
+                ),
+                warnings=[
+                    "Using accepted assisted calibration revision "
+                    f"{accepted.revision}.",
+                    "Airborne speed, height, and metric swing remain unavailable.",
+                ],
+            )
+        if assisted.stage != "NOT_STARTED":
+            return CameraCalibration(
+                mode="IMAGE_SPACE_ONLY",
+                confidence="LOW",
+                image_width=width,
+                image_height=height,
+                failure_reason=(
+                    "Assisted scene calibration has not passed acceptance."
+                ),
+                warnings=[
+                    "Legacy visual geometry is not used to unlock metric physics."
+                ],
+            )
+    except Exception:
+        try:
+            from .scene_calibration_service import load_scene_calibration
+
+            assisted = load_scene_calibration(analysis_id)
+            if assisted.stage != "NOT_STARTED":
+                return CameraCalibration(
+                    mode="IMAGE_SPACE_ONLY",
+                    confidence="LOW",
+                    image_width=width,
+                    image_height=height,
+                    failure_reason=(
+                        "Accepted assisted calibration is unavailable or invalid."
+                    ),
+                    warnings=[
+                        "Metric physics remains locked; image-space analysis is preserved."
+                    ],
+                )
+        except Exception:
+            pass
+
     ground = None
     ground_warning: list[str] = []
     try:

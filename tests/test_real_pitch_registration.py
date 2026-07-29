@@ -27,9 +27,11 @@ from services.api.schemas.wicket_observation import (
     WicketRegionObservation,
 )
 from services.api.services.real_pitch_registration_service import (
+    MIN_ASSISTED_POINTLIKE_ANCHORS,
     MIN_POINTLIKE_ANCHORS,
     PERTURBATION_SEED,
     _perturbation_uncertainty,
+    apply_assisted_anchor_overrides,
     build_intrinsics_candidates,
     build_registration_correspondences,
     check_registration_eligibility,
@@ -318,6 +320,91 @@ def test_uncertainty_reduces_correspondence_weight() -> None:
         lateral_mapping="image_left_to_world_left",
     )
     assert uncertain[0].registration_weight < normal[0].registration_weight
+
+
+def test_complete_manual_wicket_anchors_supersede_stale_role_constraints() -> None:
+    observation = _synthetic_observation()
+    correspondences = build_registration_correspondences(
+        observation,
+        assignment_hypothesis="A",
+        lateral_mapping="image_left_to_world_left",
+    )
+    overrides = {
+        "near_left_base": PixelPoint(x=200, y=600),
+        "near_right_base": PixelPoint(x=320, y=600),
+        "near_top_center": PixelPoint(x=260, y=450),
+    }
+    updated = apply_assisted_anchor_overrides(
+        correspondences,
+        assignment_hypothesis="A",
+        lateral_mapping="image_left_to_world_left",
+        point_overrides=overrides,
+        manual_override_ids=set(overrides),
+    )
+    manual_ids = {
+        "near:wicket_outer_left_base",
+        "near:wicket_outer_right_base",
+        "near:wicket_top_center",
+    }
+    assert all(
+        item.status == "USED" and item.exactness == "EXACT"
+        for item in updated
+        if item.correspondence_id in manual_ids
+    )
+    assert all(
+        item.status == "REJECTED"
+        and item.rejection_reason
+        == "superseded_by_complete_manual_wicket_anchors"
+        for item in updated
+        if item.observed_wicket_role == "near"
+        and item.correspondence_id not in manual_ids
+        and item.observed_pixel is not None
+    )
+    assert any(
+        item.status == "USED" and item.observed_wicket_role == "far"
+        for item in updated
+    )
+
+
+def test_six_complete_manual_anchors_can_seed_assisted_pose() -> None:
+    observation = _synthetic_observation(noise_px=0.2)
+    correspondences = build_registration_correspondences(
+        observation,
+        assignment_hypothesis="A",
+        lateral_mapping="image_left_to_world_left",
+    )
+    semantic_to_correspondence = {
+        "near_left_base": "near:wicket_outer_left_base",
+        "near_right_base": "near:wicket_outer_right_base",
+        "near_top_center": "near:wicket_top_center",
+        "far_left_base": "far:wicket_outer_left_base",
+        "far_right_base": "far:wicket_outer_right_base",
+        "far_top_center": "far:wicket_top_center",
+    }
+    by_id = {item.correspondence_id: item for item in correspondences}
+    overrides = {
+        semantic_id: by_id[correspondence_id].observed_pixel
+        for semantic_id, correspondence_id in semantic_to_correspondence.items()
+    }
+    assisted = apply_assisted_anchor_overrides(
+        correspondences,
+        assignment_hypothesis="A",
+        lateral_mapping="image_left_to_world_left",
+        point_overrides=overrides,
+        manual_override_ids=set(overrides),
+    )
+    candidate = solve_pose_candidate(
+        "assisted-six",
+        "A",
+        "image_left_to_world_left",
+        4,
+        build_intrinsics_candidates(1280, 720)[1],
+        assisted,
+        np.zeros((720, 1280, 3), dtype=np.uint8),
+        observation,
+        minimum_pointlike_anchors=MIN_ASSISTED_POINTLIKE_ANCHORS,
+    )
+    assert candidate.solver_success
 
 
 def test_intrinsics_are_bounded_centred_and_zero_distortion() -> None:

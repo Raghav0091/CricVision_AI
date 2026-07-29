@@ -4,6 +4,7 @@ import { type ChangeEvent, useEffect, useRef, useState } from "react";
 
 import { BallDetectionPanel } from "@/components/video-analysis/BallDetectionPanel";
 import { BallTrackingPanel } from "@/components/video-analysis/BallTrackingPanel";
+import { AssistedSceneCalibrationPanel } from "@/components/video-analysis/AssistedSceneCalibrationPanel";
 import { MEDIA_FIT_CLASS } from "@/components/video-analysis/AnalysisMediaStage";
 import { RealPitchRegistrationPanel } from "@/components/video-analysis/RealPitchRegistrationPanel";
 import { SceneCalibrationPanel } from "@/components/video-analysis/SceneCalibrationPanel";
@@ -15,10 +16,12 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import {
   getVideoAnalysis,
   getVideoAnalysisCalibration,
+  getSceneCalibration,
   getVideoBallDetectionResult,
   getVideoBallTrackingResult,
   prepareVideoAnalysis,
   type ConfirmedVideoCalibrationResponse,
+  type SceneCalibrationResult,
   type VideoAnalysisPreparedResponse,
   type VideoBallDetectionResultResponse,
   type VideoBallTrackingResultResponse
@@ -168,6 +171,9 @@ export default function VideoAnalysisPage() {
   const [confirmedCalibration, setConfirmedCalibration] = useState<
     ConfirmedVideoCalibrationResponse | null
   >(null);
+  const [sceneCalibration, setSceneCalibration] = useState<
+    SceneCalibrationResult | null
+  >(null);
   const [ballDetectionResult, setBallDetectionResult] = useState<
     VideoBallDetectionResultResponse | null
   >(null);
@@ -195,6 +201,7 @@ export default function VideoAnalysisPage() {
     setSelectedFile(file);
     setAnalysis(null);
     setConfirmedCalibration(null);
+    setSceneCalibration(null);
     setBallDetectionResult(null);
     setBallTrackingResult(null);
     setActiveStage("upload");
@@ -221,6 +228,7 @@ export default function VideoAnalysisPage() {
     setSelectedFile(null);
     setAnalysis(null);
     setConfirmedCalibration(null);
+    setSceneCalibration(null);
     setBallDetectionResult(null);
     setBallTrackingResult(null);
     setError(null);
@@ -248,6 +256,7 @@ export default function VideoAnalysisPage() {
       const prepared = await prepareVideoAnalysis(selectedFile);
       setAnalysis(prepared);
       setConfirmedCalibration(null);
+      setSceneCalibration(null);
       setBallDetectionResult(null);
       setBallTrackingResult(null);
       setWorkspaceState("prepared");
@@ -272,18 +281,21 @@ export default function VideoAnalysisPage() {
     void Promise.all([
       getVideoAnalysis(analysisId),
       getVideoAnalysisCalibration(analysisId),
+      getSceneCalibration(analysisId),
       getVideoBallDetectionResult(analysisId),
       getVideoBallTrackingResult(analysisId)
     ])
       .then(([
         restored,
         calibration,
+        assistedCalibration,
         detectionResult,
         trackingResult
       ]) => {
         if (cancelled) return;
         setAnalysis(restored);
         setConfirmedCalibration(calibration);
+        setSceneCalibration(assistedCalibration);
         setBallDetectionResult(detectionResult);
         setBallTrackingResult(trackingResult);
         setWorkspaceState("prepared");
@@ -319,7 +331,18 @@ export default function VideoAnalysisPage() {
   }, []);
 
   const uploadComplete = workspaceState === "prepared" && analysis !== null;
-  const calibrationComplete = confirmedCalibration !== null;
+  const calibrationComplete = Boolean(
+    confirmedCalibration
+    || (
+      sceneCalibration
+      && ![
+        "NOT_STARTED",
+        "DETECTING_WICKETS",
+        "OBSERVING_WICKETS",
+        "GENERATING_POSE"
+      ].includes(sceneCalibration.stage)
+    )
+  );
   const calibrationActive = uploadComplete && activeStage === "calibration";
   const ballDetectionActive = (
     uploadComplete
@@ -548,17 +571,6 @@ export default function VideoAnalysisPage() {
         </Card>
       )}
 
-      {!uploadComplete && (
-        <details className="mt-4 rounded-xl border border-white/10 bg-panel/60 px-4 py-3">
-          <summary className="cursor-pointer text-sm font-bold text-white/60">
-            Developer: Virtual Pitch Geometry
-          </summary>
-          <div className="mt-3">
-            <VirtualPitchOverlay />
-          </div>
-        </details>
-      )}
-
       {uploadComplete && analysis && (
         <section className="mt-4 space-y-4">
           {error && (
@@ -601,35 +613,29 @@ export default function VideoAnalysisPage() {
             </div>
           </details>
 
-          <details className="rounded-xl border border-white/10 bg-panel/60 px-4 py-3">
-            <summary className="cursor-pointer text-sm font-bold text-white/60">
-              Developer: Real Wicket Observations
-            </summary>
-            <div className="mt-3">
-              <WicketObservationPanel analysisId={analysis.analysis_id} />
-            </div>
-          </details>
-
-          <details className="rounded-xl border border-white/10 bg-panel/60 px-4 py-3">
-            <summary className="cursor-pointer text-sm font-bold text-white/60">
-              Developer: Virtual Pitch Geometry
-            </summary>
-            <div className="mt-3">
-              <VirtualPitchOverlay />
-            </div>
-          </details>
-
-          <details className="rounded-xl border border-white/10 bg-panel/60 px-4 py-3">
-            <summary className="cursor-pointer text-sm font-bold text-white/60">
-              Developer: Real Camera Pose Candidate
-            </summary>
-            <div className="mt-3">
-              <RealPitchRegistrationPanel analysisId={analysis.analysis_id} />
-            </div>
-          </details>
-
           {calibrationActive && (
-            <SceneCalibrationPanel
+            <Card>
+              <AssistedSceneCalibrationPanel
+                analysisId={analysis.analysis_id}
+                initialResult={sceneCalibration}
+                onResult={setSceneCalibration}
+                onContinue={() => setActiveStage("ball_detection")}
+              />
+            </Card>
+          )}
+
+          {sceneCalibration && sceneCalibration.stage !== "NOT_STARTED" && (
+            <details className="rounded-xl border border-white/10 bg-panel/60 px-4 py-3">
+              <summary className="cursor-pointer text-sm font-bold text-white/60">
+                Developer Diagnostics
+              </summary>
+              <div className="mt-4 space-y-4">
+                <details className="border border-white/10 p-3">
+                  <summary className="cursor-pointer text-sm font-bold text-white/55">
+                    Legacy Scene Calibration
+                  </summary>
+                  <div className="mt-3">
+                    <SceneCalibrationPanel
               key={analysis.analysis_id}
               analysis={analysis}
               initialCalibration={confirmedCalibration}
@@ -656,12 +662,34 @@ export default function VideoAnalysisPage() {
                 } : current);
               }}
             />
-          )}
-
-          {calibrationActive && calibrationComplete && (
-            <Button onClick={() => setActiveStage("ball_detection")}>
-              Continue to Ball Detection
-            </Button>
+                  </div>
+                </details>
+                <details className="border border-white/10 p-3">
+                  <summary className="cursor-pointer text-sm font-bold text-white/55">
+                    Wicket Observations V1
+                  </summary>
+                  <div className="mt-3">
+                    <WicketObservationPanel analysisId={analysis.analysis_id} />
+                  </div>
+                </details>
+                <details className="border border-white/10 p-3">
+                  <summary className="cursor-pointer text-sm font-bold text-white/55">
+                    Real Camera Pose Candidates
+                  </summary>
+                  <div className="mt-3">
+                    <RealPitchRegistrationPanel analysisId={analysis.analysis_id} />
+                  </div>
+                </details>
+                <details className="border border-white/10 p-3">
+                  <summary className="cursor-pointer text-sm font-bold text-white/55">
+                    Synthetic Virtual Pitch
+                  </summary>
+                  <div className="mt-3">
+                    <VirtualPitchOverlay />
+                  </div>
+                </details>
+              </div>
+            </details>
           )}
 
           {ballDetectionActive && (
