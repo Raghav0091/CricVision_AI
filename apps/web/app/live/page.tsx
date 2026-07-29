@@ -221,7 +221,7 @@ export default function LivePage() {
       }
       setStage("setup-complete");
     } catch (error) {
-      setMessage(error instanceof Error && error.message !== "Failed to fetch" ? error.message : "Calibration backend is unavailable. Confirm FastAPI is running on port 8000.");
+      setMessage(error instanceof Error && error.message !== "Failed to fetch" ? error.message : "Calibration backend is unavailable. Confirm FastAPI is running at the configured API URL.");
       setStage("align-stumps");
     }
   }

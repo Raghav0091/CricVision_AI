@@ -19,6 +19,7 @@ from typing import Any, Literal
 import cv2
 import numpy as np
 
+from ..schemas.delivery_physics import DeliveryPhysicsResult
 from ..schemas.video_analysis import (
     BallCandidate,
     PrimaryBounceResult,
@@ -34,6 +35,10 @@ from ..schemas.video_analysis import (
     VideoBallTrackingSummary,
 )
 from .ball_detection_clip import transcode_browser_mp4
+from .delivery_physics_service import (
+    analyse_delivery_physics,
+    failed_physics_result,
+)
 from .video_analysis_service import (
     VIDEO_ANALYSIS_ROOT,
     VideoAnalysisServiceError,
@@ -58,6 +63,7 @@ TRACKING_CSV_FILENAME = "tracking_points.csv"
 TRACKING_SUMMARY_FILENAME = "tracking_summary.json"
 TRACKING_VIDEO_FILENAME = "tracking_debug.mp4"
 DELIVERY_REPLAY_FILENAME = "delivery_replay.mp4"
+PHYSICS_RESULT_FILENAME = "physics_result.json"
 
 _PROVENANCE_TO_SOURCE: dict[TrackingProvenance, Literal["observed", "predicted", "recovered"]] = {
     "OBSERVED": "observed",
@@ -141,6 +147,7 @@ def run_video_ball_tracking_job(analysis_id: str, job_id: str) -> None:
             tracking_csv_url=summary.tracking_csv_url,
             tracking_summary_url=summary.tracking_summary_url,
             delivery_replay_url=summary.delivery_replay_url,
+            physics_result_url=summary.physics_result_url,
         )
         is_ready = summary.status == "ready"
         video_ball_tracking_job_store.update(
@@ -225,6 +232,7 @@ def load_video_ball_tracking_result(
         summary=summary,
         primary_track=document.primary_track,
         bounce=document.bounce,
+        physics=document.physics,
         message=summary.message,
     )
 
@@ -331,6 +339,51 @@ def _process_video_ball_tracking(
 
     _update_job(
         job_id,
+        "fitting_physics",
+        52,
+        "Fitting calibrated delivery physics...",
+    )
+    try:
+        physics = analyse_delivery_physics(
+            analysis_id=analysis_id,
+            primary_track=primary_track,
+            detections=detection_document,
+            tracker_bounce=bounce if reliable else None,
+            fps=analysis.fps,
+            width=analysis.width,
+            height=analysis.height,
+            total_frames=analysis.frame_count,
+        )
+    except Exception as exc:
+        physics = failed_physics_result(
+            analysis_id,
+            analysis.width,
+            analysis.height,
+            (
+                "Physics Engine V1 failed without affecting the raw track: "
+                f"{type(exc).__name__}."
+            ),
+        )
+    physics_relative_url = (
+        f"/static/video-analysis/{analysis_id}/tracking/"
+        f"{PHYSICS_RESULT_FILENAME}"
+    )
+    physics = physics.model_copy(
+        update={"physics_result_url": physics_relative_url}
+    )
+    physics_replay_track = _physics_replay_points(
+        physics,
+        analysis.width,
+        analysis.height,
+    )
+    physics_bounce = _physics_replay_bounce(
+        physics,
+        analysis.width,
+        analysis.height,
+    )
+
+    _update_job(
+        job_id,
         "rendering_video",
         58,
         "Generating tracking debug and delivery replay...",
@@ -369,8 +422,8 @@ def _process_video_ball_tracking(
             fps=analysis.fps,
             width=analysis.width,
             height=analysis.height,
-            primary_track=primary_track,
-            bounce=bounce,
+            primary_track=physics_replay_track or primary_track,
+            bounce=physics_bounce or bounce,
             job_id=job_id,
         )
         replay_frames, replay_fps = _verify_output_video(replay_path)
@@ -424,6 +477,7 @@ def _process_video_ball_tracking(
         raw_primary_track=raw_primary_track,
         candidate_diagnostics=candidate_diagnostics,
         bounce=bounce if reliable else None,
+        physics=physics,
         message=message,
     )
     relative_base = f"/static/video-analysis/{analysis_id}/tracking"
@@ -437,11 +491,13 @@ def _process_video_ball_tracking(
     ]
     physics_points = [
         point
-        for point in primary_track
+        for point in physics_replay_track
         if point.provenance == "PHYSICS_RECONSTRUCTED"
     ]
     projected_points = [
-        point for point in primary_track if point.provenance == "PROJECTED"
+        point
+        for point in physics_replay_track
+        if point.provenance == "PROJECTED"
     ]
     observation_gaps = _observation_gaps(primary_tracklet)
     start_frame = primary_track[0].frame_index if primary_track else None
@@ -497,6 +553,9 @@ def _process_video_ball_tracking(
         bounce_confidence=bounce.confidence,
         tracking_video_url=f"{relative_base}/{TRACKING_VIDEO_FILENAME}",
         delivery_replay_url=delivery_replay_url,
+        physics_result_url=physics_relative_url,
+        physics_engine_version="v1",
+        physics_status=physics.status,
         tracking_json_url=f"{relative_base}/{TRACKING_RESULT_FILENAME}",
         tracking_csv_url=f"{relative_base}/{TRACKING_CSV_FILENAME}",
         tracking_summary_url=f"{relative_base}/{TRACKING_SUMMARY_FILENAME}",
@@ -509,6 +568,10 @@ def _process_video_ball_tracking(
     _write_json(
         output_dir / TRACKING_RESULT_FILENAME,
         document.model_dump(mode="json"),
+    )
+    _write_json(
+        output_dir / PHYSICS_RESULT_FILENAME,
+        physics.model_dump(mode="json"),
     )
     _write_tracking_csv(output_dir / TRACKING_CSV_FILENAME, primary_track)
     _write_json(
@@ -1772,6 +1835,89 @@ def _render_delivery_replay(
     return final_path
 
 
+def _physics_replay_points(
+    physics: DeliveryPhysicsResult,
+    width: int,
+    height: int,
+) -> list[TrackingPoint]:
+    """Adapt backend physics samples to the established replay renderer."""
+    provenance_map: dict[str, TrackingProvenance] = {
+        "OBSERVED": "OBSERVED",
+        "RECONSTRUCTED": "PHYSICS_RECONSTRUCTED",
+        "PROJECTED": "PROJECTED",
+    }
+    points: list[TrackingPoint] = []
+    previous = None
+    for sample in physics.trajectory_samples:
+        if not (
+            math.isfinite(sample.pixel_x)
+            and math.isfinite(sample.pixel_y)
+            and 0 <= sample.pixel_x < width
+            and 0 <= sample.pixel_y < height
+        ):
+            continue
+        vx = 0.0
+        vy = 0.0
+        if previous is not None:
+            elapsed = sample.timestamp_seconds - previous.timestamp_seconds
+            if elapsed > 0:
+                vx = (sample.pixel_x - previous.pixel_x) / elapsed
+                vy = (sample.pixel_y - previous.pixel_y) / elapsed
+        points.append(
+            TrackingPoint(
+                frame_index=sample.frame_index,
+                timestamp_seconds=sample.timestamp_seconds,
+                source=(
+                    "observed"
+                    if sample.provenance == "OBSERVED"
+                    else "predicted"
+                    if sample.provenance == "PROJECTED"
+                    else "recovered"
+                ),
+                provenance=provenance_map[sample.provenance],
+                x=sample.pixel_x,
+                y=sample.pixel_y,
+                normalized_x=sample.pixel_x / width,
+                normalized_y=sample.pixel_y / height,
+                confidence=sample.confidence,
+                uncertainty=1.0 - sample.confidence,
+                vx=vx,
+                vy=vy,
+            )
+        )
+        previous = sample
+    return points
+
+
+def _physics_replay_bounce(
+    physics: DeliveryPhysicsResult,
+    width: int,
+    height: int,
+) -> PrimaryBounceResult | None:
+    bounce = physics.bounce
+    if (
+        bounce.status == "INSUFFICIENT_EVIDENCE"
+        or bounce.frame_index is None
+        or bounce.pixel_x is None
+        or bounce.pixel_y is None
+        or not 0 <= bounce.pixel_x < width
+        or not 0 <= bounce.pixel_y < height
+    ):
+        return None
+    return PrimaryBounceResult(
+        bounce_detected=True,
+        bounce_frame=bounce.frame_index,
+        bounce_timestamp_seconds=bounce.timestamp_seconds,
+        bounce_x=bounce.pixel_x,
+        bounce_y=bounce.pixel_y,
+        bounce_normalized_x=bounce.pixel_x / width,
+        bounce_normalized_y=bounce.pixel_y / height,
+        confidence=bounce.confidence_score,
+        evidence=bounce.evidence,
+        warnings=[],
+    )
+
+
 def _optional_scene_overlay_rgba(
     analysis_id: str,
     width: int,
@@ -2260,6 +2406,7 @@ def _mark_job_failed(
 def _clear_previous_tracking_outputs(output_dir: Path) -> None:
     for filename in (
         TRACKING_RESULT_FILENAME,
+        PHYSICS_RESULT_FILENAME,
         TRACKING_CSV_FILENAME,
         TRACKING_SUMMARY_FILENAME,
         TRACKING_VIDEO_FILENAME,

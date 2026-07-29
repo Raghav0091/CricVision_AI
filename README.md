@@ -1,45 +1,47 @@
 # CricVision AI
 
-CricVision is migrating from a working Streamlit prototype to a separated web/API/worker architecture. The migration is incremental: the Streamlit application remains the current feature-complete development surface.
+CricVision's current development application is one Next.js frontend connected
+to one FastAPI backend. Physics Engine V1 and Virtual Pitch V1 are modules in
+that backend, not separate services.
 
-## Current application: Streamlit
+## Windows local development
 
-```powershell
-cd C:\CricVision_AI
-streamlit run main.py
+CricVision needs two Command Prompt windows.
+
+**Command Prompt 1 - backend**
+
+```bat
+cd /d C:\CricVision_AI
+.venv\Scripts\activate
+python -m uvicorn services.api.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-`main.py` and `Backends/` are active. They currently provide Dashboard, Live Session, Video Analysis, Session Results, model loading, calibration, tracking, reports, and processed-video support.
+Backend checks:
 
-## Future frontend: Next.js
+- `http://127.0.0.1:8000/health`
+- `http://127.0.0.1:8000/docs`
 
-```powershell
-cd C:\CricVision_AI\apps\web
-npm install
+**Command Prompt 2 - frontend**
+
+```bat
+cd /d C:\CricVision_AI\apps\web
+set NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000
 npm run dev
 ```
 
-Open `http://localhost:3000`. This frontend is a runnable architecture foundation; live delivery capture and analysis are not complete.
-
-## Future API: FastAPI
-
-From the repository root:
-
-```powershell
-uv pip install -r services\api\requirements.txt
-python -m uvicorn services.api.main:app --reload
-```
-
-Open `http://localhost:8000/health` or `http://localhost:8000/docs`. The API uses local/process-only storage and returns an honest unavailable response while a dedicated stump detector is missing.
+Open `http://localhost:3000/video-analysis`. Activate only `.venv`;
+`.venv_pose` is not used. Press `Ctrl+C` in each terminal to stop its server.
+If port 8000 is occupied, close the old backend terminal before starting
+another backend.
 
 ## Project structure
 
 | Path | Role | Maturity |
 |---|---|---|
-| `main.py` | Streamlit entry point | Current |
-| `Backends/` | Streamlit UI and active CV/analysis implementation | Legacy active |
-| `apps/web/` | Next.js browser frontend | Future scaffold |
-| `services/api/` | FastAPI control plane | Future scaffold |
+| `main.py` | Historical Streamlit entry point | Legacy |
+| `Backends/` | Historical Streamlit implementation | Legacy |
+| `apps/web/` | Normal Next.js frontend | Current |
+| `services/api/` | Normal FastAPI backend | Current |
 | `services/worker/` | Background processing boundary | Future scaffold, unconnected |
 | `packages/cricket_vision/` | Framework-independent shared CV contracts/geometry | Future scaffold |
 | `Models/` | Local model weights | Active assets |

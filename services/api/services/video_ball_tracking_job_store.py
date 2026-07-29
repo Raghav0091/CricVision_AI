@@ -16,6 +16,7 @@ ACTIVE_TRACKING_STATUSES = {
     "analysing_candidates",
     "building_track",
     "recovering_gaps",
+    "fitting_physics",
     "rendering_video",
     "saving_results",
 }

@@ -1,10 +1,10 @@
 import type { BoxLayout, CalibrationResponse, CapturedFrame } from "./types";
 
 
-const API_BASE_URL = (
+export const API_BASE_URL = (
   process.env.NEXT_PUBLIC_API_BASE_URL
   ?? process.env.NEXT_PUBLIC_API_URL
-  ?? "http://localhost:8000"
+  ?? "http://127.0.0.1:8000"
 ).replace(/\/$/, "");
 
 
@@ -1314,6 +1314,7 @@ export type VideoBallTrackingJobStatus =
   | "analysing_candidates"
   | "building_track"
   | "recovering_gaps"
+  | "fitting_physics"
   | "rendering_video"
   | "saving_results"
   | "ready"
@@ -1327,6 +1328,7 @@ export type VideoBallTrackingResultLinks = {
   tracking_csv_url: string;
   tracking_summary_url: string;
   delivery_replay_url?: string | null;
+  physics_result_url?: string | null;
 };
 
 
@@ -1425,11 +1427,278 @@ export type VideoBallTrackingSummary = {
   bounce_confidence?: number;
   tracking_video_url: string;
   delivery_replay_url?: string | null;
+  physics_result_url?: string | null;
+  physics_engine_version?: "v1" | null;
+  physics_status?: DeliveryPhysicsStatus | null;
   tracking_json_url: string;
   tracking_csv_url: string;
   tracking_summary_url: string;
   processing_duration_seconds: number;
   message: string;
+};
+
+
+export type PhysicsConfidence =
+  | "HIGH"
+  | "MEDIUM"
+  | "LOW"
+  | "INSUFFICIENT_EVIDENCE";
+
+
+export type VirtualPitchWorldPoint = { x: number; y: number; z: number };
+export type VirtualPitchPixelPoint = { x: number; y: number };
+
+
+export type VirtualPitchSpecification = {
+  virtual_pitch_model_version: "v1";
+  coordinate_system: {
+    units: "metres";
+    handedness: "right_handed";
+    origin: "bowler_end_middle_stump_base";
+    x_axis: "lateral_camera_neutral_right";
+    y_axis: "bowler_to_striker";
+    z_axis: "up";
+    description: string;
+    off_leg_assignment: "not_assigned";
+  };
+  dimensions: {
+    pitch_length_m: number;
+    pitch_width_m: number;
+    wicket_width_m: number;
+    stump_height_m: number;
+    stump_diameter_min_m: number;
+    stump_diameter_max_m: number;
+    bowling_crease_length_m: number;
+    popping_crease_offset_m: number;
+    return_crease_offset_m: number;
+  };
+  landmarks: Array<{
+    semantic_id: string;
+    point: VirtualPitchWorldPoint;
+    geometry_category: string;
+    geometry_class: "official" | "analytical" | "optional";
+    end: "bowler" | "striker" | "both" | "none";
+    calibration_anchor: boolean;
+    description: string;
+  }>;
+  stumps: Array<{
+    primitive_id: string;
+    centre: VirtualPitchWorldPoint;
+    radius_m: number;
+    height_m: number;
+    orientation: VirtualPitchWorldPoint;
+    end: "bowler" | "striker";
+    stump_index: "left" | "middle" | "right";
+  }>;
+  bails: Array<{
+    primitive_id: string;
+    start: VirtualPitchWorldPoint;
+    end_point: VirtualPitchWorldPoint;
+    radius_m: number;
+    end: "bowler" | "striker";
+    bail_index: string;
+  }>;
+  line_segments: Array<{
+    primitive_id: string;
+    start: VirtualPitchWorldPoint;
+    end_point: VirtualPitchWorldPoint;
+    line_category: string;
+    geometry_class: "official" | "analytical" | "optional";
+    line_width_m: number;
+    end: "bowler" | "striker" | "both" | "none";
+    profile_id?: string | null;
+  }>;
+  polygons: Array<{
+    primitive_id: string;
+    vertices: VirtualPitchWorldPoint[];
+    polygon_category: string;
+    geometry_class: "official" | "analytical" | "optional";
+    display_opacity: number;
+  }>;
+  profiles: Array<{
+    profile_id: string;
+    label: string;
+    geometry_class: "official" | "analytical" | "optional";
+    description: string;
+    universal_official_geometry: boolean;
+  }>;
+  synthetic_camera_names: string[];
+};
+
+
+export type VirtualPitchCamera = {
+  name: string;
+  description: string;
+  image_width: number;
+  image_height: number;
+  camera_matrix: number[][];
+  distortion_coefficients: number[];
+  rotation_vector: number[];
+  rotation_matrix: number[][];
+  translation_vector: number[];
+  camera_position_world: number[];
+  target_world: number[];
+  near_m: number;
+  far_m: number;
+  horizontal_fov_degrees: number;
+  developer_only: true;
+};
+
+
+export type ProjectedPitchGeometry = {
+  virtual_pitch_model_version: "v1";
+  source_camera: VirtualPitchCamera;
+  projected_landmarks: Array<{
+    semantic_id: string;
+    world_point: VirtualPitchWorldPoint;
+    pixel_point?: VirtualPitchPixelPoint | null;
+    visible: boolean;
+    in_frame: boolean;
+    depth_m: number;
+    projection_valid: boolean;
+  }>;
+  projected_line_segments: Array<{
+    primitive_id: string;
+    line_category: string;
+    geometry_class: "official" | "analytical" | "optional";
+    pixel_start?: VirtualPitchPixelPoint | null;
+    pixel_end?: VirtualPitchPixelPoint | null;
+    projection_valid: boolean;
+    partially_out_of_frame: boolean;
+  }>;
+  projected_stumps: Array<{
+    primitive_id: string;
+    end: "bowler" | "striker";
+    stump_index: "left" | "middle" | "right";
+    pixel_base?: VirtualPitchPixelPoint | null;
+    pixel_top?: VirtualPitchPixelPoint | null;
+    projected_height_px?: number | null;
+    projected_radius_px?: number | null;
+    projection_valid: boolean;
+    in_frame: boolean;
+  }>;
+  projected_polygons: Array<{
+    primitive_id: string;
+    polygon_category: string;
+    geometry_class: "official" | "analytical" | "optional";
+    pixel_vertices: Array<VirtualPitchPixelPoint | null>;
+    projection_valid: boolean;
+    partially_out_of_frame: boolean;
+  }>;
+  projected_bails: Array<{
+    primitive_id: string;
+    pixel_start?: VirtualPitchPixelPoint | null;
+    pixel_end?: VirtualPitchPixelPoint | null;
+    projection_valid: boolean;
+  }>;
+  diagnostics: {
+    valid_landmark_count: number;
+    in_frame_landmark_count: number;
+    behind_camera_count: number;
+    out_of_frame_count: number;
+    nearer_wicket: "bowler" | "striker" | "equal" | "unavailable";
+    perspective_order_valid: boolean;
+    warnings: string[];
+  };
+  synthetic_only: true;
+};
+
+
+export type SyntheticPitchPreviewResponse = {
+  specification: VirtualPitchSpecification;
+  projection: ProjectedPitchGeometry;
+  selected_profile: string;
+  developer_only: true;
+  registration_status: "not_registered_to_video";
+  message: string;
+};
+
+
+export type DeliveryPhysicsStatus =
+  | "SUCCESS"
+  | "PARTIAL"
+  | "IMAGE_SPACE_ONLY"
+  | "INSUFFICIENT_EVIDENCE"
+  | "FAILED";
+
+export type PhysicsTrajectorySample = {
+  frame_index: number;
+  timestamp_seconds: number;
+  world_x_m?: number | null;
+  world_y_m?: number | null;
+  world_z_m?: number | null;
+  pixel_x: number;
+  pixel_y: number;
+  speed_mps?: number | null;
+  provenance: "OBSERVED" | "RECONSTRUCTED" | "PROJECTED";
+  confidence: number;
+};
+
+export type DeliveryPhysicsResult = {
+  physics_engine_version: "v1";
+  status: DeliveryPhysicsStatus;
+  analysis_id: string;
+  coordinate_system: string;
+  pitch_geometry: {
+    pitch_length_m: number;
+    pitch_width_m: number;
+  };
+  calibration: {
+    mode: "METRIC_3D" | "METRIC_GROUND_PLANE" | "IMAGE_SPACE_ONLY";
+    confidence: PhysicsConfidence | "UNAVAILABLE";
+    reprojection_error_px?: number | null;
+    failure_reason?: string | null;
+  };
+  trajectory_samples: PhysicsTrajectorySample[];
+  bounce: {
+    status: "DETECTED" | "ESTIMATED" | "INSUFFICIENT_EVIDENCE";
+    frame_index?: number | null;
+    distance_from_striker_wicket_m?: number | null;
+    lateral_offset_m?: number | null;
+    confidence: PhysicsConfidence;
+  };
+  speed: {
+    earliest_measured_speed_kmh?: number | null;
+    average_pre_bounce_speed_kmh?: number | null;
+    speed_at_bounce_kmh?: number | null;
+    average_post_bounce_speed_kmh?: number | null;
+    confidence: PhysicsConfidence;
+    unavailable_reason?: string | null;
+  };
+  pre_bounce_lateral_movement: {
+    movement_m?: number | null;
+    movement_cm?: number | null;
+    direction: string;
+    lateral_acceleration_mps2?: number | null;
+    confidence: PhysicsConfidence;
+    unavailable_reason?: string | null;
+  };
+  post_bounce_movement: {
+    status: "MEASURED" | "PROJECTED" | "UNAVAILABLE";
+    lateral_turn_cm_at_last_observation?: number | null;
+    speed_loss_kmh?: number | null;
+    confidence: PhysicsConfidence;
+    unavailable_reason?: string | null;
+  };
+  line_and_length: {
+    line: string;
+    length: string;
+    bounce_distance_from_striker_m?: number | null;
+    lateral_offset_from_middle_m?: number | null;
+  };
+  fit_diagnostics: {
+    selected_model: string;
+    weighted_reprojection_rmse_px?: number | null;
+    inlier_frames: number[];
+    outlier_frames: number[];
+    processing_duration_seconds: number;
+  };
+  confidence: PhysicsConfidence;
+  confidence_score: number;
+  exact_spin_rpm: null;
+  exact_spin_rpm_unavailable_reason: string;
+  warnings: string[];
+  physics_result_url?: string | null;
 };
 
 
@@ -1440,6 +1709,7 @@ export type VideoBallTrackingResultResponse = {
   summary: VideoBallTrackingSummary;
   primary_track: VideoBallTrackingPoint[];
   bounce?: PrimaryBounceResult | null;
+  physics?: DeliveryPhysicsResult | null;
   message: string;
 };
 
@@ -1455,7 +1725,10 @@ function withBrowserSafeTrackingLinks(
     tracking_summary_url: resolveApiUrl(links.tracking_summary_url) ?? links.tracking_summary_url,
     delivery_replay_url: links.delivery_replay_url
       ? resolveApiUrl(links.delivery_replay_url) ?? links.delivery_replay_url
-      : links.delivery_replay_url
+      : links.delivery_replay_url,
+    physics_result_url: links.physics_result_url
+      ? resolveApiUrl(links.physics_result_url) ?? links.physics_result_url
+      : links.physics_result_url
   };
 }
 
@@ -1471,11 +1744,226 @@ function withBrowserSafeTrackingResult(
       delivery_replay_url: result.summary.delivery_replay_url
         ? resolveApiUrl(result.summary.delivery_replay_url) ?? result.summary.delivery_replay_url
         : result.summary.delivery_replay_url,
+      physics_result_url: result.summary.physics_result_url
+        ? resolveApiUrl(result.summary.physics_result_url) ?? result.summary.physics_result_url
+        : result.summary.physics_result_url,
       tracking_json_url: resolveApiUrl(result.summary.tracking_json_url) ?? result.summary.tracking_json_url,
       tracking_csv_url: resolveApiUrl(result.summary.tracking_csv_url) ?? result.summary.tracking_csv_url,
       tracking_summary_url: resolveApiUrl(result.summary.tracking_summary_url) ?? result.summary.tracking_summary_url
+    },
+    physics: result.physics
+      ? {
+          ...result.physics,
+          physics_result_url: result.physics.physics_result_url
+            ? resolveApiUrl(result.physics.physics_result_url) ?? result.physics.physics_result_url
+            : result.physics.physics_result_url
+        }
+      : result.physics
+  };
+}
+
+
+export type WicketObservationQuality = "HIGH" | "MEDIUM" | "LOW" | "UNAVAILABLE";
+export type WicketObservationStatus =
+  | "READY_FOR_REGISTRATION_EXPERIMENT"
+  | "PARTIAL"
+  | "INSUFFICIENT_WICKETS"
+  | "INSUFFICIENT_LANDMARKS"
+  | "UNSTABLE"
+  | "FAILED";
+
+export type WicketObservationLandmark = {
+  semantic_id: string;
+  geometry_type: "POINT" | "LINE";
+  pixel_x?: number | null;
+  pixel_y?: number | null;
+  line?: {
+    start: { x: number; y: number };
+    end: { x: number; y: number };
+  } | null;
+  confidence: number;
+  uncertainty_px: number;
+  registration_role:
+    | "PRIMARY_ANCHOR"
+    | "SECONDARY_ANCHOR"
+    | "VALIDATION_ONLY"
+    | "DO_NOT_USE";
+  quality: WicketObservationQuality;
+  status: "AVAILABLE" | "UNAVAILABLE" | "REJECTED";
+  rejection_reason?: string | null;
+};
+
+export type RealWicketObservation = {
+  region: {
+    bbox: { x: number; y: number; width: number; height: number };
+    detector_confidence: number;
+    temporal_support: number;
+    supporting_frame_ids: number[];
+    perspective_role:
+      | "NEAR_WICKET_CANDIDATE"
+      | "FAR_WICKET_CANDIDATE"
+      | "UNRESOLVED_WICKET";
+    stability: "STABLE" | "PARTIALLY_STABLE" | "UNSTABLE" | "NOT_FOUND";
+    quality: WicketObservationQuality;
+    uncertainty_px: number;
+  };
+  roi: {
+    source_frame_width: number;
+    source_frame_height: number;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+  coarse_landmarks: WicketObservationLandmark[];
+  detailed_landmarks: WicketObservationLandmark[];
+  detailed_landmarks_status: "AVAILABLE" | "PARTIAL" | "INSUFFICIENT_EVIDENCE";
+  quality_score: number;
+  warnings: string[];
+};
+
+export type WicketObservationResult = {
+  version: "wicket_observations_v1";
+  analysis_id: string;
+  status: WicketObservationStatus;
+  setup_frame?: {
+    frame_index: number;
+    timestamp_seconds: number;
+    image_width: number;
+    image_height: number;
+    score: number;
+    sharpness: number;
+    brightness: number;
+    wicket_detection_count: number;
+    detection_stability: number;
+  } | null;
+  supporting_frames: Array<{
+    frame_index: number;
+    timestamp_seconds: number;
+    score: number;
+  }>;
+  near_wicket?: RealWicketObservation | null;
+  far_wicket?: RealWicketObservation | null;
+  assignment_hypotheses: Array<{
+    hypothesis_id: "A" | "B";
+    near_semantic_end: "bowler" | "striker";
+    far_semantic_end: "bowler" | "striker";
+    finalised: false;
+    confidence: number;
+    evidence: string[];
+  }>;
+  warnings: string[];
+  diagnostics: {
+    detector_model_path: string;
+    detector_class_labels: string[];
+    sampled_frame_ids: number[];
+    raw_detections: Array<{
+      frame_index: number;
+      bbox: { x: number; y: number; width: number; height: number };
+      confidence: number;
+      perspective_role:
+        | "NEAR_WICKET_CANDIDATE"
+        | "FAR_WICKET_CANDIDATE"
+        | "UNRESOLVED_WICKET";
+    }>;
+    setup_frame_image_url?: string | null;
+    raw_detection_overlay_url?: string | null;
+    landmark_overlay_url?: string | null;
+  };
+  future_registration_readiness: WicketObservationStatus;
+  message: string;
+  developer_only: true;
+};
+
+
+function withBrowserSafeWicketObservation(
+  result: WicketObservationResult
+): WicketObservationResult {
+  return {
+    ...result,
+    diagnostics: {
+      ...result.diagnostics,
+      setup_frame_image_url: resolveApiUrl(result.diagnostics.setup_frame_image_url),
+      raw_detection_overlay_url: resolveApiUrl(result.diagnostics.raw_detection_overlay_url),
+      landmark_overlay_url: resolveApiUrl(result.diagnostics.landmark_overlay_url)
     }
   };
+}
+
+
+export async function runWicketObservations(
+  analysisId: string
+): Promise<WicketObservationResult> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/wicket-observations/run`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(
+      response,
+      `Wicket observation returned ${response.status}.`
+    );
+  }
+  return withBrowserSafeWicketObservation(
+    await response.json() as WicketObservationResult
+  );
+}
+
+
+export async function getWicketObservations(
+  analysisId: string
+): Promise<WicketObservationResult | null> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/wicket-observations`,
+    { cache: "no-store" }
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw await videoAnalysisError(
+      response,
+      `Wicket observation lookup returned ${response.status}.`
+    );
+  }
+  return withBrowserSafeWicketObservation(
+    await response.json() as WicketObservationResult
+  );
+}
+
+
+export async function getVirtualPitchSpecification(): Promise<VirtualPitchSpecification> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/virtual-pitch`,
+    { cache: "force-cache" }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(
+      response,
+      `Virtual pitch lookup returned ${response.status}.`
+    );
+  }
+  return response.json() as Promise<VirtualPitchSpecification>;
+}
+
+
+export async function getSyntheticPitchPreview(
+  cameraName: string,
+  profile = "analytical"
+): Promise<SyntheticPitchPreviewResponse> {
+  const query = new URLSearchParams({
+    camera_name: cameraName,
+    profile
+  });
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/virtual-pitch/synthetic-projection?${query}`,
+    { cache: "force-cache" }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(
+      response,
+      `Synthetic pitch projection returned ${response.status}.`
+    );
+  }
+  return response.json() as Promise<SyntheticPitchPreviewResponse>;
 }
 
 

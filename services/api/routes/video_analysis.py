@@ -25,6 +25,11 @@ from ..schemas.video_analysis import (
     WicketCameraPoseResult,
     WicketCameraPoseSolveRequest,
 )
+from ..schemas.virtual_pitch import (
+    SyntheticPitchPreviewResponse,
+    VirtualPitchSpecification,
+)
+from ..schemas.wicket_observation import WicketObservationResult
 from ..services.ball_detector_registry import (
     BallDetectorModelMissing,
     list_ball_detector_models,
@@ -69,10 +74,78 @@ from ..services.video_camera_pose_service import (
     load_wicket_camera_pose,
     solve_wicket_camera_pose,
 )
+from ..services.virtual_pitch_service import (
+    build_synthetic_preview,
+    build_virtual_pitch_specification,
+)
+from ..services.wicket_observation_service import (
+    load_wicket_observation,
+    run_wicket_observation,
+)
 
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/video-analysis", tags=["video-analysis"])
+
+
+@router.get(
+    "/virtual-pitch",
+    response_model=VirtualPitchSpecification,
+)
+def get_virtual_pitch_specification() -> VirtualPitchSpecification:
+    return build_virtual_pitch_specification()
+
+
+@router.get(
+    "/virtual-pitch/synthetic-projection",
+    response_model=SyntheticPitchPreviewResponse,
+)
+def get_synthetic_virtual_pitch_projection(
+    camera_name: str = "centred_bowler_end",
+    profile: str = "analytical",
+) -> SyntheticPitchPreviewResponse:
+    try:
+        return build_synthetic_preview(camera_name, profile)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/{analysis_id}/wicket-observations/run",
+    response_model=WicketObservationResult,
+)
+def run_analysis_wicket_observations(
+    analysis_id: str,
+) -> WicketObservationResult:
+    """Run bounded real-frame observation without camera registration."""
+    try:
+        return run_wicket_observation(analysis_id)
+    except VideoAnalysisServiceError as exc:
+        logger.warning(
+            "Wicket observation rejected for %s: %s",
+            analysis_id,
+            exc.message,
+        )
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.get(
+    "/{analysis_id}/wicket-observations",
+    response_model=WicketObservationResult,
+)
+def get_analysis_wicket_observations(
+    analysis_id: str,
+) -> WicketObservationResult:
+    try:
+        return load_wicket_observation(analysis_id)
+    except VideoAnalysisServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
 
 
 @router.get(

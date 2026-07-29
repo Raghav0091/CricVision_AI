@@ -9,6 +9,7 @@ import {
   getVideoBallTrackingJob,
   getVideoBallTrackingResult,
   startVideoBallTracking,
+  type DeliveryPhysicsResult,
   type VideoAnalysisPreparedResponse,
   type VideoBallDetectionResultResponse,
   type VideoBallTrackingJobStatus,
@@ -32,6 +33,7 @@ const ACTIVE_STATUSES = new Set<VideoBallTrackingJobStatus>([
   "analysing_candidates",
   "building_track",
   "recovering_gaps",
+  "fitting_physics",
   "rendering_video",
   "saving_results"
 ]);
@@ -44,6 +46,7 @@ function statusLabel(status: VideoBallTrackingJobStatus): string {
     analysing_candidates: "Analysing candidates",
     building_track: "Building track",
     recovering_gaps: "Recovering gaps",
+    fitting_physics: "Fitting physics",
     rendering_video: "Generating video",
     saving_results: "Saving results",
     ready: "Ready",
@@ -56,6 +59,151 @@ function statusLabel(status: VideoBallTrackingJobStatus): string {
 
 function frameRange(start?: number | null, end?: number | null): string {
   return start == null || end == null ? "—" : `${start}–${end}`;
+}
+
+
+function metric(value: number | null | undefined, suffix: string, digits = 1): string {
+  return value == null ? "Unavailable" : `${value.toFixed(digits)}${suffix}`;
+}
+
+
+function TopDownPitch({ physics }: { physics: DeliveryPhysicsResult }) {
+  const samples = physics.trajectory_samples.filter(
+    (sample) => sample.world_x_m != null && sample.world_y_m != null
+  );
+  const pitchWidth = physics.pitch_geometry.pitch_width_m;
+  const pitchLength = physics.pitch_geometry.pitch_length_m;
+  const mapX = (x: number) => 30 + ((x + pitchWidth / 2) / pitchWidth) * 240;
+  const mapY = (y: number) => 510 - (y / pitchLength) * 480;
+  const colours = {
+    OBSERVED: "#78e08f",
+    RECONSTRUCTED: "#ffca68",
+    PROJECTED: "#9aa5ad"
+  };
+
+  return (
+    <div className="min-w-0">
+      <p className="text-[11px] font-bold uppercase text-white/45">Top-down pitch</p>
+      <svg
+        aria-label="Top-down physics trajectory"
+        className="mt-2 h-auto w-full max-w-[18rem] bg-[#07100d]"
+        viewBox="0 0 300 540"
+      >
+        <rect x="30" y="30" width="240" height="480" fill="#183f2e" stroke="#9bb79f" strokeWidth="2" />
+        <line x1="150" y1="30" x2="150" y2="510" stroke="#d6e5d9" strokeOpacity="0.45" />
+        <line x1="141" y1="30" x2="159" y2="30" stroke="#fff" strokeWidth="4" />
+        <line x1="141" y1="510" x2="159" y2="510" stroke="#fff" strokeWidth="4" />
+        {samples.slice(1).map((sample, index) => {
+          const previous = samples[index];
+          return (
+            <line
+              key={`${sample.frame_index}-${index}`}
+              x1={mapX(previous.world_x_m as number)}
+              y1={mapY(previous.world_y_m as number)}
+              x2={mapX(sample.world_x_m as number)}
+              y2={mapY(sample.world_y_m as number)}
+              stroke={colours[sample.provenance]}
+              strokeWidth={sample.provenance === "OBSERVED" ? 3 : 2}
+              strokeDasharray={
+                sample.provenance === "PROJECTED"
+                  ? "3 5"
+                  : sample.provenance === "RECONSTRUCTED"
+                    ? "7 4"
+                    : undefined
+              }
+            />
+          );
+        })}
+        {physics.bounce.lateral_offset_m != null
+          && physics.bounce.distance_from_striker_wicket_m != null && (
+            <circle
+              cx={mapX(physics.bounce.lateral_offset_m)}
+              cy={mapY(
+                pitchLength - physics.bounce.distance_from_striker_wicket_m
+              )}
+              fill="#ff8a45"
+              r="6"
+              stroke="#fff"
+              strokeWidth="2"
+            />
+          )}
+      </svg>
+    </div>
+  );
+}
+
+
+function PhysicsAnalytics({ physics }: { physics: DeliveryPhysicsResult }) {
+  const stats = [
+    ["Calibration", physics.calibration.mode.replaceAll("_", " ")],
+    ["Trajectory confidence", physics.confidence],
+    ["Earliest measured speed", metric(physics.speed.earliest_measured_speed_kmh, " km/h")],
+    ["Average pre-bounce", metric(physics.speed.average_pre_bounce_speed_kmh, " km/h")],
+    ["Speed at bounce", metric(physics.speed.speed_at_bounce_kmh, " km/h")],
+    ["Pitching distance", metric(physics.bounce.distance_from_striker_wicket_m, " m", 2)],
+    ["Line", physics.line_and_length.line],
+    ["Length", physics.line_and_length.length],
+    ["Pre-bounce movement", metric(physics.pre_bounce_lateral_movement.movement_cm, " cm")],
+    [
+      "Post-bounce turn",
+      physics.post_bounce_movement.status === "MEASURED"
+        ? metric(physics.post_bounce_movement.lateral_turn_cm_at_last_observation, " cm")
+        : "Unavailable"
+    ],
+    ["Exact spin RPM", "Unavailable"],
+    ["Fit error", metric(physics.fit_diagnostics.weighted_reprojection_rmse_px, " px", 2)]
+  ];
+
+  return (
+    <section className="border-t border-white/10 pt-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h3 className="text-base font-black">Physics Analytics</h3>
+          <p className="mt-1 text-xs text-white/40">
+            Physics Engine {physics.physics_engine_version} · {physics.status.replaceAll("_", " ")}
+          </p>
+        </div>
+        {physics.physics_result_url && (
+          <a
+            className="text-xs font-bold text-lime hover:underline"
+            href={physics.physics_result_url}
+            rel="noreferrer"
+            target="_blank"
+          >
+            Physics JSON
+          </a>
+        )}
+      </div>
+      <div className="mt-3 grid gap-4 lg:grid-cols-[minmax(0,1fr)_18rem]">
+        <div>
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+            {stats.map(([label, value]) => (
+              <div key={label} className="border-b border-white/10 px-1 py-2">
+                <span className="block text-[10px] text-white/35">{label}</span>
+                <strong className="mt-0.5 block text-sm capitalize">{value}</strong>
+              </div>
+            ))}
+          </div>
+          <div className="mt-3 flex flex-wrap gap-3 text-[11px] text-white/55">
+            <span><i className="mr-1 inline-block h-2 w-3 bg-[#78e08f]" />Observed</span>
+            <span><i className="mr-1 inline-block h-2 w-3 bg-[#ffca68]" />Reconstructed</span>
+            <span><i className="mr-1 inline-block h-2 w-3 bg-[#9aa5ad]" />Projected</span>
+          </div>
+          {(physics.warnings.length > 0 || physics.speed.unavailable_reason) && (
+            <p className="mt-3 text-xs leading-5 text-[#ffdc9a]">
+              {[...physics.warnings, physics.speed.unavailable_reason]
+                .filter(Boolean)
+                .join(" ")}
+            </p>
+          )}
+          <p className="mt-2 text-[11px] text-white/35">
+            Exact spin RPM and seam angle are not measured from ordinary video.
+          </p>
+        </div>
+        <TopDownPitch physics={physics} />
+      </div>
+    </section>
+  );
 }
 
 
@@ -177,6 +325,8 @@ function TrackingResult({
           </aside>
         </div>
       )}
+
+      {result.physics && <PhysicsAnalytics physics={result.physics} />}
 
       <details className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
         <summary className="cursor-pointer text-sm font-bold text-white/55">

@@ -4,6 +4,17 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
+from packages.cricket_vision.calibration.cricket_pitch_geometry import (
+    PITCH_LENGTH_M,
+    PITCH_WIDTH_M,
+    POPPING_CREASE_OFFSET_M,
+    STUMP_DIAMETER_MAX_M,
+    STUMP_HEIGHT_M,
+    WICKET_WIDTH_M,
+)
+
+from .delivery_physics import DeliveryPhysicsResult
+
 
 class StrictGeometryModel(BaseModel):
     model_config = ConfigDict(allow_inf_nan=False)
@@ -272,12 +283,20 @@ CalibrationLandmarkSource = Literal[
 
 
 class CricketPitchGeometry(StrictGeometryModel):
-    pitch_length_m: float = Field(default=20.12, gt=0, le=40)
-    wicket_width_m: float = Field(default=0.2286, gt=0, le=1)
-    wicket_height_m: float = Field(default=0.7112, gt=0, le=2)
-    stump_diameter_m: float = Field(default=0.0381, gt=0, le=0.1)
-    pitch_width_m: float = Field(default=3.05, gt=0, le=10)
-    popping_crease_distance_m: float = Field(default=1.22, gt=0, le=5)
+    pitch_length_m: float = Field(default=PITCH_LENGTH_M, gt=0, le=40)
+    wicket_width_m: float = Field(default=WICKET_WIDTH_M, gt=0, le=1)
+    wicket_height_m: float = Field(default=STUMP_HEIGHT_M, gt=0, le=2)
+    stump_diameter_m: float = Field(
+        default=STUMP_DIAMETER_MAX_M,
+        gt=0,
+        le=0.1,
+    )
+    pitch_width_m: float = Field(default=PITCH_WIDTH_M, gt=0, le=10)
+    popping_crease_distance_m: float = Field(
+        default=POPPING_CREASE_OFFSET_M,
+        gt=0,
+        le=5,
+    )
 
     @model_validator(mode="after")
     def validate_pitch_dimensions(self) -> "CricketPitchGeometry":
@@ -869,6 +888,7 @@ VideoBallTrackingJobStatus = Literal[
     "analysing_candidates",
     "building_track",
     "recovering_gaps",
+    "fitting_physics",
     "rendering_video",
     "saving_results",
     "ready",
@@ -883,6 +903,7 @@ class VideoBallTrackingResultLinks(BaseModel):
     tracking_csv_url: str
     tracking_summary_url: str
     delivery_replay_url: str | None = None
+    physics_result_url: str | None = None
 
 
 # Provenance for every final track point (never label all as "detected").
@@ -992,6 +1013,7 @@ class VideoBallTrackingDocument(BaseModel):
     raw_primary_track: list[TrackingPoint] = Field(default_factory=list)
     candidate_diagnostics: list[TrackingCandidateDiagnostic]
     bounce: PrimaryBounceResult | None = None
+    physics: DeliveryPhysicsResult | None = None
     message: str
 
 
@@ -1027,6 +1049,15 @@ class VideoBallTrackingSummary(BaseModel):
     bounce_confidence: float = Field(default=0.0, ge=0, le=1)
     tracking_video_url: str
     delivery_replay_url: str | None = None
+    physics_result_url: str | None = None
+    physics_engine_version: Literal["v1"] | None = None
+    physics_status: Literal[
+        "SUCCESS",
+        "PARTIAL",
+        "IMAGE_SPACE_ONLY",
+        "INSUFFICIENT_EVIDENCE",
+        "FAILED",
+    ] | None = None
     tracking_json_url: str
     tracking_csv_url: str
     tracking_summary_url: str
@@ -1041,4 +1072,5 @@ class VideoBallTrackingResultResponse(BaseModel):
     summary: VideoBallTrackingSummary
     primary_track: list[TrackingPoint]
     bounce: PrimaryBounceResult | None = None
+    physics: DeliveryPhysicsResult | None = None
     message: str

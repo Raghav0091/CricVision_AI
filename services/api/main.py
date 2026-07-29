@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -7,10 +8,17 @@ from fastapi.staticfiles import StaticFiles
 from .routes import analysis, calibration, deliveries, health, sessions, video_analysis
 
 
+def _development_cors_origins() -> list[str]:
+    configured = os.environ.get("CRICVISION_WEB_ORIGIN", "").strip()
+    if configured:
+        return [origin.strip() for origin in configured.split(",") if origin.strip()]
+    return ["http://localhost:3000", "http://127.0.0.1:3000"]
+
+
 app = FastAPI(title="CricVision Pro API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=_development_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

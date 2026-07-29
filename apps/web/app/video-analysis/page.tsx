@@ -6,6 +6,8 @@ import { BallDetectionPanel } from "@/components/video-analysis/BallDetectionPan
 import { BallTrackingPanel } from "@/components/video-analysis/BallTrackingPanel";
 import { MEDIA_FIT_CLASS } from "@/components/video-analysis/AnalysisMediaStage";
 import { SceneCalibrationPanel } from "@/components/video-analysis/SceneCalibrationPanel";
+import { VirtualPitchOverlay } from "@/components/video-analysis/VirtualPitchOverlay";
+import { WicketObservationPanel } from "@/components/video-analysis/WicketObservationPanel";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { StatusBadge } from "@/components/ui/StatusBadge";
@@ -545,6 +547,17 @@ export default function VideoAnalysisPage() {
         </Card>
       )}
 
+      {!uploadComplete && (
+        <details className="mt-4 rounded-xl border border-white/10 bg-panel/60 px-4 py-3">
+          <summary className="cursor-pointer text-sm font-bold text-white/60">
+            Developer: Virtual Pitch Geometry
+          </summary>
+          <div className="mt-3">
+            <VirtualPitchOverlay />
+          </div>
+        </details>
+      )}
+
       {uploadComplete && analysis && (
         <section className="mt-4 space-y-4">
           {error && (
@@ -584,6 +597,24 @@ export default function VideoAnalysisPage() {
                   />
                 </div>
               </div>
+            </div>
+          </details>
+
+          <details className="rounded-xl border border-white/10 bg-panel/60 px-4 py-3">
+            <summary className="cursor-pointer text-sm font-bold text-white/60">
+              Developer: Real Wicket Observations
+            </summary>
+            <div className="mt-3">
+              <WicketObservationPanel analysisId={analysis.analysis_id} />
+            </div>
+          </details>
+
+          <details className="rounded-xl border border-white/10 bg-panel/60 px-4 py-3">
+            <summary className="cursor-pointer text-sm font-bold text-white/60">
+              Developer: Virtual Pitch Geometry
+            </summary>
+            <div className="mt-3">
+              <VirtualPitchOverlay />
             </div>
           </details>
 
