@@ -1627,6 +1627,9 @@ export type RealPitchProjection = Omit<ProjectedPitchGeometry, "synthetic_only">
   registered_to_real_setup_frame: true;
 };
 
+
+export type PitchProjectionGeometry = ProjectedPitchGeometry | RealPitchProjection;
+
 export type RegistrationCorrespondence = {
   correspondence_id: string;
   observed_wicket_role: "near" | "far";
@@ -2630,7 +2633,7 @@ export type CameraBridgeApiResponse = {
     } | null;
     warnings: string[];
   } | null;
-  projected_pitch_geometry?: ProjectedPitchGeometry | null;
+  projected_pitch_geometry?: PitchProjectionGeometry | null;
   warnings: string[];
   message: string;
 };
@@ -2638,7 +2641,219 @@ export type CameraBridgeApiResponse = {
 
 export type NormalizedCameraBridgeResponse = {
   camera: CameraBridgeInput & { setup_frame_url?: string | null };
-  projection: ProjectedPitchGeometry | null;
+  projection: PitchProjectionGeometry | null;
+};
+
+
+export type AutoRegistrationStatus =
+  | "NOT_STARTED"
+  | "PRESET_INCOMPATIBLE"
+  | "INSUFFICIENT_WICKETS"
+  | "INSUFFICIENT_EVIDENCE"
+  | "FITTING"
+  | "AUTO_REGISTRATION_READY"
+  | "VISUAL_OVERLAY_READY"
+  | "NEEDS_ASSISTANCE"
+  | "FAILED";
+
+
+export type CameraSetupPreset = {
+  preset_id: string;
+  preset_name: string;
+  version: string;
+  description: string;
+  intended_use: string;
+  camera_end: "bowler" | "striker";
+  pitch_profile: string;
+  native_orientation: "PORTRAIT" | "LANDSCAPE" | "SQUARE" | "PORTRAIT_OR_LANDSCAPE";
+  expected_aspect_ratio_range: {
+    minimum_long_edge_to_short_edge_ratio: number;
+    maximum_long_edge_to_short_edge_ratio: number;
+  };
+  nominal_camera_height_m: number;
+  camera_height_bounds_m: { minimum_m: number; maximum_m: number };
+  nominal_distance_behind_wicket_m: number;
+  distance_bounds_m: { minimum_m: number; maximum_m: number };
+  nominal_lateral_offset_m: number;
+  lateral_offset_bounds_m: { minimum_m: number; maximum_m: number };
+  nominal_yaw_deg: number;
+  yaw_bounds_deg: { minimum_deg: number; maximum_deg: number };
+  nominal_pitch_deg: number;
+  pitch_bounds_deg: { minimum_deg: number; maximum_deg: number };
+  nominal_roll_deg: number;
+  roll_bounds_deg: { minimum_deg: number; maximum_deg: number };
+  nominal_horizontal_fov_deg: number;
+  horizontal_fov_bounds_deg: { minimum_deg: number; maximum_deg: number };
+  image_left_mapping: "IMAGE_LEFT_IS_PITCH_LEFT" | "IMAGE_LEFT_IS_PITCH_RIGHT";
+  distortion_policy: "ZERO_OR_PREUNDISTORTED";
+  both_wickets_required: boolean;
+  minimum_frame_support: number;
+  minimum_wicket_confidence: number;
+  source: string;
+  development_only: boolean;
+  warnings: string[];
+};
+
+
+export type PresetCompatibilityResult = {
+  status: "COMPATIBLE" | "COMPATIBLE_WITH_WARNINGS" | "INCOMPATIBLE";
+  native_video_width_px: number;
+  native_video_height_px: number;
+  detected_orientation: "PORTRAIT" | "LANDSCAPE" | "SQUARE";
+  long_edge_to_short_edge_aspect_ratio: number;
+  rotation_metadata_deg: number | null;
+  distortion_mode: "ZERO_DISTORTION" | "PREUNDISTORTED_FRAME" | "NONZERO_DISTORTION_UNSUPPORTED";
+  camera_end: "bowler" | "striker" | null;
+  both_wickets_present: boolean;
+  setup_frame_available: boolean;
+  supporting_frame_count: number;
+  wicket_observations_valid: boolean;
+  severe_clipping_detected: boolean;
+  nested_false_wicket_evidence_detected: boolean;
+  unsupported_crop_or_rotation_detected: boolean;
+  reasons: Array<{ reason_code: string; severity: "WARNING" | "ERROR"; message: string }>;
+};
+
+
+export type AutoRegistrationParameters = {
+  camera_height_m: number;
+  distance_behind_wicket_m: number;
+  lateral_offset_m: number;
+  yaw_deg: number;
+  pitch_deg: number;
+  roll_deg: number;
+  horizontal_fov_deg: number;
+  principal_point_offset_x_px: number;
+  principal_point_offset_y_px: number;
+};
+
+
+export type AutoRegistrationSetupFrame = {
+  frame_index: number;
+  timestamp_seconds: number;
+  image_width: number;
+  image_height: number;
+  score: number;
+  sharpness: number;
+  brightness: number;
+  wicket_detection_count: number;
+  mean_detector_confidence: number;
+  detection_stability: number;
+  obstruction_score: number;
+  selected: boolean;
+  rejection_reasons: string[];
+};
+
+
+export type PresetAutoRegistrationResult = {
+  preset_auto_registration_version: "v1";
+  analysis_id: string;
+  status: AutoRegistrationStatus;
+  geometric_classification:
+    | "METRIC_3D_CANDIDATE"
+    | "GROUND_PLANE_CANDIDATE"
+    | "VISUAL_ONLY"
+    | "REGISTRATION_FAILED";
+  preset: CameraSetupPreset;
+  preset_compatibility: PresetCompatibilityResult;
+  setup_frame: AutoRegistrationSetupFrame | null;
+  supporting_frames: AutoRegistrationSetupFrame[];
+  observation_source: "PERSISTED_WICKET_OBSERVATION_V1" | "NEW_WICKET_OBSERVATION_V1" | "UNAVAILABLE";
+  detection_reused: boolean;
+  candidates_attempted: Array<{
+    candidate_id: string;
+    source: "PRESET_NOMINAL" | "PRESET_PERTURBATION" | "EXISTING_PNP_CANDIDATE" | "EXISTING_REFINED_CANDIDATE";
+    deterministic_order: number;
+    initial_parameters: AutoRegistrationParameters;
+    attempted: boolean;
+    converged: boolean;
+    eligible_for_selection: boolean;
+    robust_loss: string | null;
+    final_cost: number | null;
+    score: number | null;
+    rejection_reasons: string[];
+  }>;
+  selected_candidate: RegistrationCandidate | null;
+  competing_candidate: RegistrationCandidate | null;
+  fitted_parameters: AutoRegistrationParameters | null;
+  initial_parameters: AutoRegistrationParameters | null;
+  parameter_changes: Array<{ parameter_name: string; unit: "m" | "deg" | "px"; initial_value: number; fitted_value: number; delta: number }>;
+  active_bounds: Array<{ parameter_name: string; bound: "MINIMUM" | "MAXIMUM"; value: number; unit: "m" | "deg" | "px"; critical: boolean }>;
+  anchor_metrics: {
+    exact_anchor_count: number;
+    pointlike_anchor_count: number;
+    soft_constraint_count: number;
+    inlier_count: number;
+    outlier_count: number;
+    reprojection_rmse_px: number | null;
+    median_reprojection_error_px: number | null;
+    maximum_inlier_error_px: number | null;
+  } | null;
+  envelope_metrics: {
+    near_wicket_iou: number | null;
+    far_wicket_iou: number | null;
+    near_centre_residual_px: number | null;
+    far_centre_residual_px: number | null;
+    near_width_residual_px: number | null;
+    far_width_residual_px: number | null;
+    near_height_residual_px: number | null;
+    far_height_residual_px: number | null;
+  } | null;
+  temporal_metrics: {
+    frame_count: number;
+    successful_frame_count: number;
+    median_near_wicket_iou: number | null;
+    median_far_wicket_iou: number | null;
+    median_centre_residual_px: number | null;
+    median_width_residual_px: number | null;
+    median_height_residual_px: number | null;
+    scale_consistency_score: number | null;
+    temporal_stability_score: number;
+    worst_supporting_frame_index: number | null;
+  } | null;
+  physical_checks: Array<{ check_id: string; passed: boolean; value: number | string | boolean | null; reason: string }>;
+  uncertainty: {
+    perturbation_count: number;
+    deterministic_seed: number;
+    camera_position_spread_m: number | null;
+    camera_rotation_spread_deg: number | null;
+    horizontal_fov_spread_deg: number | null;
+    projected_wicket_movement_px: number | null;
+    projected_pitch_corner_movement_px: number | null;
+    projected_bounce_location_sensitivity_px: number | null;
+    candidate_ordering_stability: number | null;
+    stable: boolean;
+    warnings: string[];
+  } | null;
+  ambiguity: {
+    score: number;
+    competing_solution_plausible: boolean;
+    selected_candidate_id: string | null;
+    competing_candidate_id: string | null;
+    reasons: string[];
+  } | null;
+  projected_pitch: RealPitchProjection | null;
+  bridge_camera: NonNullable<CameraBridgeApiResponse["camera"]> | null;
+  stage_timings: {
+    observation_load_ms: number | null;
+    candidate_generation_ms: number | null;
+    optimisation_ms: number | null;
+    temporal_validation_ms: number | null;
+    total_ms: number | null;
+  };
+  warnings: string[];
+  failure_reasons: string[];
+  manual_assistance_available: boolean;
+  production_accepted: false;
+  metrics_unlocked: string[];
+};
+
+
+export type RunPresetAutoRegistrationRequest = {
+  preset_id: string;
+  reuse_existing_observations?: boolean;
+  force_redetect?: boolean;
+  development_diagnostics?: boolean;
 };
 
 
@@ -2676,6 +2891,92 @@ function normalizeCameraBridgeResponse(response: CameraBridgeApiResponse): Norma
     },
     projection: response.projected_pitch_geometry ?? null
   };
+}
+
+
+function withBrowserSafeAutoRegistration(
+  result: PresetAutoRegistrationResult
+): PresetAutoRegistrationResult {
+  return result;
+}
+
+
+export function autoRegistrationCameraBridge(
+  result: PresetAutoRegistrationResult | null
+): NormalizedCameraBridgeResponse | null {
+  const camera = result?.bridge_camera;
+  if (!result || !camera) return null;
+  return normalizeCameraBridgeResponse({
+    bridge_version: "opencv_three_camera_bridge_v1",
+    status: "AVAILABLE",
+    camera,
+    projected_pitch_geometry: result.projected_pitch,
+    warnings: result.warnings,
+    message: "Automatic registration camera is available."
+  });
+}
+
+
+export async function getCameraSetupPresets(): Promise<CameraSetupPreset[]> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/scene-calibration/presets`,
+    { cache: "no-store" }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(response, `Camera setup presets returned ${response.status}.`);
+  }
+  const payload = await response.json() as CameraSetupPreset[] | { presets: CameraSetupPreset[] };
+  return Array.isArray(payload) ? payload : payload.presets;
+}
+
+
+export async function runPresetAutoRegistration(
+  analysisId: string,
+  request: RunPresetAutoRegistrationRequest
+): Promise<PresetAutoRegistrationResult> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/scene-calibration/auto-register`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        preset_id: request.preset_id,
+        reuse_existing_observations: request.reuse_existing_observations ?? true,
+        force_redetect: request.force_redetect ?? false,
+        development_diagnostics: request.development_diagnostics ?? true
+      })
+    }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(response, `Automatic registration returned ${response.status}.`);
+  }
+  return withBrowserSafeAutoRegistration(await response.json() as PresetAutoRegistrationResult);
+}
+
+
+export async function getPresetAutoRegistration(
+  analysisId: string
+): Promise<PresetAutoRegistrationResult | null> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/scene-calibration/auto-registration`,
+    { cache: "no-store" }
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw await videoAnalysisError(response, `Automatic registration lookup returned ${response.status}.`);
+  }
+  return withBrowserSafeAutoRegistration(await response.json() as PresetAutoRegistrationResult);
+}
+
+
+export async function clearPresetAutoRegistration(analysisId: string): Promise<void> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/scene-calibration/auto-registration/clear`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(response, `Clearing automatic registration returned ${response.status}.`);
+  }
 }
 
 

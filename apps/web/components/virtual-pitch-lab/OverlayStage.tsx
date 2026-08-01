@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { containedMediaRect, type ContainedMediaRect } from "@/lib/calibrationCoordinates";
-import type { ProjectedPitchGeometry } from "@/lib/api";
+import type { PitchProjectionGeometry } from "@/lib/api";
 import { validRenderBounds } from "@/lib/virtual-pitch/cameraOwnership";
 
 import { ProjectedPitchSvg } from "./ProjectedPitchSvg";
@@ -16,7 +16,7 @@ type StageContentProps = {
   imageHeight: number;
   frameUrl?: string | null;
   threeCanvas: ReactNode;
-  projection?: ProjectedPitchGeometry | null;
+  projection?: PitchProjectionGeometry | null;
   comparisons: LandmarkProjectionComparison[];
   comparisonMode: OverlayComparisonMode;
   overlayOpacity: number;

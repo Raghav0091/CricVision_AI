@@ -1,9 +1,15 @@
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Body, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Body, File, HTTPException, Response, UploadFile
 
 from ..schemas.camera_bridge import CameraBridgeResponse
+from ..schemas.preset_auto_registration import (
+    CameraSetupPresetListResponse,
+    PresetAutoRegistrationResult,
+    PresetAutoRegistrationRunRequest,
+    list_camera_setup_presets,
+)
 from ..schemas.video_analysis import (
     BallDetectorModelOption,
     BallDetectorModelsResponse,
@@ -93,6 +99,11 @@ from ..services.real_pitch_registration_service import (
     load_real_pitch_registration,
     run_real_pitch_registration,
 )
+from ..services.preset_auto_registration import (
+    clear_preset_auto_registration,
+    load_preset_auto_registration,
+    run_preset_auto_registration,
+)
 from ..services.scene_calibration_service import (
     accept_scene_calibration,
     apply_scene_calibration_orientation,
@@ -118,6 +129,68 @@ from ..services.wicket_observation_service import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/video-analysis", tags=["video-analysis"])
+
+
+@router.get(
+    "/scene-calibration/presets",
+    response_model=CameraSetupPresetListResponse,
+)
+def get_scene_calibration_presets() -> CameraSetupPresetListResponse:
+    return CameraSetupPresetListResponse(presets=list_camera_setup_presets())
+
+
+@router.post(
+    "/{analysis_id}/scene-calibration/auto-register",
+    response_model=PresetAutoRegistrationResult,
+)
+def run_analysis_preset_auto_registration(
+    analysis_id: str,
+    request: PresetAutoRegistrationRunRequest,
+) -> PresetAutoRegistrationResult:
+    try:
+        return run_preset_auto_registration(
+            analysis_id,
+            preset_id=request.preset_id,
+            reuse_existing_observations=request.reuse_existing_observations,
+            force_redetect=request.force_redetect,
+            development_diagnostics=request.development_diagnostics,
+        )
+    except VideoAnalysisServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.get(
+    "/{analysis_id}/scene-calibration/auto-registration",
+    response_model=PresetAutoRegistrationResult,
+)
+def get_analysis_preset_auto_registration(
+    analysis_id: str,
+) -> PresetAutoRegistrationResult:
+    try:
+        return load_preset_auto_registration(analysis_id)
+    except VideoAnalysisServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.post(
+    "/{analysis_id}/scene-calibration/auto-registration/clear",
+    status_code=204,
+)
+def clear_analysis_preset_auto_registration(analysis_id: str) -> Response:
+    try:
+        clear_preset_auto_registration(analysis_id)
+    except VideoAnalysisServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+    return Response(status_code=204)
 
 
 @router.get(

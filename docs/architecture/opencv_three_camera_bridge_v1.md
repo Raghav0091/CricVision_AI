@@ -1,5 +1,9 @@
 # OpenCV-Three.js Camera Bridge V1
 
+Preset-constrained automatic registration feeds candidate cameras through this
+unchanged bridge; see
+[`preset_constrained_auto_registration_v1.md`](preset_constrained_auto_registration_v1.md).
+
 ## Scope
 
 This bridge makes the existing Virtual Pitch V1 renderer reproduce an OpenCV

@@ -1,5 +1,10 @@
 # Assisted Scene Calibration and Metric Activation V1
 
+Preset-constrained automatic registration is specified in
+[`preset_constrained_auto_registration_v1.md`](preset_constrained_auto_registration_v1.md).
+It reuses this workflow as an advanced fallback and does not bypass acceptance
+or metric-locking rules.
+
 ## Ownership
 
 `SceneCalibrationResult` is the backend-owned state for the production Video

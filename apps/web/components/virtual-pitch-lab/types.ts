@@ -1,5 +1,5 @@
 import type {
-  ProjectedPitchGeometry,
+  PitchProjectionGeometry,
   VirtualPitchCamera,
   VirtualPitchPixelPoint,
   VirtualPitchWorldPoint
@@ -8,6 +8,7 @@ import type { CameraBridgeInput } from "@/lib/virtual-pitch/opencvCameraBridge";
 
 
 export type CameraSourceMode =
+  | "auto-registration"
   | "development"
   | "synthetic-opencv"
   | "real-analysis";
@@ -61,7 +62,7 @@ export type CameraBridgeDiagnostics = {
 
 export type CameraBridgePayload = {
   camera: LabCameraBridgeInput;
-  projection?: ProjectedPitchGeometry | null;
+  projection?: PitchProjectionGeometry | null;
   comparisons?: LandmarkProjectionComparison[];
   diagnostics?: CameraBridgeDiagnostics | null;
 };
