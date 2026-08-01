@@ -156,3 +156,12 @@ camera scale and roll remain ambiguous. This patch makes the solver stable and
 honest but cannot create missing visual evidence. Automatic acceptance, metric
 analytics, Video/Live integration, trajectory, replay, and physics activation
 remain outside scope.
+
+## Follow-on evidence result
+
+`wicket_landmark_evidence_upgrade_v1.md` records the next evidence experiment.
+The corrected parameterization and objective remain the sole optimization path.
+Native multi-frame extraction recovered three axes per wicket, but no defensible
+top/base points or transverse scene constraints. The resulting axis-only camera
+remained `NEEDS_ASSISTANCE / VISUAL_ONLY` and more ambiguous than required,
+confirming that mathematical stability cannot replace missing scale evidence.

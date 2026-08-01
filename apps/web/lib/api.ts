@@ -1,5 +1,6 @@
 import type { BoxLayout, CalibrationResponse, CapturedFrame } from "./types";
 import type { CameraBridgeInput } from "./virtual-pitch/opencvCameraBridge";
+import { safeAnalysisMediaUrl } from "./wicketLandmarkMedia";
 
 
 export const API_BASE_URL = (
@@ -2857,6 +2858,144 @@ export type RunPresetAutoRegistrationRequest = {
 };
 
 
+export type WicketEvidenceGrade = "DETAILED" | "PARTIAL" | "COARSE" | "INSUFFICIENT";
+export type WicketEvidenceSemanticType = "EXACT" | "POINTLIKE" | "LINE" | "SOFT" | "UNAVAILABLE";
+
+
+export type WicketLandmarkPoint = {
+  semantic_id: string;
+  x_px: number | null;
+  y_px: number | null;
+  confidence: number;
+  uncertainty_x_px: number | null;
+  uncertainty_y_px: number | null;
+  supporting_frame_count: number;
+  supporting_frame_ids: number[];
+  extraction_method: string;
+  semantic_type: WicketEvidenceSemanticType;
+  status: "AVAILABLE" | "UNAVAILABLE" | "REJECTED";
+  rejection_reason?: string | null;
+};
+
+
+export type WicketLandmarkLine = {
+  semantic_id: string;
+  start_x_px: number | null;
+  start_y_px: number | null;
+  end_x_px: number | null;
+  end_y_px: number | null;
+  normalized_line_equation?: { a: number; b: number; c: number } | null;
+  confidence: number;
+  angular_uncertainty_deg: number | null;
+  perpendicular_uncertainty_px: number | null;
+  supporting_frame_count: number;
+  extraction_method: string;
+  semantic_type: WicketEvidenceSemanticType;
+  status: "AVAILABLE" | "UNAVAILABLE" | "REJECTED";
+  rejection_reason?: string | null;
+};
+
+
+export type WicketLandmarkMedia = {
+  native_roi_url?: string | null;
+  temporal_consensus_url?: string | null;
+  native_roi_image_url?: string | null;
+  temporal_consensus_image_url?: string | null;
+  accepted_evidence_overlay_url?: string | null;
+  raw_line_candidates_url?: string | null;
+  accepted_axes_url?: string | null;
+  rejected_axes_url?: string | null;
+  endpoints_url?: string | null;
+  uncertainty_url?: string | null;
+  optional_scene_lines_url?: string | null;
+};
+
+
+export type WicketLandmarkSet = {
+  role: "NEAR" | "FAR" | string;
+  source_consensus_box?: unknown;
+  native_roi?: { box?: { x: number; y: number; width: number; height: number }; image_url?: string | null; [key: string]: unknown } | null;
+  supporting_frame_ids: number[];
+  crop_quality?: number | null;
+  alignment_quality?: number | null;
+  axes: WicketLandmarkLine[];
+  points: WicketLandmarkPoint[];
+  lines: WicketLandmarkLine[];
+  evidence_completeness?: {
+    detailed_axis_count?: number;
+    top_point_count?: number;
+    base_point_count?: number;
+    line_count?: number;
+    independent_constraint_count?: number;
+    temporal_support?: number;
+    mean_confidence?: number | null;
+    median_uncertainty_px?: number | null;
+    evidence_grade?: WicketEvidenceGrade;
+  } | null;
+  confidence?: number | null;
+  uncertainty_px?: number | null;
+  clipping?: boolean;
+  warnings: string[];
+  debug_media?: WicketLandmarkMedia | null;
+  temporal_consensus_image_url?: string | null;
+};
+
+
+export type WicketLandmarkEvidenceResult = {
+  wicket_landmark_evidence_version: "v1" | string;
+  analysis_id: string;
+  source_observation_version?: string | null;
+  created_at?: string | null;
+  status?: "READY" | "PARTIAL" | "INSUFFICIENT_EVIDENCE" | "INSUFFICIENT_WICKETS" | "FAILED" | string;
+  native_image_width: number;
+  native_image_height: number;
+  rotation_applied?: number | boolean | null;
+  coordinate_space: string;
+  near_wicket: WicketLandmarkSet | null;
+  far_wicket: WicketLandmarkSet | null;
+  optional_scene_evidence?: WicketLandmarkLine[] | null;
+  supporting_frames: Array<number | { frame_index: number; timestamp_seconds?: number; quality_score?: number; selected?: boolean; rejection_reasons?: string[] }>;
+  frame_selection?: {
+    frames_considered?: number;
+    frames_selected?: number;
+    rejected_frames?: number;
+    [key: string]: unknown;
+  } | null;
+  temporal_alignment?: { quality?: number | null; median_normalized_residual?: number | null; [key: string]: unknown } | null;
+  extraction_diagnostics?: {
+    extraction_time_ms?: number | null;
+    landmark_extraction_consensus_ms?: number | null;
+    frame_preparation_composite_ms?: number | null;
+    serialization_ms?: number | null;
+    auto_registration_ms?: number | null;
+    total_ms?: number | null;
+    independent_constraint_count?: number;
+    [key: string]: unknown;
+  } | null;
+  debug_media?: WicketLandmarkMedia | null;
+  warnings: string[];
+  failure_reasons: string[];
+  detector_reused?: boolean;
+  production_accepted?: false;
+  metrics_unlocked?: string[];
+};
+
+
+export type RunWicketLandmarkEvidenceRequest = {
+  reuse_existing_observations?: boolean;
+  force_redetect?: boolean;
+  include_optional_scene_evidence?: boolean;
+  rerun_auto_registration?: boolean;
+  write_debug_media?: boolean;
+  preset_id?: string;
+};
+
+
+export function wicketLandmarkMediaUrl(value: string | null | undefined): string | null {
+  return safeAnalysisMediaUrl(API_BASE_URL, value);
+}
+
+
 function normalizeCameraBridgeResponse(response: CameraBridgeApiResponse): NormalizedCameraBridgeResponse {
   const camera = response.camera;
   if (response.status !== "AVAILABLE" || !camera) {
@@ -2976,6 +3115,58 @@ export async function clearPresetAutoRegistration(analysisId: string): Promise<v
   );
   if (!response.ok) {
     throw await videoAnalysisError(response, `Clearing automatic registration returned ${response.status}.`);
+  }
+}
+
+
+export async function runWicketLandmarkEvidence(
+  analysisId: string,
+  request: RunWicketLandmarkEvidenceRequest = {}
+): Promise<WicketLandmarkEvidenceResult> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/wicket-landmark-evidence/run`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        reuse_existing_observations: request.reuse_existing_observations ?? true,
+        force_redetect: request.force_redetect ?? false,
+        include_optional_scene_evidence: request.include_optional_scene_evidence ?? false,
+        rerun_auto_registration: request.rerun_auto_registration ?? false,
+        write_debug_media: request.write_debug_media ?? false,
+        preset_id: request.preset_id ?? "STANDARD_REAR_WICKET_NET_V1"
+      })
+    }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(response, `Wicket landmark extraction returned ${response.status}.`);
+  }
+  return response.json() as Promise<WicketLandmarkEvidenceResult>;
+}
+
+
+export async function getWicketLandmarkEvidence(
+  analysisId: string
+): Promise<WicketLandmarkEvidenceResult | null> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/wicket-landmark-evidence`,
+    { cache: "no-store" }
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw await videoAnalysisError(response, `Wicket landmark evidence lookup returned ${response.status}.`);
+  }
+  return response.json() as Promise<WicketLandmarkEvidenceResult>;
+}
+
+
+export async function clearWicketLandmarkEvidence(analysisId: string): Promise<void> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/wicket-landmark-evidence/clear`,
+    { method: "POST" }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(response, `Clearing wicket landmark evidence returned ${response.status}.`);
   }
 }
 

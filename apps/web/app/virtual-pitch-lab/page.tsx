@@ -24,6 +24,7 @@ import {
   AutoRegistrationPanel,
   CameraDiagnosticsPanel,
   OverlayStage,
+  WicketLandmarkEvidencePanel,
   type CameraBridgePayload,
   type CameraSourceMode,
   type OverlayComparisonMode
@@ -461,6 +462,13 @@ export default function VirtualPitchLabPage() {
             onRun={() => void runAutomaticRegistration()}
             onClear={() => void clearAutomaticRegistration()}
             onOpenAdvanced={() => setAdvancedOpen(true)}
+          />}
+
+          {sourceMode === "auto-registration" && <WicketLandmarkEvidencePanel
+            analysisId={analysisId}
+            presetId={setupPresetId}
+            onAnalysisIdChange={(value) => { setAnalysisId(value); setAutoResult(null); }}
+            onImprovedRegistration={setAutoResult}
           />}
 
           {sourceMode !== "auto-registration" && <div className="flex flex-wrap items-center justify-between gap-3">

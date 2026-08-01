@@ -25,11 +25,21 @@ from ..schemas.real_pitch_registration import (
     PlausibilityCheck,
     RealProjectedPitchGeometry,
     RefinementDiagnostics,
+    RegistrationCorrespondence,
 )
 from ..schemas.wicket_observation import (
     PixelBox,
+    PixelPoint,
     RawWicketDetection,
+    WicketLandmarkObservation,
+    WicketLineObservation,
     WicketObservationResult,
+)
+from ..schemas.wicket_landmark_evidence import (
+    WicketEvidenceLine,
+    WicketEvidencePoint,
+    WicketLandmarkEvidenceResult,
+    WicketLandmarkSet,
 )
 from .real_pitch_registration_service import (
     _box_iou,
@@ -96,6 +106,7 @@ class _Evidence:
     frame_boxes: dict[tuple[int, str], PixelBox]
     image_width: int
     image_height: int
+    evidence_mode: str = "LEGACY_COARSE"
 
 
 @dataclass(frozen=True)
@@ -480,14 +491,284 @@ def _select_frame_boxes(
     return selected
 
 
-def _evidence(observation: WicketObservationResult, preset: _Preset) -> _Evidence:
+_POINT_SEMANTIC_IDS = {
+    "left_stump_base",
+    "middle_stump_base",
+    "right_stump_base",
+    "left_stump_top",
+    "middle_stump_top",
+    "right_stump_top",
+}
+_LINE_SEMANTIC_ALIASES = {
+    "left_outer_axis": "left_outer_axis",
+    "right_outer_axis": "right_outer_axis",
+    "bail_line": "top_or_bail_line",
+    "top_line": "top_or_bail_line",
+    "top_or_bail_line": "top_or_bail_line",
+    "ground_line": "base_line",
+    "base_line": "base_line",
+}
+
+
+def _point_landmark(item: WicketEvidencePoint) -> WicketLandmarkObservation | None:
+    if (
+        item.status != "AVAILABLE"
+        or item.semantic_id not in _POINT_SEMANTIC_IDS
+        or item.x_px is None
+        or item.y_px is None
+        or item.uncertainty_x_px is None
+        or item.uncertainty_y_px is None
+    ):
+        return None
+    # Classical endpoints are measurements with uncertainty, never exact anchors.
+    pointlike = item.semantic_type in {"EXACT", "POINTLIKE"}
+    return WicketLandmarkObservation(
+        semantic_id=item.semantic_id,
+        geometry_type="POINT",
+        pixel_x=item.x_px,
+        pixel_y=item.y_px,
+        confidence=item.confidence,
+        uncertainty_px=max(item.uncertainty_x_px, item.uncertainty_y_px, 1.0),
+        extraction_method=item.extraction_method,
+        supporting_evidence=[
+            "wicket_landmark_evidence_v1",
+            f"semantic_type:{item.semantic_type}",
+        ],
+        supporting_frames=item.supporting_frame_ids,
+        registration_role="PRIMARY_ANCHOR" if pointlike else "VALIDATION_ONLY",
+        quality=(
+            "HIGH"
+            if pointlike and item.confidence >= 0.75
+            else "MEDIUM"
+            if pointlike
+            else "LOW"
+        ),
+        status="AVAILABLE",
+    )
+
+
+def _line_landmark(item: WicketEvidenceLine) -> WicketLandmarkObservation | None:
+    semantic_id = _LINE_SEMANTIC_ALIASES.get(item.semantic_id)
+    if (
+        item.status != "AVAILABLE"
+        or semantic_id is None
+        or item.semantic_type not in {"LINE", "SOFT"}
+        or item.start_x_px is None
+        or item.start_y_px is None
+        or item.end_x_px is None
+        or item.end_y_px is None
+        or item.perpendicular_uncertainty_px is None
+    ):
+        return None
+    return WicketLandmarkObservation(
+        semantic_id=semantic_id,
+        geometry_type="LINE",
+        line=WicketLineObservation(
+            start=PixelPoint(x=item.start_x_px, y=item.start_y_px),
+            end=PixelPoint(x=item.end_x_px, y=item.end_y_px),
+        ),
+        confidence=item.confidence,
+        uncertainty_px=max(item.perpendicular_uncertainty_px, 1.0),
+        extraction_method=item.extraction_method,
+        supporting_evidence=[
+            "wicket_landmark_evidence_v1",
+            f"source_semantic_id:{item.semantic_id}",
+            f"semantic_type:{item.semantic_type}",
+        ],
+        supporting_frames=item.supporting_frame_ids,
+        registration_role=(
+            "SECONDARY_ANCHOR" if item.semantic_type == "LINE" else "VALIDATION_ONLY"
+        ),
+        quality="HIGH" if item.confidence >= 0.75 else "MEDIUM",
+        status="AVAILABLE",
+    )
+
+
+def _detailed_landmarks(wicket: WicketLandmarkSet) -> list[WicketLandmarkObservation]:
+    converted = [
+        landmark
+        for landmark in (
+            [_point_landmark(item) for item in wicket.points]
+            + [_line_landmark(item) for item in [*wicket.axes, *wicket.lines]]
+        )
+        if landmark is not None
+    ]
+    # Aliases can describe the same physical line; retain one deterministic best item.
+    by_semantic: dict[str, WicketLandmarkObservation] = {}
+    for item in sorted(
+        converted,
+        key=lambda value: (-value.confidence, value.uncertainty_px, value.semantic_id),
+    ):
+        by_semantic.setdefault(item.semantic_id, item)
+    return [by_semantic[name] for name in sorted(by_semantic)]
+
+
+def adapt_wicket_landmark_evidence(
+    observation: WicketObservationResult,
+    landmark_evidence: WicketLandmarkEvidenceResult,
+) -> WicketObservationResult:
+    """Overlay independent native-pixel evidence without mutating legacy evidence."""
+    if landmark_evidence.analysis_id != observation.analysis_id:
+        raise ValueError("Landmark evidence belongs to another analysis.")
+    if observation.setup_frame is None or (
+        landmark_evidence.native_image_width != observation.setup_frame.image_width
+        or landmark_evidence.native_image_height != observation.setup_frame.image_height
+    ):
+        raise ValueError("Landmark evidence native dimensions do not match setup frame.")
+    updates: dict[str, Any] = {}
+    for role in ("near", "far"):
+        source = getattr(landmark_evidence, f"{role}_wicket")
+        legacy = getattr(observation, f"{role}_wicket")
+        if source is None or legacy is None:
+            continue
+        detailed = _detailed_landmarks(source)
+        updates[f"{role}_wicket"] = legacy.model_copy(
+            deep=True,
+            update={
+                "detailed_landmarks": detailed,
+                "detailed_landmarks_status": (
+                    "AVAILABLE" if len(detailed) >= 4 else "PARTIAL" if detailed else "INSUFFICIENT_EVIDENCE"
+                ),
+            },
+        )
+    return observation.model_copy(deep=True, update=updates)
+
+
+def build_landmark_registration_correspondences(
+    observation: WicketObservationResult,
+    landmark_evidence: WicketLandmarkEvidenceResult,
+    *,
+    assignment_hypothesis: str,
+    lateral_mapping: str,
+) -> list[Any]:
+    """Use the existing correspondence builder, preserving classical uncertainty."""
+    adapted = adapt_wicket_landmark_evidence(observation, landmark_evidence)
+    correspondences = build_registration_correspondences(
+        adapted,
+        assignment_hypothesis=assignment_hypothesis,
+        lateral_mapping=lateral_mapping,
+    )
+    correspondences = [
+            item.model_copy(
+            update={
+                "exactness": "POINTLIKE",
+                "registration_weight": min(item.registration_weight, 0.5),
+            }
+        )
+        if item.mapping_type == "DETAILED_EXACT_POINT"
+        else item
+        for item in correspondences
+    ]
+    for role, wicket in (
+        ("near", landmark_evidence.near_wicket),
+        ("far", landmark_evidence.far_wicket),
+    ):
+        if wicket is None:
+            continue
+        for side in ("left", "middle", "right"):
+            semantic_id = f"{side}_stump_axis"
+            axis = next(
+                (
+                    item
+                    for item in wicket.axes
+                    if item.semantic_id == semantic_id
+                    and item.status == "AVAILABLE"
+                ),
+                None,
+            )
+            base = next(
+                (
+                    item
+                    for item in correspondences
+                    if item.correspondence_id == f"{role}:{side}_stump_base"
+                ),
+                None,
+            )
+            top = next(
+                (
+                    item
+                    for item in correspondences
+                    if item.correspondence_id == f"{role}:{side}_stump_top"
+                ),
+                None,
+            )
+            if (
+                axis is None
+                or base is None
+                or top is None
+                or base.world_point is None
+                or top.world_point is None
+                or axis.start_x_px is None
+                or axis.start_y_px is None
+                or axis.end_x_px is None
+                or axis.end_y_px is None
+                or axis.perpendicular_uncertainty_px is None
+            ):
+                continue
+            uncertainty = max(axis.perpendicular_uncertainty_px, 1.0)
+            weight = min(
+                0.6,
+                axis.confidence / (1.0 + uncertainty / 8.0) ** 2,
+            )
+            correspondences.append(
+                RegistrationCorrespondence(
+                    correspondence_id=f"{role}:{semantic_id}",
+                    observed_wicket_role=role,
+                    observed_semantic_id=semantic_id,
+                    virtual_semantic_id=(
+                        f"{base.virtual_semantic_id}->{top.virtual_semantic_id}"
+                    ),
+                    mapping_type="STUMP_AXIS",
+                    constraint_category="SOFT_GEOMETRIC_CONSTRAINT",
+                    exactness="SOFT",
+                    observed_line_start=PixelPoint(
+                        x=axis.start_x_px, y=axis.start_y_px
+                    ),
+                    observed_line_end=PixelPoint(
+                        x=axis.end_x_px, y=axis.end_y_px
+                    ),
+                    virtual_line_start=base.world_point,
+                    virtual_line_end=top.world_point,
+                    confidence=axis.confidence,
+                    uncertainty_px=uncertainty,
+                    angular_uncertainty_deg=max(
+                        axis.angular_uncertainty_deg or 1.0, 0.5
+                    ),
+                    correlation_family=axis.correlation_family or semantic_id,
+                    registration_weight=weight,
+                    source_frames=axis.supporting_frame_ids,
+                    status="SOFT_ONLY",
+                )
+            )
+    return correspondences
+
+
+def _evidence(
+    observation: WicketObservationResult,
+    preset: _Preset,
+    *,
+    landmark_evidence: WicketLandmarkEvidenceResult | None = None,
+    evidence_mode: str = "LEGACY_COARSE",
+) -> _Evidence:
     assert observation.setup_frame is not None
     assignment = "A" if preset.camera_end == "bowler" else "B"
-    correspondences = build_registration_correspondences(
-        observation,
-        assignment_hypothesis=assignment,
-        lateral_mapping=preset.image_left_mapping,
-    )
+    if evidence_mode == "LEGACY_COARSE":
+        correspondences = build_registration_correspondences(
+            observation,
+            assignment_hypothesis=assignment,
+            lateral_mapping=preset.image_left_mapping,
+        )
+    elif evidence_mode in {"WICKET_LANDMARKS", "WICKET_LANDMARKS_WITH_SCENE"}:
+        if landmark_evidence is None:
+            raise ValueError("Improved evidence mode requires landmark evidence.")
+        correspondences = build_landmark_registration_correspondences(
+            observation,
+            landmark_evidence,
+            assignment_hypothesis=assignment,
+            lateral_mapping=preset.image_left_mapping,
+        )
+    else:
+        raise ValueError(f"Unsupported wicket evidence mode: {evidence_mode}.")
     return _Evidence(
         observation=observation,
         assignment=assignment,
@@ -496,6 +777,7 @@ def _evidence(observation: WicketObservationResult, preset: _Preset) -> _Evidenc
         frame_boxes=_select_frame_boxes(observation),
         image_width=observation.setup_frame.image_width,
         image_height=observation.setup_frame.image_height,
+        evidence_mode=evidence_mode,
     )
 
 
@@ -585,6 +867,57 @@ def _wicket_for_role(evidence: _Evidence, role: str) -> Any:
     )
 
 
+def _stump_axis_residuals(
+    item: RegistrationCorrespondence,
+    rotation: np.ndarray,
+    translation: np.ndarray,
+    camera_matrix: np.ndarray,
+) -> list[float]:
+    """Compare a physical stump axis with an observed infinite image line."""
+    if (
+        item.observed_line_start is None
+        or item.observed_line_end is None
+        or item.virtual_line_start is None
+        or item.virtual_line_end is None
+    ):
+        return [25.0, 25.0, 25.0]
+    world = np.asarray(
+        [
+            [item.virtual_line_start.x, item.virtual_line_start.y, item.virtual_line_start.z],
+            [item.virtual_line_end.x, item.virtual_line_end.y, item.virtual_line_end.z],
+        ],
+        dtype=np.float64,
+    )
+    projected, depths = _project(world, rotation, translation, camera_matrix)
+    if np.any(depths <= 0):
+        return [25.0, 25.0, 25.0]
+    observed_start = np.asarray(
+        [item.observed_line_start.x, item.observed_line_start.y], dtype=np.float64
+    )
+    observed_end = np.asarray(
+        [item.observed_line_end.x, item.observed_line_end.y], dtype=np.float64
+    )
+    observed_direction = observed_end - observed_start
+    observed_length = float(np.linalg.norm(observed_direction))
+    projected_direction = projected[1] - projected[0]
+    projected_length = float(np.linalg.norm(projected_direction))
+    if observed_length <= 1e-6 or projected_length <= 1e-6:
+        return [25.0, 25.0, 25.0]
+    observed_unit = observed_direction / observed_length
+    observed_normal = np.asarray([-observed_unit[1], observed_unit[0]])
+    uncertainty = max(item.uncertainty_px, 1.0)
+    weight = math.sqrt(max(item.registration_weight, 1e-6))
+    perpendicular = [
+        float(np.dot(point - observed_start, observed_normal)) / uncertainty * weight
+        for point in projected
+    ]
+    projected_unit = projected_direction / projected_length
+    cosine = float(np.clip(abs(np.dot(observed_unit, projected_unit)), 0.0, 1.0))
+    angle_deg = math.degrees(math.acos(cosine))
+    angular_uncertainty = max(item.angular_uncertainty_deg or 1.0, 0.5)
+    return [*perpendicular, angle_deg / angular_uncertainty * weight]
+
+
 def _objective_component_vectors(
     parameters: np.ndarray,
     preset: _Preset,
@@ -672,10 +1005,18 @@ def _objective_component_vectors(
             "TOP_LINE",
             "BASE_LINE",
             "OUTER_AXIS",
+            "STUMP_AXIS",
         }:
-            values = _line_residuals(item, rotation, translation, camera_matrix)
+            values = (
+                _stump_axis_residuals(item, rotation, translation, camera_matrix)
+                if item.mapping_type == "STUMP_AXIS"
+                else _line_residuals(item, rotation, translation, camera_matrix)
+            )
             role = item.correspondence_id.split(":", 1)[0]
-            if profile.correlated_evidence_normalization:
+            if (
+                profile.correlated_evidence_normalization
+                and item.mapping_type != "STUMP_AXIS"
+            ):
                 wicket = _wicket_for_role(evidence, role)
                 floor = 1.0
                 if wicket is not None:
@@ -852,14 +1193,21 @@ def _semantic_objective_diagnostics(
             "TOP_LINE",
             "BASE_LINE",
             "OUTER_AXIS",
+            "STUMP_AXIS",
         }:
-            residuals = _line_residuals(item, rotation, translation, camera_matrix)
+            residuals = (
+                _stump_axis_residuals(item, rotation, translation, camera_matrix)
+                if item.mapping_type == "STUMP_AXIS"
+                else _line_residuals(item, rotation, translation, camera_matrix)
+            )
             lines.append(
                 {
                     "correspondence_id": item.correspondence_id,
                     "mapping_type": item.mapping_type,
                     "normalised_residuals": [float(value) for value in residuals],
                     "uncertainty_px": float(item.uncertainty_px),
+                    "angular_uncertainty_deg": item.angular_uncertainty_deg,
+                    "correlation_family": item.correlation_family,
                     "registration_weight": float(item.registration_weight),
                 }
             )
@@ -2155,6 +2503,8 @@ def _auto_register_from_observation(
     observation_load_ms: float | None = None,
     workflow_started: float | None = None,
     development_diagnostics: bool = False,
+    landmark_evidence: WicketLandmarkEvidenceResult | None = None,
+    evidence_mode: str = "LEGACY_COARSE",
 ) -> Any:
     """Fit one preset-constrained camera from already materialised evidence."""
     started = workflow_started if workflow_started is not None else perf_counter()
@@ -2206,7 +2556,12 @@ def _auto_register_from_observation(
         _persist(analysis_id, payload)
         return _schema_result(payload)
     evidence_started = perf_counter()
-    evidence = _evidence(observation, normalised)
+    evidence = _evidence(
+        observation,
+        normalised,
+        landmark_evidence=landmark_evidence,
+        evidence_mode=evidence_mode,
+    )
     used_points = sum(item.status == "USED" for item in evidence.correspondences)
     if used_points < 6:
         failure_evidence_reason = "insufficient_pointlike_evidence"
@@ -2506,6 +2861,8 @@ def run_preset_auto_registration(
     reuse_existing_observations: bool = True,
     force_redetect: bool = False,
     development_diagnostics: bool = False,
+    landmark_evidence: WicketLandmarkEvidenceResult | None = None,
+    evidence_mode: str = "LEGACY_COARSE",
 ) -> Any:
     """Run with persisted evidence by default; redetection requires explicit opt-in."""
     workflow_started = perf_counter()
@@ -2533,6 +2890,36 @@ def run_preset_auto_registration(
         observation_load_ms=observation_load_ms,
         workflow_started=workflow_started,
         development_diagnostics=development_diagnostics,
+        landmark_evidence=landmark_evidence,
+        evidence_mode=evidence_mode,
+    )
+
+
+def run_preset_auto_registration_with_landmark_evidence(
+    analysis_id: str,
+    preset_id: str = "STANDARD_REAR_WICKET_NET_V1",
+    *,
+    landmark_evidence: WicketLandmarkEvidenceResult | None = None,
+    include_optional_scene_evidence: bool = False,
+    development_diagnostics: bool = False,
+) -> Any:
+    """Run the corrected solver with persisted independent landmark evidence."""
+    if landmark_evidence is None:
+        from .wicket_landmark_evidence_service import load_wicket_landmark_evidence
+
+        landmark_evidence = load_wicket_landmark_evidence(analysis_id)
+    return run_preset_auto_registration(
+        analysis_id,
+        preset_id=preset_id,
+        reuse_existing_observations=True,
+        force_redetect=False,
+        development_diagnostics=development_diagnostics,
+        landmark_evidence=landmark_evidence,
+        evidence_mode=(
+            "WICKET_LANDMARKS_WITH_SCENE"
+            if include_optional_scene_evidence
+            else "WICKET_LANDMARKS"
+        ),
     )
 
 

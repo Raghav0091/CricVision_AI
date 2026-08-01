@@ -172,3 +172,12 @@ V1 is constrained to fixed rear-wicket practice-net cameras with both wickets
 visible. It does not optimise distortion, support arbitrary crops or rotations,
 infer missing wickets, accept production calibration, or activate trajectory and
 physics metrics.
+
+## Wicket landmark evidence upgrade
+
+The developer-only V1 landmark upgrade is documented in
+`wicket_landmark_evidence_upgrade_v1.md`. It adds native multi-frame physical
+line evidence behind an explicit solver mode while preserving this solver,
+legacy coarse mode, readiness thresholds, production locks, and camera bridge.
+The strongest evaluation recovered six shaft axes but no supported endpoints or
+scene lines; axis-only fitting remained ambiguous and did not improve readiness.

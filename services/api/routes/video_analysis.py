@@ -47,6 +47,10 @@ from ..schemas.scene_calibration import (
     SceneCalibrationResult,
 )
 from ..schemas.wicket_observation import WicketObservationResult
+from ..schemas.wicket_landmark_evidence import (
+    WicketLandmarkEvidenceResult,
+    WicketLandmarkEvidenceRunRequest,
+)
 from ..services.ball_detector_registry import (
     BallDetectorModelMissing,
     list_ball_detector_models,
@@ -124,6 +128,11 @@ from ..services.virtual_pitch_service import (
 from ..services.wicket_observation_service import (
     load_wicket_observation,
     run_wicket_observation,
+)
+from ..services.wicket_landmark_evidence_service import (
+    clear_wicket_landmark_evidence,
+    load_wicket_landmark_evidence,
+    run_wicket_landmark_evidence,
 )
 
 
@@ -280,6 +289,50 @@ def get_analysis_wicket_observations(
             status_code=exc.status_code,
             detail=exc.message,
         ) from exc
+
+
+@router.post(
+    "/{analysis_id}/wicket-landmark-evidence/run",
+    response_model=WicketLandmarkEvidenceResult,
+)
+def run_analysis_wicket_landmark_evidence(
+    analysis_id: str,
+    request: WicketLandmarkEvidenceRunRequest,
+) -> WicketLandmarkEvidenceResult:
+    try:
+        return run_wicket_landmark_evidence(analysis_id, request)
+    except VideoAnalysisServiceError as exc:
+        logger.warning(
+            "Wicket landmark evidence rejected for %s: %s",
+            analysis_id,
+            exc.message,
+        )
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+
+@router.get(
+    "/{analysis_id}/wicket-landmark-evidence",
+    response_model=WicketLandmarkEvidenceResult,
+)
+def get_analysis_wicket_landmark_evidence(
+    analysis_id: str,
+) -> WicketLandmarkEvidenceResult:
+    try:
+        return load_wicket_landmark_evidence(analysis_id)
+    except VideoAnalysisServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+
+@router.post(
+    "/{analysis_id}/wicket-landmark-evidence/clear",
+    status_code=204,
+)
+def clear_analysis_wicket_landmark_evidence(analysis_id: str) -> Response:
+    try:
+        clear_wicket_landmark_evidence(analysis_id)
+    except VideoAnalysisServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    return Response(status_code=204)
 
 
 @router.post(
