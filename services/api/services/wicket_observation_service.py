@@ -527,7 +527,7 @@ def _vertical_clusters(
     )
     accepted: list[tuple[int, int, int, int]] = []
     if lines is not None:
-        for raw in lines[:, 0]:
+        for raw in np.asarray(lines).reshape(-1, 4):
             x1, y1, x2, y2 = (int(value) for value in raw)
             dy, dx = abs(y2 - y1), abs(x2 - x1)
             if dy >= min_line and dx <= max(3, int(0.22 * dy)):

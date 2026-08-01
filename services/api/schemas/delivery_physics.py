@@ -180,11 +180,11 @@ class PostBounceMovementResult(PhysicsModel):
 
 class LineLengthResult(PhysicsModel):
     line: Literal[
-        "outside off",
-        "off stump",
+        "outside pitch left",
+        "pitch-left channel",
         "middle",
-        "leg stump",
-        "outside leg",
+        "pitch-right channel",
+        "outside pitch right",
         "unavailable",
     ]
     length: Literal[

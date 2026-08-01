@@ -33,6 +33,9 @@ from ..schemas.real_pitch_registration import RealPitchRegistrationResult
 from ..schemas.scene_calibration import (
     SceneCalibrationActionRequest,
     SceneCalibrationAnchorUpdateRequest,
+    SceneCalibrationOrientationRequest,
+    SceneCalibrationPresetRequest,
+    SceneCalibrationPresetResponse,
     SceneCalibrationRefineRequest,
     SceneCalibrationResult,
 )
@@ -91,7 +94,11 @@ from ..services.real_pitch_registration_service import (
 )
 from ..services.scene_calibration_service import (
     accept_scene_calibration,
+    apply_scene_calibration_orientation,
+    apply_scene_calibration_preset,
+    clear_scene_calibration_orientation,
     load_scene_calibration,
+    load_orientation_presets_for_analysis,
     refine_scene_calibration,
     reject_scene_calibration,
     run_scene_calibration,
@@ -264,6 +271,73 @@ def refine_analysis_scene_calibration(
 ) -> SceneCalibrationResult:
     try:
         return refine_scene_calibration(analysis_id, request)
+    except VideoAnalysisServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.post(
+    "/{analysis_id}/scene-calibration/orientation",
+    response_model=SceneCalibrationResult,
+)
+def confirm_analysis_scene_calibration_orientation(
+    analysis_id: str,
+    request: SceneCalibrationOrientationRequest,
+) -> SceneCalibrationResult:
+    try:
+        return apply_scene_calibration_orientation(analysis_id, request)
+    except VideoAnalysisServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.get(
+    "/{analysis_id}/scene-calibration/preset",
+    response_model=SceneCalibrationPresetResponse,
+)
+def get_analysis_scene_calibration_presets(
+    analysis_id: str,
+) -> SceneCalibrationPresetResponse:
+    try:
+        return load_orientation_presets_for_analysis(analysis_id)
+    except VideoAnalysisServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.post(
+    "/{analysis_id}/scene-calibration/preset",
+    response_model=SceneCalibrationResult,
+)
+def use_analysis_scene_calibration_preset(
+    analysis_id: str,
+    request: SceneCalibrationPresetRequest,
+) -> SceneCalibrationResult:
+    try:
+        return apply_scene_calibration_preset(analysis_id, request)
+    except VideoAnalysisServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.post(
+    "/{analysis_id}/scene-calibration/orientation/clear",
+    response_model=SceneCalibrationResult,
+)
+def clear_analysis_scene_calibration_orientation(
+    analysis_id: str,
+    request: SceneCalibrationActionRequest,
+) -> SceneCalibrationResult:
+    try:
+        return clear_scene_calibration_orientation(analysis_id, request)
     except VideoAnalysisServiceError as exc:
         raise HTTPException(
             status_code=exc.status_code,

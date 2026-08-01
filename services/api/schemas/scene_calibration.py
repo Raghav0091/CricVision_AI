@@ -20,6 +20,7 @@ SceneCalibrationStage = Literal[
     "OBSERVING_WICKETS",
     "GENERATING_POSE",
     "NEEDS_ADJUSTMENT",
+    "ORIENTATION_REQUIRED",
     "GROUND_PLANE_READY",
     "METRIC_3D_READY",
     "INSUFFICIENT_EVIDENCE",
@@ -36,7 +37,29 @@ AnchorSource = Literal[
     "manually_adjusted",
     "manually_added",
 ]
-AnchorKind = Literal["wicket", "crease"]
+AnchorKind = Literal["wicket", "crease", "pitch_edge"]
+ImageLeftMapping = Literal[
+    "IMAGE_LEFT_IS_PITCH_LEFT",
+    "IMAGE_LEFT_IS_PITCH_RIGHT",
+]
+OrientationSelection = ImageLeftMapping | Literal["NOT_SURE"]
+CameraEnd = Literal["bowler", "striker", "unknown"]
+OrientationEvidenceType = Literal[
+    "USER_CONFIRMED_LATERAL_ORIENTATION",
+    "SAVED_CAMERA_ORIENTATION_PRESET",
+    "SEMANTIC_PITCH_EDGE_POINT",
+    "SEMANTIC_CREASE_ENDPOINT",
+    "TRUSTED_CAMERA_END",
+    "TRUSTED_SESSION_DIRECTION",
+    "FUTURE_AUTOMATIC_ASYMMETRIC_EVIDENCE",
+]
+OrientationEvidenceSource = Literal[
+    "user",
+    "saved_preset",
+    "manual_anchor",
+    "trusted_session",
+    "future_automatic",
+]
 
 
 class SceneCalibrationModel(BaseModel):
@@ -135,6 +158,80 @@ class CalibrationThresholdResult(SceneCalibrationModel):
     reason: str
 
 
+class OrientationEvidence(SceneCalibrationModel):
+    evidence_id: str
+    evidence_type: OrientationEvidenceType
+    source: OrientationEvidenceSource
+    frame_index: int | None = Field(default=None, ge=0)
+    native_pixel_coordinate: PixelPoint | None = None
+    semantic_label: str
+    confidence: float = Field(ge=0, le=1)
+    uncertainty: float = Field(default=0.0, ge=0)
+    authoritative: bool = False
+    supports_candidate_ids: list[str] = Field(default_factory=list)
+    rejects_candidate_ids: list[str] = Field(default_factory=list)
+    explanation: str
+    created_at: datetime
+    user_confirmed: bool = False
+
+
+class OrientationResolution(SceneCalibrationModel):
+    required: bool
+    resolved: bool
+    image_left_mapping: ImageLeftMapping | None = None
+    camera_end: CameraEnd | None = None
+    ambiguity_before: float = Field(ge=0, le=1)
+    ambiguity_after: float = Field(ge=0, le=1)
+    selected_candidate_id: str | None = None
+    rejected_candidate_ids: list[str] = Field(default_factory=list)
+    consistent_candidate_ids: list[str] = Field(default_factory=list)
+    evidence_applied: list[OrientationEvidence] = Field(default_factory=list)
+    symmetric_evidence_insufficient: list[str] = Field(default_factory=list)
+    remaining_failures: list[str] = Field(default_factory=list)
+
+
+class SceneCalibrationOrientationRequest(SceneCalibrationModel):
+    anchor_version: int = Field(ge=0)
+    image_left_mapping: OrientationSelection
+    camera_end: CameraEnd = "unknown"
+    create_preset: bool = False
+    preset_name: str | None = Field(default=None, max_length=80)
+    user_confirmed_same_fixed_setup: bool = False
+
+
+class CameraOrientationPreset(SceneCalibrationModel):
+    preset_id: str
+    preset_name: str
+    version: Literal["v1"] = "v1"
+    created_at: datetime
+    updated_at: datetime
+    source_analysis_id: str
+    native_width: int = Field(gt=0)
+    native_height: int = Field(gt=0)
+    rotation_metadata: str | None = None
+    camera_device_identifier: str | None = None
+    lens_or_focal_metadata: str | None = None
+    camera_end: CameraEnd
+    image_left_mapping: ImageLeftMapping
+    virtual_pitch_version: Literal["v1"] = "v1"
+    confidence: float = Field(ge=0, le=1)
+    user_confirmed: bool
+    compatible: bool = False
+    compatibility_reasons: list[str] = Field(default_factory=list)
+
+
+class SceneCalibrationPresetResponse(SceneCalibrationModel):
+    analysis_id: str
+    compatible_presets: list[CameraOrientationPreset] = Field(default_factory=list)
+    rejected_presets: list[CameraOrientationPreset] = Field(default_factory=list)
+
+
+class SceneCalibrationPresetRequest(SceneCalibrationModel):
+    anchor_version: int = Field(ge=0)
+    preset_id: str
+    user_confirmed_same_fixed_setup: bool
+
+
 class SceneCalibrationValidation(SceneCalibrationModel):
     eligible_level: CalibrationLevel
     checks: list[CalibrationThresholdResult] = Field(default_factory=list)
@@ -155,6 +252,8 @@ class AcceptedCalibrationSummary(SceneCalibrationModel):
     virtual_pitch_version: Literal["v1"] = "v1"
     registration_version: Literal["v1"] = "v1"
     snapshot_url: str
+    image_left_mapping: ImageLeftMapping | None = None
+    orientation_preset_id: str | None = None
 
 
 class AcceptedSceneCalibrationSnapshot(SceneCalibrationModel):
@@ -188,6 +287,16 @@ class AcceptedSceneCalibrationSnapshot(SceneCalibrationModel):
     correspondence_count: int = Field(ge=0)
     uncertainty: dict[str, object]
     validation: SceneCalibrationValidation
+    orientation_evidence: list[OrientationEvidence] = Field(default_factory=list)
+    image_left_mapping: ImageLeftMapping | None = None
+    camera_end: CameraEnd | None = None
+    ambiguity_before_resolution: float | None = Field(default=None, ge=0, le=1)
+    ambiguity_after_resolution: float | None = Field(default=None, ge=0, le=1)
+    selected_mirror_candidate: str | None = None
+    rejected_mirror_candidate: str | None = None
+    orientation_preset_id: str | None = None
+    semantic_anchor_version: int | None = None
+    user_confirmation_timestamp: datetime | None = None
     virtual_pitch_version: Literal["v1"] = "v1"
     registration_version: Literal["v1"] = "v1"
 
@@ -216,8 +325,19 @@ class SceneCalibrationResult(SceneCalibrationModel):
         default_factory=list
     )
     anchor_version: int = Field(default=0, ge=0)
+    orientation_required: bool = False
+    image_left_mapping: ImageLeftMapping | None = None
+    camera_end: CameraEnd | None = None
+    orientation_evidence: list[OrientationEvidence] = Field(default_factory=list)
+    orientation_resolution: OrientationResolution | None = None
+    available_orientation_presets: list[CameraOrientationPreset] = Field(
+        default_factory=list
+    )
+    orientation_preset_id: str | None = None
     selected_candidate: CameraPoseCandidate | None = None
+    competing_candidate: CameraPoseCandidate | None = None
     projected_pitch_geometry: RealProjectedPitchGeometry | None = None
+    competing_projected_pitch_geometry: RealProjectedPitchGeometry | None = None
     validation: SceneCalibrationValidation | None = None
     accepted_calibration: AcceptedCalibrationSummary | None = None
     calibration_level: CalibrationLevel = "UNAVAILABLE"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -23,13 +24,20 @@ from ..schemas.scene_calibration import (
     SceneCalibrationAnchorInput,
     SceneCalibrationAnchorUpdateRequest,
     SceneCalibrationDetectionSummary,
+    SceneCalibrationOrientationRequest,
     SceneCalibrationObservationSummary,
+    SceneCalibrationPresetRequest,
+    SceneCalibrationPresetResponse,
     SceneCalibrationRefineRequest,
     SceneCalibrationRegistrationSummary,
     SceneCalibrationResult,
     SceneCalibrationStage,
     SceneCalibrationStageEvent,
     SceneCalibrationValidation,
+    CameraOrientationPreset,
+    ImageLeftMapping,
+    OrientationEvidence,
+    OrientationResolution,
 )
 from ..schemas.wicket_observation import PixelPoint, WicketObservationResult
 from .real_pitch_registration_service import (
@@ -51,6 +59,7 @@ RESULT_FILENAME = "scene_calibration_v1.json"
 REFINED_REGISTRATION_FILENAME = "real_pitch_registration_v1_refined.json"
 REFINED_DEBUG_DIRECTORY = "real_pitch_registration_v1_refined"
 ACCEPTED_FILENAME = "accepted_scene_calibration_v1.json"
+ORIENTATION_PRESETS_FILENAME = "camera_orientation_presets_v1.json"
 
 # All acceptance thresholds are centralized here and reported per check.
 METRIC_THRESHOLDS = {
@@ -94,6 +103,26 @@ CREASE_ANCHOR_IDS = (
     "far_popping_crease_left",
     "far_popping_crease_right",
 )
+PITCH_EDGE_ANCHOR_IDS = (
+    "pitch_left_edge_reference",
+    "pitch_right_edge_reference",
+)
+SEMANTIC_ORIENTATION_ANCHOR_IDS = (*CREASE_ANCHOR_IDS, *PITCH_EDGE_ANCHOR_IDS)
+SYMMETRIC_EVIDENCE_INSUFFICIENT = [
+    "two_symmetric_wickets",
+    "wicket_centres",
+    "wicket_widths",
+    "unlabelled_outer_wicket_anchors",
+    "centreline",
+    "symmetric_pitch_boundaries",
+    "generic_popping_crease_lines",
+    "generic_bowling_crease_lines",
+    "ball_trajectory_without_semantic_side_reference",
+    "camera_height",
+    "camera_distance",
+    "focal_length",
+    "near_far_scale_alone",
+]
 AUTOMATIC_LANDMARK_IDS = {
     "near_left_base": ("near", "wicket_outer_left_base"),
     "near_right_base": ("near", "wicket_outer_right_base"),
@@ -128,6 +157,7 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     },
     "GENERATING_POSE": {
         "NEEDS_ADJUSTMENT",
+        "ORIENTATION_REQUIRED",
         "GROUND_PLANE_READY",
         "METRIC_3D_READY",
         "INSUFFICIENT_EVIDENCE",
@@ -137,6 +167,17 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
         "GENERATING_POSE",
         "DETECTING_WICKETS",
         "NEEDS_ADJUSTMENT",
+        "ORIENTATION_REQUIRED",
+        "GROUND_PLANE_READY",
+        "METRIC_3D_READY",
+    },
+    "ORIENTATION_REQUIRED": {
+        "GENERATING_POSE",
+        "DETECTING_WICKETS",
+        "NEEDS_ADJUSTMENT",
+        "ORIENTATION_REQUIRED",
+        "GROUND_PLANE_READY",
+        "METRIC_3D_READY",
     },
     "GROUND_PLANE_READY": {
         "GENERATING_POSE",
@@ -345,6 +386,318 @@ def _registration_summary(
     )
 
 
+def _preset_store_path() -> Path:
+    return VIDEO_ANALYSIS_ROOT / "_calibration" / ORIENTATION_PRESETS_FILENAME
+
+
+def _candidate_mapping(candidate: CameraPoseCandidate | None) -> ImageLeftMapping | None:
+    if candidate is None:
+        return None
+    return (
+        "IMAGE_LEFT_IS_PITCH_LEFT"
+        if candidate.lateral_mapping == "image_left_to_world_left"
+        else "IMAGE_LEFT_IS_PITCH_RIGHT"
+    )
+
+
+def _registration_lateral_mapping(mapping: ImageLeftMapping) -> str:
+    return (
+        "image_left_to_world_left"
+        if mapping == "IMAGE_LEFT_IS_PITCH_LEFT"
+        else "image_left_to_world_right"
+    )
+
+
+def _mirror_ambiguous(registration: RealPitchRegistrationResult) -> bool:
+    selected = registration.selected_candidate
+    competing = registration.competing_candidate
+    return bool(
+        selected is not None
+        and competing is not None
+        and selected.lateral_mapping != competing.lateral_mapping
+        and registration.ambiguity_score > GROUND_THRESHOLDS["ambiguity"]
+    )
+
+
+def _orientation_stage(
+    registration: RealPitchRegistrationResult,
+    validation: SceneCalibrationValidation | None = None,
+) -> SceneCalibrationStage:
+    if _mirror_ambiguous(registration):
+        return "ORIENTATION_REQUIRED"
+    if validation and validation.eligible_level in {
+        "GROUND_PLANE_READY",
+        "METRIC_3D_READY",
+    }:
+        return validation.eligible_level
+    return _candidate_stage(registration)
+
+
+def _orientation_resolution(
+    *,
+    registration: RealPitchRegistrationResult,
+    evidence: list[OrientationEvidence],
+    ambiguity_before: float | None = None,
+    image_left_mapping: ImageLeftMapping | None = None,
+    camera_end: str | None = None,
+) -> OrientationResolution:
+    selected = registration.selected_candidate
+    consistent = [
+        item.candidate_id
+        for item in registration.candidates
+        if item.eligible_for_selection
+        and (
+            image_left_mapping is None
+            or _candidate_mapping(item) == image_left_mapping
+        )
+    ]
+    rejected = [
+        item.candidate_id
+        for item in registration.candidates
+        if image_left_mapping is not None
+        and _candidate_mapping(item) != image_left_mapping
+    ]
+    return OrientationResolution(
+        required=_mirror_ambiguous(registration) or bool(image_left_mapping),
+        resolved=bool(
+            image_left_mapping
+            and selected is not None
+            and _candidate_mapping(selected) == image_left_mapping
+            and registration.ambiguity_score <= GROUND_THRESHOLDS["ambiguity"]
+        ),
+        image_left_mapping=image_left_mapping,
+        camera_end=camera_end if camera_end in {"bowler", "striker", "unknown"} else None,
+        ambiguity_before=(
+            registration.ambiguity_score if ambiguity_before is None else ambiguity_before
+        ),
+        ambiguity_after=registration.ambiguity_score,
+        selected_candidate_id=selected.candidate_id if selected else None,
+        rejected_candidate_ids=rejected,
+        consistent_candidate_ids=consistent,
+        evidence_applied=evidence,
+        symmetric_evidence_insufficient=SYMMETRIC_EVIDENCE_INSUFFICIENT,
+        remaining_failures=registration.failure_reasons,
+    )
+
+
+def _orientation_evidence_id(*parts: object) -> str:
+    digest = hashlib.sha1(
+        "|".join(str(part) for part in parts).encode("utf-8")
+    ).hexdigest()[:12]
+    return f"orientation_{digest}"
+
+
+def _user_orientation_evidence(
+    *,
+    mapping: ImageLeftMapping,
+    camera_end: str,
+    registration: RealPitchRegistrationResult,
+) -> OrientationEvidence:
+    supported = [
+        item.candidate_id
+        for item in registration.candidates
+        if _candidate_mapping(item) == mapping
+    ]
+    rejected = [
+        item.candidate_id
+        for item in registration.candidates
+        if _candidate_mapping(item) != mapping
+    ]
+    return OrientationEvidence(
+        evidence_id=_orientation_evidence_id(mapping, camera_end, _now().isoformat()),
+        evidence_type="USER_CONFIRMED_LATERAL_ORIENTATION",
+        source="user",
+        semantic_label=mapping,
+        confidence=0.95,
+        uncertainty=0.05,
+        authoritative=True,
+        supports_candidate_ids=supported,
+        rejects_candidate_ids=rejected,
+        explanation=(
+            "User confirmed the native-video image-left to pitch-left/right "
+            "mapping. This resolves semantic lateral orientation only."
+        ),
+        created_at=_now(),
+        user_confirmed=True,
+    )
+
+
+def _load_presets() -> list[CameraOrientationPreset]:
+    path = _preset_store_path()
+    if not path.is_file():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return [
+            CameraOrientationPreset.model_validate(item)
+            for item in payload.get("presets", [])
+        ]
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def _write_presets(presets: list[CameraOrientationPreset]) -> None:
+    _write_json(
+        _preset_store_path(),
+        {"presets": [item.model_dump(mode="json") for item in presets]},
+    )
+
+
+def _preset_compatibility(
+    preset: CameraOrientationPreset,
+    *,
+    analysis_id: str,
+    width: int,
+    height: int,
+    camera_end: str,
+) -> CameraOrientationPreset:
+    reasons: list[str] = []
+    aspect = width / max(height, 1)
+    preset_aspect = preset.native_width / max(preset.native_height, 1)
+    if abs(aspect - preset_aspect) > 0.02:
+        reasons.append("aspect_ratio_mismatch")
+    if abs(width - preset.native_width) / max(preset.native_width, 1) > 0.05:
+        reasons.append("resolution_width_mismatch")
+    if abs(height - preset.native_height) / max(preset.native_height, 1) > 0.05:
+        reasons.append("resolution_height_mismatch")
+    if preset.camera_end != "unknown" and camera_end != "unknown" and preset.camera_end != camera_end:
+        reasons.append("camera_end_mismatch")
+    if preset.source_analysis_id == analysis_id:
+        reasons.append("same_analysis_source")
+    return preset.model_copy(
+        update={
+            "compatible": not reasons,
+            "compatibility_reasons": (
+                ["compatible_but_requires_user_confirmation"]
+                if not reasons
+                else reasons
+            ),
+        }
+    )
+
+
+def load_orientation_presets_for_analysis(
+    analysis_id: str,
+) -> SceneCalibrationPresetResponse:
+    result = load_scene_calibration(analysis_id)
+    if result.setup_frame is None:
+        return SceneCalibrationPresetResponse(analysis_id=analysis_id)
+    width = result.setup_frame.image_width
+    height = result.setup_frame.image_height
+    checked = [
+        _preset_compatibility(
+            preset,
+            analysis_id=analysis_id,
+            width=width,
+            height=height,
+            camera_end=result.camera_end or "unknown",
+        )
+        for preset in _load_presets()
+    ]
+    return SceneCalibrationPresetResponse(
+        analysis_id=analysis_id,
+        compatible_presets=[item for item in checked if item.compatible],
+        rejected_presets=[item for item in checked if not item.compatible],
+    )
+
+
+def _mapping_from_pair(
+    left: SceneCalibrationAnchor,
+    right: SceneCalibrationAnchor,
+) -> ImageLeftMapping | None:
+    if not (
+        left.valid
+        and right.valid
+        and left.video_point is not None
+        and right.video_point is not None
+    ):
+        return None
+    return (
+        "IMAGE_LEFT_IS_PITCH_LEFT"
+        if left.video_point.x < right.video_point.x
+        else "IMAGE_LEFT_IS_PITCH_RIGHT"
+    )
+
+
+def _infer_mapping_from_semantic_anchors(
+    anchors: list[SceneCalibrationAnchor],
+) -> tuple[ImageLeftMapping | None, list[tuple[str, PixelPoint]]]:
+    by_id = {item.semantic_id: item for item in anchors}
+    inferred: list[ImageLeftMapping] = []
+    evidence_points: list[tuple[str, PixelPoint]] = []
+    pairs = [
+        ("near_popping_crease", "near_popping_crease_left", "near_popping_crease_right"),
+        ("far_popping_crease", "far_popping_crease_left", "far_popping_crease_right"),
+        ("pitch_edge", "pitch_left_edge_reference", "pitch_right_edge_reference"),
+    ]
+    for label, left_id, right_id in pairs:
+        left = by_id.get(left_id)
+        right = by_id.get(right_id)
+        if left is None or right is None:
+            continue
+        mapping = _mapping_from_pair(left, right)
+        if mapping is None:
+            continue
+        inferred.append(mapping)
+        if left.video_point is not None:
+            evidence_points.append((f"{label}:left", left.video_point))
+        if right.video_point is not None:
+            evidence_points.append((f"{label}:right", right.video_point))
+    if len(set(inferred)) > 1:
+        raise VideoAnalysisServiceError(
+            "Contradictory semantic orientation anchors.",
+            status_code=422,
+        )
+    return (inferred[0], evidence_points) if inferred else (None, [])
+
+
+def _semantic_anchor_evidence(
+    *,
+    mapping: ImageLeftMapping,
+    points: list[tuple[str, PixelPoint]],
+    frame_index: int,
+    registration: RealPitchRegistrationResult,
+) -> list[OrientationEvidence]:
+    supported = [
+        item.candidate_id
+        for item in registration.candidates
+        if _candidate_mapping(item) == mapping
+    ]
+    rejected = [
+        item.candidate_id
+        for item in registration.candidates
+        if _candidate_mapping(item) != mapping
+    ]
+    evidence: list[OrientationEvidence] = []
+    for label, point in points:
+        evidence.append(
+            OrientationEvidence(
+                evidence_id=_orientation_evidence_id(label, point.x, point.y),
+                evidence_type=(
+                    "SEMANTIC_PITCH_EDGE_POINT"
+                    if label.startswith("pitch_edge")
+                    else "SEMANTIC_CREASE_ENDPOINT"
+                ),
+                source="manual_anchor",
+                frame_index=frame_index,
+                native_pixel_coordinate=point,
+                semantic_label=label,
+                confidence=0.82,
+                uncertainty=4.0,
+                authoritative=False,
+                supports_candidate_ids=supported,
+                rejects_candidate_ids=rejected,
+                explanation=(
+                    "A labelled left/right scene anchor pair supports the "
+                    f"{mapping} orientation in native video coordinates."
+                ),
+                created_at=_now(),
+                user_confirmed=True,
+            )
+        )
+    return evidence
+
+
 def _automatic_anchor(
     observation: WicketObservationResult,
     semantic_id: str,
@@ -488,7 +841,11 @@ def run_scene_calibration(analysis_id: str) -> SceneCalibrationResult:
         )
         _persist(result)
         registration = run_real_pitch_registration(analysis_id)
-        stage = _candidate_stage(registration)
+        orientation_resolution = _orientation_resolution(
+            registration=registration,
+            evidence=[],
+        )
+        stage = _orientation_stage(registration)
         result = transition_scene_calibration(
             result,
             stage,
@@ -506,9 +863,15 @@ def run_scene_calibration(analysis_id: str) -> SceneCalibrationResult:
                         analysis_id, registration
                     ),
                     "selected_candidate": registration.selected_candidate,
+                    "competing_candidate": registration.competing_candidate,
                     "projected_pitch_geometry": (
                         registration.projected_pitch_geometry
                     ),
+                    "competing_projected_pitch_geometry": (
+                        registration.competing_projected_pitch_geometry
+                    ),
+                    "orientation_required": stage == "ORIENTATION_REQUIRED",
+                    "orientation_resolution": orientation_resolution,
                     "calibration_level": (
                         "VISUAL_ONLY"
                         if registration.selected_candidate is not None
@@ -553,9 +916,16 @@ def _anchor_from_input(
 ) -> SceneCalibrationAnchor:
     original = current.original_automatic_point if current else None
     point = value.video_point
+    kind = (
+        "crease"
+        if value.semantic_id in CREASE_ANCHOR_IDS
+        else "pitch_edge"
+        if value.semantic_id in PITCH_EDGE_ANCHOR_IDS
+        else "wicket"
+    )
     return SceneCalibrationAnchor(
         semantic_id=value.semantic_id,
-        kind="crease" if value.semantic_id in CREASE_ANCHOR_IDS else "wicket",
+        kind=kind,
         wicket_role=(
             "near"
             if value.semantic_id.startswith("near_")
@@ -667,10 +1037,23 @@ def validate_scene_anchors(
         left = by_id.get(f"{role}_popping_crease_left")
         right = by_id.get(f"{role}_popping_crease_right")
         if left and right and left.video_point and right.video_point:
-            if left.video_point.x >= right.video_point.x:
-                text = "Crease left/right anchors are reversed."
+            if _distance(left.video_point, right.video_point) < image_width * 0.02:
+                text = "Crease left/right anchors are too close."
                 messages[left.semantic_id].append(text)
                 messages[right.semantic_id].append(text)
+    left_edge = by_id.get("pitch_left_edge_reference")
+    right_edge = by_id.get("pitch_right_edge_reference")
+    if (
+        left_edge
+        and right_edge
+        and left_edge.video_point
+        and right_edge.video_point
+        and _distance(left_edge.video_point, right_edge.video_point)
+        < image_width * 0.02
+    ):
+        text = "Pitch-edge references are too close."
+        messages[left_edge.semantic_id].append(text)
+        messages[right_edge.semantic_id].append(text)
     return [
         item.model_copy(
             update={
@@ -706,7 +1089,10 @@ def update_scene_calibration_anchors(
         ]
     }
     for value in request.anchors:
-        if value.semantic_id not in {*WICKET_ANCHOR_IDS, *CREASE_ANCHOR_IDS}:
+        if value.semantic_id not in {
+            *WICKET_ANCHOR_IDS,
+            *SEMANTIC_ORIENTATION_ANCHOR_IDS,
+        }:
             raise VideoAnalysisServiceError(
                 f"Unsupported calibration anchor: {value.semantic_id}.",
                 status_code=422,
@@ -733,7 +1119,7 @@ def update_scene_calibration_anchors(
         item for item in validated if item.semantic_id in WICKET_ANCHOR_IDS
     ]
     creases = [
-        item for item in validated if item.semantic_id in CREASE_ANCHOR_IDS
+        item for item in validated if item.semantic_id in SEMANTIC_ORIENTATION_ANCHOR_IDS
     ]
     return _persist(
         result.model_copy(
@@ -775,6 +1161,7 @@ def evaluate_calibration_candidate(
     *,
     ambiguity_score: float,
     anchors: list[SceneCalibrationAnchor],
+    orientation_resolution: OrientationResolution | None = None,
 ) -> SceneCalibrationValidation:
     adjusted = sum(item.source == "manually_adjusted" for item in anchors)
     added = sum(item.source == "manually_added" for item in anchors)
@@ -807,6 +1194,11 @@ def evaluate_calibration_candidate(
     )
     focal_bound = candidate.intrinsics.focal_bound_reached or bool(
         candidate.refinement.parameters_reaching_bounds
+    )
+    lateral_resolved = bool(
+        orientation_resolution is None
+        or not orientation_resolution.required
+        or orientation_resolution.resolved
     )
 
     def checks_for(level: str, thresholds: dict[str, float]):
@@ -891,6 +1283,13 @@ def evaluate_calibration_candidate(
                 ),
                 "Deterministic perturbation is stable.",
                 "Pose perturbation stability is insufficient.",
+            ),
+            _check(
+                "lateral_orientation_resolved",
+                lateral_resolved,
+                lateral_resolved,
+                "Pitch-left/right mapping is resolved in native-video orientation.",
+                "Pitch orientation requires explicit semantic evidence.",
             ),
             *[
                 _check(
@@ -998,33 +1397,71 @@ def refine_scene_calibration(
         item for item in validated if item.semantic_id in WICKET_ANCHOR_IDS
     ]
     creases = [
-        item for item in validated if item.semantic_id in CREASE_ANCHOR_IDS
+        item for item in validated if item.semantic_id in SEMANTIC_ORIENTATION_ANCHOR_IDS
     ]
+    inferred_mapping, inferred_points = _infer_mapping_from_semantic_anchors(
+        creases
+    )
+    mapping = result.image_left_mapping or inferred_mapping
+    if (
+        result.image_left_mapping is not None
+        and inferred_mapping is not None
+        and result.image_left_mapping != inferred_mapping
+    ):
+        raise VideoAnalysisServiceError(
+            "Semantic anchors contradict the confirmed orientation.",
+            status_code=422,
+        )
     registration = run_real_pitch_registration(
         analysis_id,
         point_overrides=_point_map(wickets),
         crease_overrides=_point_map(
-            item for item in creases if item.used_for_refinement
+            item
+            for item in creases
+            if item.semantic_id in CREASE_ANCHOR_IDS and item.used_for_refinement
         ),
         manual_override_ids={
             item.semantic_id
             for item in wickets
             if item.source in {"manually_adjusted", "manually_added"}
         },
+        required_lateral_mapping=(
+            _registration_lateral_mapping(mapping)
+            if mapping is not None
+            else None
+        ),
         result_filename=REFINED_REGISTRATION_FILENAME,
         debug_directory=REFINED_DEBUG_DIRECTORY,
+    )
+    semantic_evidence = (
+        _semantic_anchor_evidence(
+            mapping=inferred_mapping,
+            points=inferred_points,
+            frame_index=result.setup_frame.frame_index,
+            registration=registration,
+        )
+        if inferred_mapping is not None
+        else []
+    )
+    evidence = [*result.orientation_evidence, *semantic_evidence]
+    orientation_resolution = _orientation_resolution(
+        registration=registration,
+        evidence=evidence,
+        ambiguity_before=(
+            result.orientation_resolution.ambiguity_before
+            if result.orientation_resolution is not None
+            else registration.ambiguity_score
+        ),
+        image_left_mapping=mapping,
+        camera_end=result.camera_end,
     )
     validation = evaluate_calibration_candidate(
         registration.selected_candidate,
         ambiguity_score=registration.ambiguity_score,
         anchors=validated,
+        orientation_resolution=orientation_resolution,
     )
-    stage: SceneCalibrationStage = (
-        validation.eligible_level
-        if validation.eligible_level
-        in {"GROUND_PLANE_READY", "METRIC_3D_READY"}
-        else "NEEDS_ADJUSTMENT"
-    )
+    stage: SceneCalibrationStage = _orientation_stage(registration, validation)
     refined = transition_scene_calibration(
         stage_result,
         stage,
@@ -1044,9 +1481,17 @@ def refine_scene_calibration(
                     analysis_id, registration, refined=True
                 ),
                 "selected_candidate": registration.selected_candidate,
+                "competing_candidate": registration.competing_candidate,
                 "projected_pitch_geometry": (
                     registration.projected_pitch_geometry
                 ),
+                "competing_projected_pitch_geometry": (
+                    registration.competing_projected_pitch_geometry
+                ),
+                "orientation_required": stage == "ORIENTATION_REQUIRED",
+                "orientation_resolution": orientation_resolution,
+                "image_left_mapping": mapping,
+                "orientation_evidence": evidence,
                 "validation": validation,
                 "calibration_level": validation.eligible_level,
                 "accepted_calibration": None,
@@ -1057,6 +1502,360 @@ def refine_scene_calibration(
                 ),
             }
         )
+    )
+
+
+def _validated_scene_anchors_for_result(
+    result: SceneCalibrationResult,
+) -> tuple[list[SceneCalibrationAnchor], list[SceneCalibrationAnchor]]:
+    if result.setup_frame is None:
+        raise VideoAnalysisServiceError(
+            "No setup frame is available for calibration.",
+            status_code=422,
+        )
+    validated = validate_scene_anchors(
+        [*result.current_anchor_set, *result.optional_crease_anchors],
+        image_width=result.setup_frame.image_width,
+        image_height=result.setup_frame.image_height,
+    )
+    wickets = [
+        item for item in validated if item.semantic_id in WICKET_ANCHOR_IDS
+    ]
+    semantic = [
+        item
+        for item in validated
+        if item.semantic_id in SEMANTIC_ORIENTATION_ANCHOR_IDS
+    ]
+    return wickets, semantic
+
+
+def _create_orientation_preset(
+    *,
+    result: SceneCalibrationResult,
+    mapping: ImageLeftMapping,
+    camera_end: str,
+    preset_name: str | None,
+) -> CameraOrientationPreset | None:
+    if result.setup_frame is None:
+        return None
+    now = _now()
+    seed = (
+        f"{result.analysis_id}:{result.setup_frame.image_width}:"
+        f"{result.setup_frame.image_height}:{mapping}:{camera_end}"
+    )
+    preset = CameraOrientationPreset(
+        preset_id=f"orientation_preset_{hashlib.sha1(seed.encode('utf-8')).hexdigest()[:12]}",
+        preset_name=preset_name or f"Fixed camera {mapping.lower()}",
+        created_at=now,
+        updated_at=now,
+        source_analysis_id=result.analysis_id,
+        native_width=result.setup_frame.image_width,
+        native_height=result.setup_frame.image_height,
+        rotation_metadata=None,
+        camera_end=camera_end if camera_end in {"bowler", "striker"} else "unknown",
+        image_left_mapping=mapping,
+        confidence=0.9,
+        user_confirmed=True,
+        compatible=True,
+        compatibility_reasons=["created_from_current_user_confirmation"],
+    )
+    presets = [
+        item for item in _load_presets() if item.preset_id != preset.preset_id
+    ]
+    _write_presets([*presets, preset])
+    return preset
+
+
+def apply_scene_calibration_orientation(
+    analysis_id: str,
+    request: SceneCalibrationOrientationRequest,
+) -> SceneCalibrationResult:
+    result = load_scene_calibration(analysis_id)
+    if result.anchor_version != request.anchor_version:
+        raise VideoAnalysisServiceError(
+            "Anchor version is stale. Reload before confirming orientation.",
+            status_code=409,
+        )
+    if result.selected_candidate is None and result.setup_frame is None:
+        raise VideoAnalysisServiceError(
+            "Run scene calibration before confirming orientation.",
+            status_code=422,
+        )
+    if request.image_left_mapping == "NOT_SURE":
+        resolution = OrientationResolution(
+            required=True,
+            resolved=False,
+            camera_end=request.camera_end,
+            ambiguity_before=(
+                result.orientation_resolution.ambiguity_before
+                if result.orientation_resolution is not None
+                else 1.0
+            ),
+            ambiguity_after=(
+                result.orientation_resolution.ambiguity_after
+                if result.orientation_resolution is not None
+                else 1.0
+            ),
+            selected_candidate_id=(
+                result.selected_candidate.candidate_id
+                if result.selected_candidate is not None
+                else None
+            ),
+            symmetric_evidence_insufficient=SYMMETRIC_EVIDENCE_INSUFFICIENT,
+            remaining_failures=[
+                "User selected not sure; lateral orientation remains unresolved."
+            ],
+        )
+        return _persist(
+            result.model_copy(
+                update={
+                    "stage": "ORIENTATION_REQUIRED",
+                    "orientation_required": True,
+                    "orientation_resolution": resolution,
+                    "metrics_unlocked": [],
+                    "metrics_locked_reasons": [
+                        "Pitch orientation remains unresolved."
+                    ],
+                    "updated_at": _now(),
+                    "message": "Pitch orientation still needs confirmation.",
+                }
+            )
+        )
+    mapping: ImageLeftMapping = request.image_left_mapping
+    wickets, semantic = _validated_scene_anchors_for_result(result)
+    invalid_required = [
+        item for item in wickets if item.semantic_id in WICKET_ANCHOR_IDS and not item.valid
+    ]
+    if invalid_required:
+        raise VideoAnalysisServiceError(
+            "Invalid wicket anchors must be corrected before orientation acceptance.",
+            status_code=422,
+        )
+    inferred_mapping, inferred_points = _infer_mapping_from_semantic_anchors(
+        semantic
+    )
+    if inferred_mapping is not None and inferred_mapping != mapping:
+        raise VideoAnalysisServiceError(
+            "Semantic anchors contradict the selected orientation.",
+            status_code=422,
+        )
+    stage_result = transition_scene_calibration(
+        result, "GENERATING_POSE", "Applying orientation evidence."
+    )
+    _persist(stage_result)
+    registration = run_real_pitch_registration(
+        analysis_id,
+        point_overrides=_point_map(wickets),
+        crease_overrides=_point_map(
+            item
+            for item in semantic
+            if item.semantic_id in CREASE_ANCHOR_IDS and item.used_for_refinement
+        ),
+        manual_override_ids={
+            item.semantic_id
+            for item in wickets
+            if item.source in {"manually_adjusted", "manually_added"}
+        },
+        required_lateral_mapping=_registration_lateral_mapping(mapping),
+        result_filename=REFINED_REGISTRATION_FILENAME,
+        debug_directory=REFINED_DEBUG_DIRECTORY,
+    )
+    evidence = [
+        *result.orientation_evidence,
+        _user_orientation_evidence(
+            mapping=mapping,
+            camera_end=request.camera_end,
+            registration=registration,
+        ),
+    ]
+    if inferred_mapping is not None:
+        evidence.extend(
+            _semantic_anchor_evidence(
+                mapping=inferred_mapping,
+                points=inferred_points,
+                frame_index=result.setup_frame.frame_index,
+                registration=registration,
+            )
+        )
+    preset = (
+        _create_orientation_preset(
+            result=result,
+            mapping=mapping,
+            camera_end=request.camera_end,
+            preset_name=request.preset_name,
+        )
+        if request.create_preset
+        and request.user_confirmed_same_fixed_setup
+        else None
+    )
+    if preset is not None:
+        evidence.append(
+            OrientationEvidence(
+                evidence_id=_orientation_evidence_id(preset.preset_id),
+                evidence_type="SAVED_CAMERA_ORIENTATION_PRESET",
+                source="saved_preset",
+                semantic_label=preset.image_left_mapping,
+                confidence=preset.confidence,
+                uncertainty=0.1,
+                authoritative=True,
+                supports_candidate_ids=[
+                    item.candidate_id
+                    for item in registration.candidates
+                    if _candidate_mapping(item) == mapping
+                ],
+                rejects_candidate_ids=[
+                    item.candidate_id
+                    for item in registration.candidates
+                    if _candidate_mapping(item) != mapping
+                ],
+                explanation=(
+                    "Orientation preset saved for explicit future reuse; it "
+                    "does not accept the current camera pose."
+                ),
+                created_at=_now(),
+                user_confirmed=True,
+            )
+        )
+    ambiguity_before = (
+        result.orientation_resolution.ambiguity_before
+        if result.orientation_resolution is not None
+        else result.refined_registration_summary.ambiguity_score
+        if result.refined_registration_summary is not None
+        else result.automatic_registration_summary.ambiguity_score
+        if result.automatic_registration_summary is not None
+        else registration.ambiguity_score
+    )
+    orientation_resolution = _orientation_resolution(
+        registration=registration,
+        evidence=evidence,
+        ambiguity_before=ambiguity_before,
+        image_left_mapping=mapping,
+        camera_end=request.camera_end,
+    )
+    validation = evaluate_calibration_candidate(
+        registration.selected_candidate,
+        ambiguity_score=registration.ambiguity_score,
+        anchors=[*wickets, *semantic],
+        orientation_resolution=orientation_resolution,
+    )
+    stage = _orientation_stage(registration, validation)
+    updated = transition_scene_calibration(
+        stage_result,
+        stage,
+        (
+            "Orientation resolved. Review calibration quality before accepting."
+            if orientation_resolution.resolved
+            else "Orientation evidence applied but ambiguity remains."
+        ),
+    )
+    return _persist(
+        updated.model_copy(
+            update={
+                "completed_at": _now(),
+                "current_anchor_set": wickets,
+                "optional_crease_anchors": semantic,
+                "refined_registration_summary": _registration_summary(
+                    analysis_id, registration, refined=True
+                ),
+                "selected_candidate": registration.selected_candidate,
+                "competing_candidate": registration.competing_candidate,
+                "projected_pitch_geometry": registration.projected_pitch_geometry,
+                "competing_projected_pitch_geometry": (
+                    registration.competing_projected_pitch_geometry
+                ),
+                "orientation_required": stage == "ORIENTATION_REQUIRED",
+                "image_left_mapping": mapping,
+                "camera_end": request.camera_end,
+                "orientation_evidence": evidence,
+                "orientation_resolution": orientation_resolution,
+                "orientation_preset_id": preset.preset_id if preset else result.orientation_preset_id,
+                "validation": validation,
+                "calibration_level": validation.eligible_level,
+                "accepted_calibration": None,
+                "metrics_unlocked": [],
+                "metrics_locked_reasons": (
+                    validation.failure_reasons
+                    or ["User acceptance is still required."]
+                ),
+            }
+        )
+    )
+
+
+def clear_scene_calibration_orientation(
+    analysis_id: str,
+    request: SceneCalibrationActionRequest,
+) -> SceneCalibrationResult:
+    result = load_scene_calibration(analysis_id)
+    if result.anchor_version != request.anchor_version:
+        raise VideoAnalysisServiceError(
+            "Anchor version is stale. Reload before clearing orientation.",
+            status_code=409,
+        )
+    return _persist(
+        result.model_copy(
+            update={
+                "image_left_mapping": None,
+                "camera_end": None,
+                "orientation_evidence": [],
+                "orientation_resolution": None,
+                "orientation_preset_id": None,
+                "orientation_required": bool(result.selected_candidate),
+                "accepted_calibration": None,
+                "metrics_unlocked": [],
+                "metrics_locked_reasons": [
+                    "Pitch orientation has been cleared."
+                ],
+                "stage": (
+                    "ORIENTATION_REQUIRED"
+                    if result.selected_candidate is not None
+                    else result.stage
+                ),
+                "updated_at": _now(),
+                "message": "Pitch orientation cleared.",
+            }
+        )
+    )
+
+
+def apply_scene_calibration_preset(
+    analysis_id: str,
+    request: SceneCalibrationPresetRequest,
+) -> SceneCalibrationResult:
+    result = load_scene_calibration(analysis_id)
+    if result.anchor_version != request.anchor_version:
+        raise VideoAnalysisServiceError(
+            "Anchor version is stale. Reload before using the preset.",
+            status_code=409,
+        )
+    if not request.user_confirmed_same_fixed_setup:
+        raise VideoAnalysisServiceError(
+            "Preset reuse requires explicit same fixed setup confirmation.",
+            status_code=422,
+        )
+    presets = load_orientation_presets_for_analysis(analysis_id)
+    preset = next(
+        (
+            item
+            for item in presets.compatible_presets
+            if item.preset_id == request.preset_id
+        ),
+        None,
+    )
+    if preset is None:
+        raise VideoAnalysisServiceError(
+            "Orientation preset is not compatible with this video.",
+            status_code=422,
+        )
+    return apply_scene_calibration_orientation(
+        analysis_id,
+        SceneCalibrationOrientationRequest(
+            anchor_version=request.anchor_version,
+            image_left_mapping=preset.image_left_mapping,
+            camera_end=preset.camera_end,
+            create_preset=False,
+            user_confirmed_same_fixed_setup=True,
+        ),
     )
 
 
@@ -1245,6 +2044,37 @@ def accept_scene_calibration(
             else {}
         ),
         validation=validation,
+        orientation_evidence=result.orientation_evidence,
+        image_left_mapping=result.image_left_mapping,
+        camera_end=result.camera_end,
+        ambiguity_before_resolution=(
+            result.orientation_resolution.ambiguity_before
+            if result.orientation_resolution is not None
+            else None
+        ),
+        ambiguity_after_resolution=(
+            result.orientation_resolution.ambiguity_after
+            if result.orientation_resolution is not None
+            else None
+        ),
+        selected_mirror_candidate=(
+            result.orientation_resolution.selected_candidate_id
+            if result.orientation_resolution is not None
+            else candidate.candidate_id
+        ),
+        rejected_mirror_candidate=(
+            result.orientation_resolution.rejected_candidate_ids[0]
+            if result.orientation_resolution is not None
+            and result.orientation_resolution.rejected_candidate_ids
+            else None
+        ),
+        orientation_preset_id=result.orientation_preset_id,
+        semantic_anchor_version=result.anchor_version,
+        user_confirmation_timestamp=(
+            result.orientation_evidence[-1].created_at
+            if result.orientation_evidence
+            else None
+        ),
     )
     _write_json(path, snapshot)
     accepted_at = snapshot.accepted_at
@@ -1255,6 +2085,8 @@ def accept_scene_calibration(
         accepted_candidate_id=candidate.candidate_id,
         anchor_version=result.anchor_version,
         snapshot_url=_snapshot_url(analysis_id, path),
+        image_left_mapping=result.image_left_mapping,
+        orientation_preset_id=result.orientation_preset_id,
     )
     metrics = (
         METRIC_3D_METRICS

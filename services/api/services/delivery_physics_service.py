@@ -68,10 +68,10 @@ LENGTH_BANDS_M = (
     (11.0, "short"),
 )
 LINE_BANDS_M = (
-    (-0.34, "outside leg"),
-    (-0.12, "leg stump"),
+    (-0.34, "outside pitch left"),
+    (-0.12, "pitch-left channel"),
     (0.12, "middle"),
-    (0.34, "off stump"),
+    (0.34, "pitch-right channel"),
 )
 
 COORDINATE_SYSTEM_DESCRIPTION = CANONICAL_COORDINATE_SYSTEM
@@ -1727,7 +1727,7 @@ def _line_and_length(bounce: BouncePhysicsResult) -> LineLengthResult:
             unavailable_reason="A metric bounce point is unavailable.",
         )
     x = bounce.world_x_m
-    line = "outside off"
+    line = "outside pitch right"
     for upper, label in LINE_BANDS_M:
         if x < upper:
             line = label

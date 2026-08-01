@@ -17,9 +17,12 @@ from services.api.schemas.scene_calibration import (
     SceneCalibrationAnchor,
     SceneCalibrationAnchorInput,
     SceneCalibrationAnchorUpdateRequest,
+    SceneCalibrationOrientationRequest,
+    SceneCalibrationPresetRequest,
     SceneCalibrationRefineRequest,
     SceneCalibrationResult,
     SceneCalibrationValidation,
+    OrientationResolution,
 )
 from services.api.schemas.wicket_observation import PixelPoint
 from services.api.services.delivery_physics_service import (
@@ -29,8 +32,12 @@ from services.api.services.scene_calibration_service import (
     METRIC_3D_METRICS,
     WICKET_ANCHOR_IDS,
     accept_scene_calibration,
+    apply_scene_calibration_orientation,
+    apply_scene_calibration_preset,
+    clear_scene_calibration_orientation,
     evaluate_calibration_candidate,
     initialise_scene_anchors,
+    load_orientation_presets_for_analysis,
     load_scene_calibration,
     refine_scene_calibration,
     run_scene_calibration,
@@ -68,6 +75,26 @@ def _registration(observation=None) -> RealPitchRegistrationResult:
         ambiguity_score=0.1,
         diagnostics=RegistrationDiagnostics(),
         message="candidate",
+    )
+
+
+def _ambiguous_registration(observation=None) -> RealPitchRegistrationResult:
+    registration = _registration(observation)
+    assert registration.selected_candidate is not None
+    mirror = registration.selected_candidate.model_copy(
+        update={
+            "candidate_id": "mirror",
+            "lateral_mapping": "image_left_to_world_right",
+            "score": max(0.0, registration.selected_candidate.score - 0.001),
+        }
+    )
+    return registration.model_copy(
+        update={
+            "status": "AMBIGUOUS",
+            "candidates": [registration.selected_candidate, mirror],
+            "competing_candidate": mirror,
+            "ambiguity_score": 0.99,
+        }
     )
 
 
@@ -419,6 +446,239 @@ def test_visual_only_cannot_be_accepted_but_can_enable_overlay(
     visual = use_visual_overlay_only(ANALYSIS_ID, request)
     assert visual.visual_overlay_enabled
     assert visual.metrics_unlocked == []
+
+
+def test_symmetric_wickets_keep_mirror_ambiguous_candidate_blocked() -> None:
+    registration = _ambiguous_registration()
+    resolution = OrientationResolution(
+        required=True,
+        resolved=False,
+        ambiguity_before=0.99,
+        ambiguity_after=0.99,
+        symmetric_evidence_insufficient=["two_symmetric_wickets"],
+    )
+    validation = evaluate_calibration_candidate(
+        registration.selected_candidate,
+        ambiguity_score=registration.ambiguity_score,
+        anchors=_valid_anchors(),
+        orientation_resolution=resolution,
+    )
+    failed = {item.threshold_id for item in validation.checks if not item.passed}
+    assert validation.eligible_level == "VISUAL_ONLY"
+    assert "lateral_orientation_resolved" in failed
+    assert "ambiguity" in failed
+
+
+def test_user_orientation_confirmation_selects_matching_mirror_and_persists(
+    isolated_scene: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registration = _ambiguous_registration()
+    captured: dict[str, object] = {}
+
+    def fake_registration(analysis_id: str, **kwargs):
+        captured.update(kwargs)
+        selected = registration.selected_candidate
+        mirror = registration.competing_candidate
+        assert selected is not None and mirror is not None
+        return registration.model_copy(
+            update={
+                "status": selected.classification,
+                "candidates": [
+                    selected,
+                    mirror.model_copy(
+                        update={
+                            "eligible_for_selection": False,
+                            "score": 0.0,
+                        }
+                    ),
+                ],
+                "competing_candidate": None,
+                "ambiguity_score": 0.0,
+            }
+        )
+
+    result = SceneCalibrationResult(
+        analysis_id=ANALYSIS_ID,
+        stage="ORIENTATION_REQUIRED",
+        updated_at=datetime.now(timezone.utc),
+        setup_frame=_setup_frame(selected=True),
+        current_anchor_set=_valid_anchors(),
+        anchor_version=2,
+        selected_candidate=registration.selected_candidate,
+        competing_candidate=registration.competing_candidate,
+        orientation_required=True,
+        orientation_resolution=OrientationResolution(
+            required=True,
+            resolved=False,
+            ambiguity_before=0.99,
+            ambiguity_after=0.99,
+        ),
+        calibration_level="VISUAL_ONLY",
+        message="orientation",
+    )
+    path = isolated_scene / ANALYSIS_ID / "reports" / "scene_calibration_v1.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(result.model_dump_json(), encoding="utf-8")
+    monkeypatch.setattr(
+        "services.api.services.scene_calibration_service.run_real_pitch_registration",
+        fake_registration,
+    )
+    updated = apply_scene_calibration_orientation(
+        ANALYSIS_ID,
+        SceneCalibrationOrientationRequest(
+            anchor_version=2,
+            image_left_mapping="IMAGE_LEFT_IS_PITCH_LEFT",
+        ),
+    )
+    assert captured["required_lateral_mapping"] == "image_left_to_world_left"
+    assert updated.image_left_mapping == "IMAGE_LEFT_IS_PITCH_LEFT"
+    assert updated.orientation_resolution.resolved
+    assert updated.orientation_resolution.ambiguity_before == 0.99
+    assert updated.orientation_resolution.ambiguity_after == 0.0
+    assert updated.orientation_evidence[0].evidence_type == (
+        "USER_CONFIRMED_LATERAL_ORIENTATION"
+    )
+
+
+def test_not_sure_and_clear_preserve_no_metric_unlock(
+    isolated_scene: Path,
+) -> None:
+    registration = _ambiguous_registration()
+    result = SceneCalibrationResult(
+        analysis_id=ANALYSIS_ID,
+        stage="ORIENTATION_REQUIRED",
+        updated_at=datetime.now(timezone.utc),
+        setup_frame=_setup_frame(selected=True),
+        current_anchor_set=_valid_anchors(),
+        anchor_version=1,
+        selected_candidate=registration.selected_candidate,
+        orientation_required=True,
+        calibration_level="VISUAL_ONLY",
+        message="orientation",
+    )
+    path = isolated_scene / ANALYSIS_ID / "reports" / "scene_calibration_v1.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(result.model_dump_json(), encoding="utf-8")
+
+    unsure = apply_scene_calibration_orientation(
+        ANALYSIS_ID,
+        SceneCalibrationOrientationRequest(
+            anchor_version=1,
+            image_left_mapping="NOT_SURE",
+        ),
+    )
+    assert unsure.stage == "ORIENTATION_REQUIRED"
+    assert unsure.metrics_unlocked == []
+    cleared = clear_scene_calibration_orientation(
+        ANALYSIS_ID,
+        SceneCalibrationActionRequest(anchor_version=1),
+    )
+    assert cleared.image_left_mapping is None
+    assert cleared.orientation_evidence == []
+
+
+def test_semantic_anchor_pair_resolves_mapping_and_contradiction_rejects(
+    isolated_scene: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registration = _registration()
+    result = SceneCalibrationResult(
+        analysis_id=ANALYSIS_ID,
+        stage="NEEDS_ADJUSTMENT",
+        updated_at=datetime.now(timezone.utc),
+        setup_frame=_setup_frame(selected=True),
+        current_anchor_set=_valid_anchors(),
+        optional_crease_anchors=[
+            _anchor("near_popping_crease_left", 100, 620, kind="crease"),
+            _anchor("near_popping_crease_right", 500, 620, kind="crease"),
+        ],
+        anchor_version=2,
+        selected_candidate=registration.selected_candidate,
+        calibration_level="VISUAL_ONLY",
+        message="refine",
+    )
+    path = isolated_scene / ANALYSIS_ID / "reports" / "scene_calibration_v1.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(result.model_dump_json(), encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    def fake_registration(analysis_id: str, **kwargs):
+        captured.update(kwargs)
+        return registration.model_copy(update={"ambiguity_score": 0.0})
+
+    monkeypatch.setattr(
+        "services.api.services.scene_calibration_service.run_real_pitch_registration",
+        fake_registration,
+    )
+    refined = refine_scene_calibration(
+        ANALYSIS_ID, SceneCalibrationRefineRequest(anchor_version=2)
+    )
+    assert captured["required_lateral_mapping"] == "image_left_to_world_left"
+    assert refined.image_left_mapping == "IMAGE_LEFT_IS_PITCH_LEFT"
+    assert refined.orientation_evidence[0].evidence_type == "SEMANTIC_CREASE_ENDPOINT"
+
+    contradicted = refined.model_copy(
+        update={
+            "image_left_mapping": "IMAGE_LEFT_IS_PITCH_RIGHT",
+            "anchor_version": refined.anchor_version,
+        }
+    )
+    path.write_text(contradicted.model_dump_json(), encoding="utf-8")
+    with pytest.raises(VideoAnalysisServiceError, match="contradict"):
+        refine_scene_calibration(
+            ANALYSIS_ID,
+            SceneCalibrationRefineRequest(anchor_version=refined.anchor_version),
+        )
+
+
+def test_orientation_preset_requires_compatibility_and_confirmation(
+    isolated_scene: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registration = _registration()
+    result = SceneCalibrationResult(
+        analysis_id=ANALYSIS_ID,
+        stage="ORIENTATION_REQUIRED",
+        updated_at=datetime.now(timezone.utc),
+        setup_frame=_setup_frame(selected=True),
+        current_anchor_set=_valid_anchors(),
+        anchor_version=1,
+        selected_candidate=registration.selected_candidate,
+        calibration_level="VISUAL_ONLY",
+        message="orientation",
+    )
+    path = isolated_scene / ANALYSIS_ID / "reports" / "scene_calibration_v1.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(result.model_dump_json(), encoding="utf-8")
+    monkeypatch.setattr(
+        "services.api.services.scene_calibration_service.run_real_pitch_registration",
+        lambda analysis_id, **kwargs: registration.model_copy(
+            update={"ambiguity_score": 0.0}
+        ),
+    )
+    saved = apply_scene_calibration_orientation(
+        ANALYSIS_ID,
+        SceneCalibrationOrientationRequest(
+            anchor_version=1,
+            image_left_mapping="IMAGE_LEFT_IS_PITCH_LEFT",
+            create_preset=True,
+            user_confirmed_same_fixed_setup=True,
+        ),
+    )
+    assert saved.orientation_preset_id is not None
+    listed = load_orientation_presets_for_analysis("another_analysis")
+    assert not listed.compatible_presets
+    with pytest.raises(VideoAnalysisServiceError, match="confirmation"):
+        apply_scene_calibration_preset(
+            ANALYSIS_ID,
+            SceneCalibrationPresetRequest(
+                anchor_version=1,
+                preset_id=saved.orientation_preset_id,
+                user_confirmed_same_fixed_setup=False,
+            ),
+        )
 
 
 def test_accepted_snapshots_are_revisioned_and_never_overwritten(

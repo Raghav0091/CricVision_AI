@@ -1768,6 +1768,7 @@ export type SceneCalibrationStage =
   | "OBSERVING_WICKETS"
   | "GENERATING_POSE"
   | "NEEDS_ADJUSTMENT"
+  | "ORIENTATION_REQUIRED"
   | "GROUND_PLANE_READY"
   | "METRIC_3D_READY"
   | "INSUFFICIENT_EVIDENCE"
@@ -1786,7 +1787,7 @@ export type SceneCalibrationAnchorSource =
 
 export type SceneCalibrationAnchor = {
   semantic_id: string;
-  kind: "wicket" | "crease";
+  kind: "wicket" | "crease" | "pitch_edge";
   wicket_role?: "near" | "far" | null;
   video_point?: VirtualPitchPixelPoint | null;
   source: SceneCalibrationAnchorSource;
@@ -1799,6 +1800,72 @@ export type SceneCalibrationAnchor = {
   used_for_refinement: boolean;
   used_for_validation: boolean;
   validation_messages: string[];
+};
+
+export type ImageLeftMapping =
+  | "IMAGE_LEFT_IS_PITCH_LEFT"
+  | "IMAGE_LEFT_IS_PITCH_RIGHT";
+
+export type CameraEnd = "bowler" | "striker" | "unknown";
+
+export type OrientationEvidence = {
+  evidence_id: string;
+  evidence_type:
+    | "USER_CONFIRMED_LATERAL_ORIENTATION"
+    | "SAVED_CAMERA_ORIENTATION_PRESET"
+    | "SEMANTIC_PITCH_EDGE_POINT"
+    | "SEMANTIC_CREASE_ENDPOINT"
+    | "TRUSTED_CAMERA_END"
+    | "TRUSTED_SESSION_DIRECTION"
+    | "FUTURE_AUTOMATIC_ASYMMETRIC_EVIDENCE";
+  source: "user" | "saved_preset" | "manual_anchor" | "trusted_session" | "future_automatic";
+  frame_index?: number | null;
+  native_pixel_coordinate?: VirtualPitchPixelPoint | null;
+  semantic_label: string;
+  confidence: number;
+  uncertainty: number;
+  authoritative: boolean;
+  supports_candidate_ids: string[];
+  rejects_candidate_ids: string[];
+  explanation: string;
+  created_at: string;
+  user_confirmed: boolean;
+};
+
+export type OrientationResolution = {
+  required: boolean;
+  resolved: boolean;
+  image_left_mapping?: ImageLeftMapping | null;
+  camera_end?: CameraEnd | null;
+  ambiguity_before: number;
+  ambiguity_after: number;
+  selected_candidate_id?: string | null;
+  rejected_candidate_ids: string[];
+  consistent_candidate_ids: string[];
+  evidence_applied: OrientationEvidence[];
+  symmetric_evidence_insufficient: string[];
+  remaining_failures: string[];
+};
+
+export type CameraOrientationPreset = {
+  preset_id: string;
+  preset_name: string;
+  version: "v1";
+  created_at: string;
+  updated_at: string;
+  source_analysis_id: string;
+  native_width: number;
+  native_height: number;
+  rotation_metadata?: string | null;
+  camera_device_identifier?: string | null;
+  lens_or_focal_metadata?: string | null;
+  camera_end: CameraEnd;
+  image_left_mapping: ImageLeftMapping;
+  virtual_pitch_version: "v1";
+  confidence: number;
+  user_confirmed: boolean;
+  compatible: boolean;
+  compatibility_reasons: string[];
 };
 
 export type SceneCalibrationValidation = {
@@ -1888,8 +1955,17 @@ export type SceneCalibrationResult = {
   current_anchor_set: SceneCalibrationAnchor[];
   optional_crease_anchors: SceneCalibrationAnchor[];
   anchor_version: number;
+  orientation_required: boolean;
+  image_left_mapping?: ImageLeftMapping | null;
+  camera_end?: CameraEnd | null;
+  orientation_evidence: OrientationEvidence[];
+  orientation_resolution?: OrientationResolution | null;
+  available_orientation_presets: CameraOrientationPreset[];
+  orientation_preset_id?: string | null;
   selected_candidate?: RegistrationCandidate | null;
+  competing_candidate?: RegistrationCandidate | null;
   projected_pitch_geometry?: RealPitchProjection | null;
+  competing_projected_pitch_geometry?: RealPitchProjection | null;
   validation?: SceneCalibrationValidation | null;
   accepted_calibration?: {
     revision: number;
@@ -1901,6 +1977,8 @@ export type SceneCalibrationResult = {
     virtual_pitch_version: "v1";
     registration_version: "v1";
     snapshot_url: string;
+    image_left_mapping?: ImageLeftMapping | null;
+    orientation_preset_id?: string | null;
   } | null;
   calibration_level: SceneCalibrationLevel;
   metrics_unlocked: string[];
@@ -1919,6 +1997,12 @@ export type SceneCalibrationAnchorInput = {
   source: SceneCalibrationAnchorSource;
   used_for_refinement?: boolean;
   used_for_validation?: boolean;
+};
+
+export type SceneCalibrationPresetResponse = {
+  analysis_id: string;
+  compatible_presets: CameraOrientationPreset[];
+  rejected_presets: CameraOrientationPreset[];
 };
 
 
@@ -2382,6 +2466,69 @@ export function saveSceneCalibrationAnchors(
 export function refineSceneCalibration(analysisId: string, anchorVersion: number) {
   return sceneCalibrationRequest(analysisId, "/refine", {
     anchor_version: anchorVersion
+  });
+}
+
+
+export function confirmSceneCalibrationOrientation(
+  analysisId: string,
+  anchorVersion: number,
+  imageLeftMapping: ImageLeftMapping | "NOT_SURE",
+  options?: {
+    cameraEnd?: CameraEnd;
+    createPreset?: boolean;
+    presetName?: string;
+    userConfirmedSameFixedSetup?: boolean;
+  }
+) {
+  return sceneCalibrationRequest(analysisId, "/orientation", {
+    anchor_version: anchorVersion,
+    image_left_mapping: imageLeftMapping,
+    camera_end: options?.cameraEnd ?? "unknown",
+    create_preset: options?.createPreset ?? false,
+    preset_name: options?.presetName ?? null,
+    user_confirmed_same_fixed_setup: options?.userConfirmedSameFixedSetup ?? false
+  });
+}
+
+
+export function clearSceneCalibrationOrientation(
+  analysisId: string,
+  anchorVersion: number
+) {
+  return sceneCalibrationRequest(analysisId, "/orientation/clear", {
+    anchor_version: anchorVersion
+  });
+}
+
+
+export async function getSceneCalibrationPresets(
+  analysisId: string
+): Promise<SceneCalibrationPresetResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/scene-calibration/preset`,
+    { cache: "no-store" }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(
+      response,
+      `Scene calibration presets returned ${response.status}.`
+    );
+  }
+  return response.json() as Promise<SceneCalibrationPresetResponse>;
+}
+
+
+export function useSceneCalibrationPreset(
+  analysisId: string,
+  anchorVersion: number,
+  presetId: string,
+  userConfirmedSameFixedSetup: boolean
+) {
+  return sceneCalibrationRequest(analysisId, "/preset", {
+    anchor_version: anchorVersion,
+    preset_id: presetId,
+    user_confirmed_same_fixed_setup: userConfirmedSameFixedSetup
   });
 }
 

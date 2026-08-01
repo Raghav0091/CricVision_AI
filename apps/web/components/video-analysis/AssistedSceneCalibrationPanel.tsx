@@ -11,13 +11,17 @@ import {
 import { Button } from "@/components/ui/Button";
 import {
   acceptSceneCalibration,
+  clearSceneCalibrationOrientation,
+  confirmSceneCalibrationOrientation,
   getSceneCalibration,
   refineSceneCalibration,
   rejectSceneCalibration,
   runSceneCalibration,
   saveSceneCalibrationAnchors,
   enableVisualSceneCalibration,
+  type ImageLeftMapping,
   type RealPitchProjection,
+  type RegistrationCandidate,
   type SceneCalibrationAnchor,
   type SceneCalibrationAnchorInput,
   type SceneCalibrationResult
@@ -43,6 +47,11 @@ const CREASE_ANCHORS = [
   "near_popping_crease_right",
   "far_popping_crease_left",
   "far_popping_crease_right"
+];
+const SEMANTIC_SCENE_ANCHORS = [
+  ...CREASE_ANCHORS,
+  "pitch_left_edge_reference",
+  "pitch_right_edge_reference"
 ];
 
 
@@ -167,6 +176,39 @@ function anchorInput(anchor: SceneCalibrationAnchor): SceneCalibrationAnchorInpu
 }
 
 
+function mappingText(mapping?: string | null): string {
+  if (mapping === "IMAGE_LEFT_IS_PITCH_LEFT" || mapping === "image_left_to_world_left") {
+    return "Image left = pitch left";
+  }
+  if (mapping === "IMAGE_LEFT_IS_PITCH_RIGHT" || mapping === "image_left_to_world_right") {
+    return "Image left = pitch right";
+  }
+  return "Unresolved";
+}
+
+
+function CandidateSummary({
+  label,
+  candidate,
+  active
+}: {
+  label: string;
+  candidate?: RegistrationCandidate | null;
+  active: boolean;
+}) {
+  return (
+    <div className={`border px-3 py-2 text-xs ${active ? "border-lime/50 bg-lime/[0.06]" : "border-white/10 bg-black/15"}`}>
+      <p className="font-black uppercase">{label}</p>
+      <p className="mt-1 text-white/55">{candidate?.candidate_id ?? "Unavailable"}</p>
+      <p className="mt-1">{mappingText(candidate?.lateral_mapping)}</p>
+      <p className="mt-1 text-white/45">
+        score {candidate ? candidate.score.toFixed(3) : "n/a"} / rmse {candidate?.reprojection_rmse_px?.toFixed(2) ?? "n/a"} px
+      </p>
+    </div>
+  );
+}
+
+
 export function AssistedSceneCalibrationPanel({
   analysisId,
   initialResult,
@@ -198,6 +240,8 @@ export function AssistedSceneCalibrationPanel({
     panX: 0,
     panY: 0
   });
+  const [candidateView, setCandidateView] = useState<"selected" | "competing">("selected");
+  const [savePreset, setSavePreset] = useState(false);
 
   function adopt(next: SceneCalibrationResult) {
     setResult(next);
@@ -228,7 +272,9 @@ export function AssistedSceneCalibrationPanel({
   }, [analysisId]);
 
   const setup = result?.setup_frame;
-  const projection = result?.projected_pitch_geometry;
+  const projection = candidateView === "competing"
+    ? result?.competing_projected_pitch_geometry ?? result?.projected_pitch_geometry
+    : result?.projected_pitch_geometry;
   const canEdit = Boolean(setup && result?.selected_candidate);
   const candidateReady = Boolean(
     result?.validation?.all_required_checks_passed
@@ -249,6 +295,9 @@ export function AssistedSceneCalibrationPanel({
       (anchor) => anchor.semantic_id === id && anchor.video_point
     )),
     [anchors]
+  );
+  const orientationRequired = Boolean(
+    result?.orientation_required || result?.stage === "ORIENTATION_REQUIRED"
   );
 
   async function perform(message: string, action: () => Promise<SceneCalibrationResult>) {
@@ -273,6 +322,30 @@ export function AssistedSceneCalibrationPanel({
     );
   }
 
+  async function confirmOrientation(mapping: ImageLeftMapping | "NOT_SURE") {
+    if (!result) return;
+    await perform("Applying pitch orientation evidence...", () =>
+      confirmSceneCalibrationOrientation(
+        analysisId,
+        result.anchor_version,
+        mapping,
+        {
+          cameraEnd: "unknown",
+          createPreset: savePreset && mapping !== "NOT_SURE",
+          presetName: "Fixed camera orientation",
+          userConfirmedSameFixedSetup: savePreset && mapping !== "NOT_SURE"
+        }
+      )
+    );
+  }
+
+  async function clearOrientation() {
+    if (!result) return;
+    await perform("Clearing pitch orientation...", () =>
+      clearSceneCalibrationOrientation(analysisId, result.anchor_version)
+    );
+  }
+
   function updateLocalAnchor(semanticId: string, x: number, y: number) {
     setAnchors((current) => {
       const existing = current.find((item) => item.semantic_id === semanticId);
@@ -289,7 +362,11 @@ export function AssistedSceneCalibrationPanel({
           }
         : {
             semantic_id: semanticId,
-            kind: CREASE_ANCHORS.includes(semanticId) ? "crease" : "wicket",
+            kind: CREASE_ANCHORS.includes(semanticId)
+              ? "crease"
+              : semanticId.includes("pitch_")
+                ? "pitch_edge"
+                : "wicket",
             wicket_role: semanticId.startsWith("near") ? "near" : "far",
             video_point: { x, y },
             source,
@@ -409,7 +486,7 @@ export function AssistedSceneCalibrationPanel({
   async function removeOptionalAnchor(semanticId: string) {
     if (!result) return;
     const anchor = anchors.find((item) => item.semantic_id === semanticId);
-    if (!anchor || anchor.kind !== "crease") return;
+    if (!anchor || !SEMANTIC_SCENE_ANCHORS.includes(semanticId)) return;
     setHistory((current) => [...current, anchors]);
     await perform("Removing crease anchor...", () =>
       saveSceneCalibrationAnchors(analysisId, result.anchor_version, [{
@@ -617,6 +694,93 @@ export function AssistedSceneCalibrationPanel({
         </>
       )}
 
+      {(result.competing_candidate || result.orientation_resolution) && (
+        <div className="mt-4 border border-white/10 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-black">Mirror Candidate Comparison</h3>
+              <p className="mt-1 text-xs text-white/45">
+                Both overlays can align because wicket geometry is laterally symmetric.
+              </p>
+            </div>
+            {result.competing_candidate && (
+              <div className="flex gap-1">
+                <button
+                  className={`border px-2 py-1 text-xs ${candidateView === "selected" ? "border-lime text-lime" : "border-white/15"}`}
+                  onClick={() => setCandidateView("selected")}
+                >
+                  Candidate A
+                </button>
+                <button
+                  className={`border px-2 py-1 text-xs ${candidateView === "competing" ? "border-lime text-lime" : "border-white/15"}`}
+                  onClick={() => setCandidateView("competing")}
+                >
+                  Candidate B
+                </button>
+              </div>
+            )}
+          </div>
+          <div className="mt-3 grid gap-2 md:grid-cols-2">
+            <CandidateSummary label="Candidate A" candidate={result.selected_candidate} active={candidateView === "selected"} />
+            <CandidateSummary label="Candidate B" candidate={result.competing_candidate} active={candidateView === "competing"} />
+          </div>
+          <div className="mt-3 grid gap-2 text-xs text-white/55 sm:grid-cols-3">
+            <span>Bowler end</span>
+            <span className="text-center">Bowler to striker</span>
+            <span className="text-right">Striker end</span>
+            <span>Pitch Left</span>
+            <span className="text-center">Native video orientation</span>
+            <span className="text-right">Pitch Right</span>
+          </div>
+          {result.orientation_resolution && (
+            <p className="mt-3 text-xs text-white/45">
+              Ambiguity {result.orientation_resolution.ambiguity_before.toFixed(3)}
+              {" -> "}
+              {result.orientation_resolution.ambiguity_after.toFixed(3)}
+              {" / "}
+              {mappingText(result.orientation_resolution.image_left_mapping)}
+            </p>
+          )}
+        </div>
+      )}
+
+      {orientationRequired && (
+        <div className="mt-4 border border-[#ffd35f]/30 bg-[#ffd35f]/10 p-3">
+          <h3 className="text-sm font-black text-[#ffd35f]">Pitch orientation needs confirmation</h3>
+          <p className="mt-1 text-xs text-white/65">
+            Choose which side of the native video represents pitch-right when looking from the bowler end toward the striker end.
+          </p>
+          <div className="mt-3 grid gap-2 sm:grid-cols-3">
+            <Button disabled={busy} onClick={() => void confirmOrientation("IMAGE_LEFT_IS_PITCH_LEFT")}>
+              Image Left = Pitch Left
+            </Button>
+            <Button disabled={busy} onClick={() => void confirmOrientation("IMAGE_LEFT_IS_PITCH_RIGHT")}>
+              Image Left = Pitch Right
+            </Button>
+            <Button variant="secondary" disabled={busy} onClick={() => void confirmOrientation("NOT_SURE")}>
+              Not Sure
+            </Button>
+          </div>
+          <label className="mt-3 flex items-center gap-2 text-xs text-white/55">
+            <input
+              type="checkbox"
+              checked={savePreset}
+              onChange={(event) => setSavePreset(event.target.checked)}
+            />
+            Save this fixed-camera orientation for explicit future reuse
+          </label>
+        </div>
+      )}
+
+      {result.image_left_mapping && !orientationRequired && (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border border-lime/20 bg-lime/[0.05] px-3 py-2 text-xs">
+          <span>Orientation resolved: {mappingText(result.image_left_mapping)}</span>
+          <button className="border border-white/15 px-2 py-1" onClick={() => void clearOrientation()}>
+            Clear
+          </button>
+        </div>
+      )}
+
       {editing && (
         <div className="mt-4 border border-white/10 p-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -649,9 +813,9 @@ export function AssistedSceneCalibrationPanel({
             })}
           </div>
           <div className="mt-4 border-t border-white/10 pt-3">
-            <h3 className="text-sm font-black">Optional Crease Anchors</h3>
+            <h3 className="text-sm font-black">Optional Semantic Scene Anchors</h3>
             <div className="mt-2 flex flex-wrap gap-2">
-              {CREASE_ANCHORS.map((semanticId) => {
+              {SEMANTIC_SCENE_ANCHORS.map((semanticId) => {
                 const exists = anchors.some((item) => item.semantic_id === semanticId && item.video_point);
                 return (
                   <button

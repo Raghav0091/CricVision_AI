@@ -1827,6 +1827,7 @@ def run_real_pitch_registration(
     point_overrides: dict[str, PixelPoint] | None = None,
     crease_overrides: dict[str, PixelPoint] | None = None,
     manual_override_ids: set[str] | None = None,
+    required_lateral_mapping: str | None = None,
     result_filename: str = RESULT_FILENAME,
     debug_directory: str = DEBUG_DIRECTORY,
 ) -> RealPitchRegistrationResult:
@@ -1888,6 +1889,37 @@ def run_real_pitch_registration(
                 )
                 candidates.append(candidate)
                 correspondences_by_candidate[candidate_id] = correspondences
+    if required_lateral_mapping is not None:
+        if required_lateral_mapping not in {
+            "image_left_to_world_left",
+            "image_left_to_world_right",
+        }:
+            raise VideoAnalysisServiceError(
+                "Unsupported lateral orientation mapping.",
+                status_code=422,
+            )
+        candidates = [
+            item
+            if item.lateral_mapping == required_lateral_mapping
+            else item.model_copy(
+                update={
+                    "score": 0.0,
+                    "eligible_for_selection": False,
+                    "failure_reasons": [
+                        *item.failure_reasons,
+                        "rejected_by_explicit_orientation_evidence",
+                    ],
+                    "warnings": [
+                        *item.warnings,
+                        (
+                            "Candidate retained for diagnostics but rejected "
+                            "by explicit native-video orientation evidence."
+                        ),
+                    ],
+                }
+            )
+            for item in candidates
+        ]
     ranked = sorted(
         [item for item in candidates if item.eligible_for_selection],
         key=lambda item: (-item.score, item.candidate_id),
