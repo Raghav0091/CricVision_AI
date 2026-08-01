@@ -1,4 +1,5 @@
 import type { BoxLayout, CalibrationResponse, CapturedFrame } from "./types";
+import type { CameraBridgeInput } from "./virtual-pitch/opencvCameraBridge";
 
 
 export const API_BASE_URL = (
@@ -2596,6 +2597,107 @@ export async function getSyntheticPitchPreview(
     );
   }
   return response.json() as Promise<SyntheticPitchPreviewResponse>;
+}
+
+
+export type CameraBridgeApiResponse = {
+  bridge_version: "opencv_three_camera_bridge_v1";
+  status: "AVAILABLE" | "UNAVAILABLE";
+  camera?: {
+    source: string;
+    source_version: string;
+    analysis_id?: string | null;
+    candidate_id: string;
+    accepted: boolean;
+    classification: string;
+    image_width: number;
+    image_height: number;
+    camera_matrix: number[][];
+    distortion: {
+      mode: "ZERO_DISTORTION" | "PREUNDISTORTED_FRAME" | "NONZERO_DISTORTION_UNSUPPORTED";
+      coefficients: number[];
+      frame_preundistorted: boolean;
+      exact_pinhole_rendering_supported: boolean;
+      warning?: string | null;
+    };
+    rotation_vector: number[];
+    rotation_matrix: number[][];
+    translation_vector: number[];
+    near_m: number;
+    far_m: number;
+    setup_frame?: {
+      image_url: string;
+    } | null;
+    warnings: string[];
+  } | null;
+  projected_pitch_geometry?: ProjectedPitchGeometry | null;
+  warnings: string[];
+  message: string;
+};
+
+
+export type NormalizedCameraBridgeResponse = {
+  camera: CameraBridgeInput & { setup_frame_url?: string | null };
+  projection: ProjectedPitchGeometry | null;
+};
+
+
+function normalizeCameraBridgeResponse(response: CameraBridgeApiResponse): NormalizedCameraBridgeResponse {
+  const camera = response.camera;
+  if (response.status !== "AVAILABLE" || !camera) {
+    throw new Error(response.message || "No selected camera candidate is available.");
+  }
+  const setupFrameUrl = camera.setup_frame?.image_url;
+  return {
+    camera: {
+      source: camera.source,
+      source_version: camera.source_version,
+      analysis_id: camera.analysis_id ?? null,
+      candidate_id: camera.candidate_id,
+      accepted: camera.accepted,
+      classification: camera.classification,
+      image_width: camera.image_width,
+      image_height: camera.image_height,
+      camera_matrix: camera.camera_matrix as unknown as CameraBridgeInput["camera_matrix"],
+      distortion_coefficients: camera.distortion.coefficients,
+      rotation_representation: "matrix_and_rodrigues",
+      rotation_vector: camera.rotation_vector as unknown as CameraBridgeInput["rotation_vector"],
+      rotation_matrix: camera.rotation_matrix as unknown as CameraBridgeInput["rotation_matrix"],
+      translation_vector: camera.translation_vector as unknown as CameraBridgeInput["translation_vector"],
+      extrinsic_convention: "opencv_world_to_camera",
+      world_coordinate_system: "cricvision_pitch_v1",
+      setup_frame_url: setupFrameUrl
+        ? `${API_BASE_URL}${setupFrameUrl.startsWith("/") ? "" : "/"}${setupFrameUrl}`
+        : null,
+      frame_preundistorted: camera.distortion.frame_preundistorted,
+      near: camera.near_m,
+      far: camera.far_m,
+      warnings: [...camera.warnings, ...response.warnings]
+    },
+    projection: response.projected_pitch_geometry ?? null
+  };
+}
+
+
+async function cameraBridgeRequest(url: string): Promise<NormalizedCameraBridgeResponse> {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) {
+    throw await videoAnalysisError(response, `Camera bridge lookup returned ${response.status}.`);
+  }
+  return normalizeCameraBridgeResponse(await response.json() as CameraBridgeApiResponse);
+}
+
+
+export function getSyntheticCameraBridge(cameraName: string): Promise<NormalizedCameraBridgeResponse> {
+  const query = new URLSearchParams({ camera_name: cameraName });
+  return cameraBridgeRequest(`${API_BASE_URL}/video-analysis/virtual-pitch/camera-bridge?${query}`);
+}
+
+
+export function getAnalysisCameraBridge(analysisId: string): Promise<NormalizedCameraBridgeResponse> {
+  return cameraBridgeRequest(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/camera-bridge`
+  );
 }
 
 

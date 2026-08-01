@@ -3,6 +3,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Body, File, HTTPException, UploadFile
 
+from ..schemas.camera_bridge import CameraBridgeResponse
 from ..schemas.video_analysis import (
     BallDetectorModelOption,
     BallDetectorModelsResponse,
@@ -84,9 +85,9 @@ from ..services.video_camera_pose_service import (
     load_wicket_camera_pose,
     solve_wicket_camera_pose,
 )
-from ..services.virtual_pitch_service import (
-    build_synthetic_preview,
-    build_virtual_pitch_specification,
+from ..services.camera_bridge_service import (
+    build_synthetic_camera_bridge,
+    load_analysis_camera_bridge,
 )
 from ..services.real_pitch_registration_service import (
     load_real_pitch_registration,
@@ -104,6 +105,10 @@ from ..services.scene_calibration_service import (
     run_scene_calibration,
     update_scene_calibration_anchors,
     use_visual_overlay_only,
+)
+from ..services.virtual_pitch_service import (
+    build_synthetic_preview,
+    build_virtual_pitch_specification,
 )
 from ..services.wicket_observation_service import (
     load_wicket_observation,
@@ -135,6 +140,35 @@ def get_synthetic_virtual_pitch_projection(
         return build_synthetic_preview(camera_name, profile)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get(
+    "/virtual-pitch/camera-bridge",
+    response_model=CameraBridgeResponse,
+)
+def get_synthetic_camera_bridge(
+    camera_name: str = "centred_bowler_end",
+) -> CameraBridgeResponse:
+    try:
+        return build_synthetic_camera_bridge(camera_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get(
+    "/{analysis_id}/camera-bridge",
+    response_model=CameraBridgeResponse,
+)
+def get_analysis_camera_bridge(
+    analysis_id: str,
+) -> CameraBridgeResponse:
+    try:
+        return load_analysis_camera_bridge(analysis_id)
+    except VideoAnalysisServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
 
 
 @router.post(

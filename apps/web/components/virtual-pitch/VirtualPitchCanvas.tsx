@@ -76,6 +76,15 @@ export function VirtualPitchCanvas(props: VirtualPitchSceneProps) {
   const dprCap = props.visualOptions.lowPerformance
     ? 1
     : Math.max(1, Math.min(2, requestedCap));
+  const calibratedMode = props.mode === "camera-validation" || props.mode === "real-frame-overlay";
+  const transparent = props.mode === "real-frame-overlay";
+  const overlayOpacity = transparent
+    ? Math.max(0, Math.min(1, props.visualOptions.overlayOpacity ?? 1))
+    : 1;
+
+  if (calibratedMode && !props.calibratedCamera) {
+    return <RendererFallback message="A calibrated camera is required for this renderer mode." />;
+  }
 
   return (
     <RendererErrorBoundary>
@@ -90,12 +99,20 @@ export function VirtualPitchCanvas(props: VirtualPitchSceneProps) {
         flat
         frameloop="demand"
         gl={{
-          alpha: false,
+          // Alpha must be enabled at context creation so source switching can
+          // enter overlay mode without recreating the whole Canvas.
+          alpha: true,
           antialias: !props.visualOptions.lowPerformance,
           powerPreference: props.visualOptions.lowPerformance ? "low-power" : "high-performance"
         }}
+        onCreated={({ gl }) => gl.setClearColor(0x000000, 0)}
         shadows={false}
-        style={{ height: "100%", width: "100%" }}
+        style={{
+          background: transparent ? "transparent" : undefined,
+          height: "100%",
+          opacity: overlayOpacity,
+          width: "100%"
+        }}
       >
         <VirtualPitchScene {...props} />
       </Canvas>

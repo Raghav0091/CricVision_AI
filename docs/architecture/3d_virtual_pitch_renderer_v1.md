@@ -235,11 +235,11 @@ without improving this milestone's geometry or interaction needs.
 
 ### OpenCV To Three.js Camera Conversion
 
-A later camera-bridge module will convert accepted OpenCV intrinsics and
-extrinsics into a Three.js projection matrix and camera pose. It must consume the
-same canonical world points and make image origin, axis sign, distortion, and
-near/far-plane handling explicit. This conversion does not belong in primitive
-components or camera presets.
+The implemented camera bridge is documented in
+[`opencv_three_camera_bridge_v1.md`](opencv_three_camera_bridge_v1.md). It owns
+the full intrinsics and extrinsics conversion, distortion policy, numerical
+validation, and developer-only real-frame overlay. Primitive components and
+camera presets remain free of camera-conversion mathematics.
 
 ### Video Analysis
 

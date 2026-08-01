@@ -4,9 +4,13 @@ import type {
   VirtualPitchModel
 } from "@/lib/virtual-pitch";
 
+import type { CalibratedThreeCameraConfiguration } from "./calibratedCameraTypes";
+
 
 export type VirtualPitchRendererMode =
   | "development"
+  | "camera-validation"
+  | "real-frame-overlay"
   | "video-overlay"
   | "live-overlay"
   | "interactive-replay";
@@ -29,12 +33,14 @@ export interface VirtualPitchVisualOptions {
   corridorOpacity?: number;
   lowPerformance?: boolean;
   dprCap?: number;
+  overlayOpacity?: number;
   materialPreset: VirtualPitchMaterialPreset;
 }
 
 export interface VirtualPitchSceneProps {
   model: VirtualPitchModel;
   camera: VirtualPitchCameraConfiguration;
+  calibratedCamera?: CalibratedThreeCameraConfiguration;
   visualOptions: VirtualPitchVisualOptions;
   mode?: VirtualPitchRendererMode;
 }

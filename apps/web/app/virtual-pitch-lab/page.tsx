@@ -13,7 +13,21 @@ import {
 
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
-import { getVirtualPitchSpecification } from "@/lib/api";
+import type { VirtualPitchSceneProps, VirtualPitchVisualOptions } from "@/components/virtual-pitch";
+import {
+  CameraDiagnosticsPanel,
+  OverlayStage,
+  type CameraBridgePayload,
+  type CameraSourceMode,
+  type OverlayComparisonMode
+} from "@/components/virtual-pitch-lab";
+import {
+  getAnalysisCameraBridge,
+  getSyntheticCameraBridge,
+  getVirtualPitchSpecification,
+  type NormalizedCameraBridgeResponse,
+  type ProjectedPitchGeometry
+} from "@/lib/api";
 import {
   adaptVirtualPitchResponse,
   calculateCameraPreset,
@@ -24,19 +38,23 @@ import {
   type MaterialPresetName,
   type VirtualPitchModel
 } from "@/lib/virtual-pitch";
-import type {
-  VirtualPitchSceneProps,
-  VirtualPitchVisualOptions
-} from "@/components/virtual-pitch";
+import { validateCameraBridge } from "@/lib/virtual-pitch/cameraValidation";
+import { buildThreeCameraFromOpenCv, type ThreeCameraBridge } from "@/lib/virtual-pitch/opencvCameraBridge";
 
+
+const STRONGEST_ANALYSIS_ID = "analysis_20260728_120858_762989";
 
 type PreviewLayout = "portrait" | "landscape";
+type LabCanvasProps = VirtualPitchSceneProps & {
+  calibratedCamera?: ThreeCameraBridge;
+};
 
 type VisualOptions = {
   corridorOpacity: number;
   showPitch: boolean;
   showStumps: boolean;
   showCreases: boolean;
+  showCorridor: boolean;
   showAxes: boolean;
   showGrid: boolean;
   wireframe: boolean;
@@ -44,23 +62,10 @@ type VisualOptions = {
   lowPerformanceMode: boolean;
 };
 
-type ModelSummary = {
-  version: string;
-  pitchLengthM: number | null;
-  pitchWidthM: number | null;
-  stumpCount: number;
-  lineCount: number;
-  polygonCount: number;
-  coordinateDescription: string;
-};
 
-
-const VirtualPitchCanvas = dynamic<VirtualPitchSceneProps>(
-  () => import("@/components/virtual-pitch").then((module) => module.VirtualPitchCanvas as ComponentType<VirtualPitchSceneProps>),
-  {
-    ssr: false,
-    loading: () => <ViewportMessage title="Loading 3D renderer" detail="Preparing the development scene..." />
-  }
+const VirtualPitchCanvas = dynamic<LabCanvasProps>(
+  () => import("@/components/virtual-pitch").then((module) => module.VirtualPitchCanvas as ComponentType<LabCanvasProps>),
+  { ssr: false, loading: () => <ViewportMessage title="Loading 3D renderer" detail="Preparing the development scene..." /> }
 );
 
 const PRESETS: Array<{ id: CameraPresetId; label: string }> = [
@@ -72,11 +77,18 @@ const PRESETS: Array<{ id: CameraPresetId; label: string }> = [
   { id: "free-orbit", label: "Free Orbit" }
 ];
 
+const SOURCE_OPTIONS: Array<{ id: CameraSourceMode; label: string }> = [
+  { id: "development", label: "Development Preset" },
+  { id: "synthetic-opencv", label: "Synthetic OpenCV Camera" },
+  { id: "real-analysis", label: "Real Analysis Camera" }
+];
+
 const DEFAULT_VISUAL_OPTIONS: VisualOptions = {
   corridorOpacity: 0.24,
   showPitch: true,
   showStumps: true,
   showCreases: true,
+  showCorridor: true,
   showAxes: false,
   showGrid: false,
   wireframe: false,
@@ -85,17 +97,21 @@ const DEFAULT_VISUAL_OPTIONS: VisualOptions = {
 };
 
 
-function summarizeModel(model: VirtualPitchModel | null): ModelSummary {
-  return {
-    version: model?.modelVersion ?? "Virtual Pitch V1",
-    pitchLengthM: model?.dimensions.pitchLengthM ?? null,
-    pitchWidthM: model?.dimensions.pitchWidthM ?? null,
-    stumpCount: model?.stumps.length ?? 0,
-    lineCount: model?.lineSegments.length ?? 0,
-    polygonCount: model?.polygons.length ?? 0,
-    coordinateDescription: model?.coordinateSystem.description
-      ?? "Origin: bowler-end middle stump; +x pitch-right; +y toward striker; +z up."
-  };
+function comparisonsFromProjection(projection?: ProjectedPitchGeometry | null) {
+  return (projection?.projected_landmarks ?? []).map((landmark) => ({
+    semantic_id: landmark.semantic_id,
+    world_point: landmark.world_point,
+    opencv_pixel: landmark.pixel_point,
+    three_pixel: null,
+    camera_depth: landmark.depth_m,
+    in_frame: landmark.in_frame,
+    clipped: !landmark.projection_valid
+  }));
+}
+
+
+function cameraLabel(name: string): string {
+  return name.split("_").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
 }
 
 
@@ -109,18 +125,10 @@ function supportsWebGL(): boolean {
 }
 
 
-function formatVector(vector: { x: number; y: number; z: number }): string {
-  return [vector.x, vector.y, vector.z].map((value) => value.toFixed(2)).join(", ");
-}
-
-
 function ViewportMessage({ title, detail }: { title: string; detail: string }) {
   return (
-    <div className="grid h-full min-h-[28rem] place-items-center bg-[#050806] p-8 text-center">
-      <div className="max-w-sm">
-        <p className="text-base font-bold text-white">{title}</p>
-        <p className="mt-2 text-sm leading-6 text-white/45">{detail}</p>
-      </div>
+    <div className="grid h-full min-h-[22rem] place-items-center bg-[#050806] p-8 text-center">
+      <div className="max-w-sm"><p className="text-base font-bold text-white">{title}</p><p className="mt-2 text-sm leading-6 text-white/45">{detail}</p></div>
     </div>
   );
 }
@@ -128,71 +136,39 @@ function ViewportMessage({ title, detail }: { title: string; detail: string }) {
 
 class RendererBoundary extends Component<PropsWithChildren, { error: Error | null }> {
   state = { error: null as Error | null };
-
-  static getDerivedStateFromError(error: Error) {
-    return { error };
-  }
-
-  componentDidCatch(_error: Error, _info: ErrorInfo) {
-    // The visible state below is the useful developer signal; Next also logs the stack.
-  }
-
+  static getDerivedStateFromError(error: Error) { return { error }; }
+  componentDidCatch(_error: Error, _info: ErrorInfo) {}
   render() {
-    if (this.state.error) {
-      return (
-        <ViewportMessage
-          title="3D renderer could not start"
-          detail={this.state.error.message || "Check the renderer dependency and WebGL support."}
-        />
-      );
-    }
-    return this.props.children;
+    return this.state.error
+      ? <ViewportMessage title="3D renderer could not start" detail={this.state.error.message || "Check WebGL support."} />
+      : this.props.children;
   }
 }
 
 
-function RangeControl({
-  label,
-  value,
-  min,
-  max,
-  step,
-  suffix,
-  onChange
-}: {
+function RangeControl({ label, value, min, max, step, suffix, disabled = false, onChange }: {
   label: string;
   value: number;
   min: number;
   max: number;
   step: number;
   suffix: string;
+  disabled?: boolean;
   onChange: (value: number) => void;
 }) {
   return (
-    <label className="block text-xs text-white/55">
-      <span className="flex items-center justify-between gap-3">
-        <span>{label}</span>
-        <span className="tabular-nums text-white/80">{value.toFixed(step < 1 ? 1 : 0)}{suffix}</span>
-      </span>
-      <input
-        className="mt-2 h-1.5 w-full cursor-pointer accent-lime"
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
-      />
+    <label className={`block text-xs ${disabled ? "text-white/25" : "text-white/55"}`}>
+      <span className="flex items-center justify-between gap-3"><span>{label}</span><span className="tabular-nums">{value.toFixed(step < 1 ? 1 : 0)}{suffix}</span></span>
+      <input className="mt-2 h-1.5 w-full accent-lime disabled:cursor-not-allowed disabled:opacity-30" disabled={disabled} type="range" min={min} max={max} step={step} value={value} onChange={(event) => onChange(Number(event.target.value))} />
     </label>
   );
 }
 
 
-function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (checked: boolean) => void }) {
+function Toggle({ label, checked, disabled = false, onChange }: { label: string; checked: boolean; disabled?: boolean; onChange: (checked: boolean) => void }) {
   return (
-    <label className="flex cursor-pointer items-center justify-between gap-3 rounded-lg border border-white/10 bg-black/15 px-3 py-2.5 text-xs font-semibold text-white/65">
-      <span>{label}</span>
-      <input className="h-4 w-4 accent-lime" type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
+    <label className={`flex items-center justify-between gap-3 rounded border border-white/10 bg-black/15 px-3 py-2.5 text-xs font-semibold ${disabled ? "cursor-not-allowed text-white/25" : "cursor-pointer text-white/65"}`}>
+      <span>{label}</span><input className="h-4 w-4 accent-lime" disabled={disabled} type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
     </label>
   );
 }
@@ -200,239 +176,264 @@ function Toggle({ label, checked, onChange }: { label: string; checked: boolean;
 
 export default function VirtualPitchLabPage() {
   const [model, setModel] = useState<VirtualPitchModel | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [webglAvailable, setWebglAvailable] = useState<boolean | null>(null);
+  const [sourceMode, setSourceMode] = useState<CameraSourceMode>("development");
   const [layout, setLayout] = useState<PreviewLayout>("landscape");
   const [preset, setPreset] = useState<CameraPresetId>("setup");
   const [cameraAdjustments, setCameraAdjustments] = useState<CameraAdjustments>({});
   const [materialStyle, setMaterialStyle] = useState<Exclude<MaterialPresetName, "debug-wireframe">>("cricvision-dark");
   const [visualOptions, setVisualOptions] = useState<VisualOptions>(DEFAULT_VISUAL_OPTIONS);
+  const [syntheticCameraName, setSyntheticCameraName] = useState("");
+  const [syntheticPayload, setSyntheticPayload] = useState<NormalizedCameraBridgeResponse | null>(null);
+  const [analysisId, setAnalysisId] = useState(STRONGEST_ANALYSIS_ID);
+  const [bridgePayload, setBridgePayload] = useState<CameraBridgePayload | null>(null);
+  const [cameraLoading, setCameraLoading] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [comparisonMode, setComparisonMode] = useState<OverlayComparisonMode>("both");
+  const [overlayOpacity, setOverlayOpacity] = useState(0.76);
+  const [showOpenCvMarkers, setShowOpenCvMarkers] = useState(true);
+  const [showThreeMarkers, setShowThreeMarkers] = useState(true);
+  const [showResiduals, setShowResiduals] = useState(true);
+  const [showLabels, setShowLabels] = useState(false);
+  const [showCameraDiagnostics, setShowCameraDiagnostics] = useState(true);
 
+  const calibrated = sourceMode !== "development";
   const aspectRatio = layout === "portrait" ? 9 / 16 : 16 / 9;
-  const summary = useMemo(() => summarizeModel(model), [model]);
-  const cameraPreset = useMemo(
-    () => model ? calculateCameraPreset(preset, model, aspectRatio, cameraAdjustments) : null,
-    [aspectRatio, cameraAdjustments, model, preset]
-  );
-  const displayedCamera = useMemo(
-    () => model
-      ? resolveCameraAdjustments(model, aspectRatio, cameraAdjustments, preset)
-      : {
-          heightM: 1.25,
-          distanceBehindM: 3,
-          lateralOffsetM: 0,
-          verticalFovDegrees: 48,
-          targetHeightM: 0,
-          yawDegrees: 0,
-          pitchDegrees: 0,
-          rollDegrees: 0
-        },
-    [aspectRatio, cameraAdjustments, model, preset]
-  );
+  const cameraPreset = useMemo(() => model ? calculateCameraPreset(preset, model, aspectRatio, cameraAdjustments) : null, [aspectRatio, cameraAdjustments, model, preset]);
+  const displayedCamera = useMemo(() => model ? resolveCameraAdjustments(model, aspectRatio, cameraAdjustments, preset) : null, [aspectRatio, cameraAdjustments, model, preset]);
+  const activePayload = sourceMode === "synthetic-opencv" && syntheticPayload
+    ? { ...syntheticPayload, comparisons: comparisonsFromProjection(syntheticPayload.projection), diagnostics: null } satisfies CameraBridgePayload
+    : sourceMode === "real-analysis" ? bridgePayload : null;
+  const threeBridge = useMemo(() => {
+    if (!activePayload) return null;
+    try {
+      return buildThreeCameraFromOpenCv(activePayload.camera);
+    } catch {
+      return null;
+    }
+  }, [activePayload]);
+  const validationReport = useMemo(() => {
+    if (!threeBridge || !model) return null;
+    return validateCameraBridge(
+      threeBridge,
+      model.landmarks.map((landmark) => ({ semanticId: landmark.semanticId, world: landmark.point }))
+    );
+  }, [model, threeBridge]);
+  const nativeWidth = activePayload?.camera.image_width ?? 1280;
+  const nativeHeight = activePayload?.camera.image_height ?? 720;
+  const comparisons = validationReport?.points.map((point) => ({
+    semantic_id: point.semanticId,
+    world_point: point.world,
+    opencv_pixel: point.openCvPixel,
+    three_pixel: point.threePixel,
+    residual_x_px: point.xResidual,
+    residual_y_px: point.yResidual,
+    error_px: point.pixelError,
+    camera_depth: point.cameraDepth,
+    in_frame: point.inFrame,
+    clipped: point.clippingState !== "inside_frustum"
+  })) ?? activePayload?.comparisons ?? comparisonsFromProjection(activePayload?.projection);
+  const diagnostics = validationReport && threeBridge ? {
+    point_count: validationReport.metrics.pointCount,
+    valid_point_count: validationReport.metrics.validPointCount,
+    invalid_point_count: validationReport.metrics.invalidPointCount,
+    points_behind_camera: validationReport.metrics.pointsBehindCamera,
+    rmse_px: validationReport.metrics.rmse,
+    maximum_error_px: validationReport.metrics.maximumError,
+    mean_error_px: validationReport.metrics.meanError,
+    median_error_px: validationReport.metrics.medianError,
+    horizontal_bias_px: validationReport.metrics.horizontalBias,
+    vertical_bias_px: validationReport.metrics.verticalBias,
+    finite_matrices: validationReport.metrics.finiteMatrixStatus,
+    mirrored_axis_warning: validationReport.metrics.mirroredAxisWarning,
+    bowler_striker_reversal_warning: validationReport.metrics.bowlerStrikerReversalWarning,
+    distortion_mode: threeBridge.diagnostics.distortion.mode,
+    exact: threeBridge.exact,
+    warnings: threeBridge.diagnostics.warnings
+  } as const : activePayload?.diagnostics;
   const rendererOptions = useMemo<VirtualPitchVisualOptions>(() => ({
     showPitch: visualOptions.showPitch,
     showStumps: visualOptions.showStumps,
     showBails: visualOptions.showStumps,
     showLines: visualOptions.showCreases,
-    showCorridor: visualOptions.corridorOpacity > 0,
-    showAxes: visualOptions.showAxes,
-    showGrid: visualOptions.showGrid,
-    enableOrbitControls: visualOptions.enableOrbitControls,
+    showCorridor: visualOptions.showCorridor && visualOptions.corridorOpacity > 0,
+    showAxes: !calibrated && visualOptions.showAxes,
+    showGrid: !calibrated && visualOptions.showGrid,
+    enableOrbitControls: !calibrated && visualOptions.enableOrbitControls,
     corridorOpacity: visualOptions.corridorOpacity,
     lowPerformance: visualOptions.lowPerformanceMode,
     dprCap: visualOptions.lowPerformanceMode ? 1 : 2,
     materialPreset: materialPreset(visualOptions.wireframe ? "debug-wireframe" : materialStyle)
-  }), [materialStyle, visualOptions]);
-  useEffect(() => {
-    setWebglAvailable(supportsWebGL());
-  }, []);
+  }), [calibrated, materialStyle, visualOptions]);
 
+  useEffect(() => setWebglAvailable(supportsWebGL()), []);
   useEffect(() => {
     let active = true;
     setLoading(true);
-    setLoadError(null);
-
-    void getVirtualPitchSpecification()
-      .then((response) => adaptVirtualPitchResponse(response))
-      .then((nextModel) => {
-        if (active) setModel(nextModel);
-      })
-      .catch((error: unknown) => {
+    getVirtualPitchSpecification()
+      .then((response) => {
         if (!active) return;
-        setLoadError(error instanceof Error ? error.message : "The Virtual Pitch geometry response is invalid.");
+        setModel(adaptVirtualPitchResponse(response));
+        setSyntheticCameraName(response.synthetic_camera_names[0] ?? "");
       })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-
-    return () => {
-      active = false;
-    };
+      .catch((error: unknown) => active && setLoadError(error instanceof Error ? error.message : "Virtual Pitch geometry is unavailable."))
+      .finally(() => active && setLoading(false));
+    return () => { active = false; };
   }, []);
 
-  function resetCamera() {
-    setCameraAdjustments({});
+  useEffect(() => {
+    if (sourceMode !== "synthetic-opencv" || !syntheticCameraName) return;
+    let active = true;
+    setCameraLoading(true);
+    setCameraError(null);
+    void getSyntheticCameraBridge(syntheticCameraName)
+      .then((payload) => active && setSyntheticPayload(payload))
+      .catch((error: unknown) => active && setCameraError(error instanceof Error ? error.message : "Synthetic camera is unavailable."))
+      .finally(() => active && setCameraLoading(false));
+    return () => { active = false; };
+  }, [sourceMode, syntheticCameraName]);
+
+  async function loadRealCamera() {
+    setCameraLoading(true);
+    setCameraError(null);
+    setBridgePayload(null);
+    try {
+      setBridgePayload(await getAnalysisCameraBridge(analysisId.trim()));
+    } catch (error) {
+      setCameraError(error instanceof Error ? error.message : "Real camera candidate is unavailable.");
+    } finally {
+      setCameraLoading(false);
+    }
   }
 
-  function selectPreset(nextPreset: CameraPresetId) {
-    setPreset(nextPreset);
-    setCameraAdjustments({});
-  }
-
-  function selectLayout(nextLayout: PreviewLayout) {
-    setLayout(nextLayout);
-  }
-
-  function updateCamera<K extends keyof CameraAdjustments>(key: K, value: NonNullable<CameraAdjustments[K]>) {
-    setCameraAdjustments((current) => ({ ...current, [key]: value }));
-  }
+  useEffect(() => {
+    if (sourceMode === "real-analysis") void loadRealCamera();
+    // Loading is intentionally tied to source selection; subsequent IDs use the explicit button.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceMode]);
 
   function updateVisual<K extends keyof VisualOptions>(key: K, value: VisualOptions[K]) {
     setVisualOptions((current) => ({ ...current, [key]: value }));
   }
 
-  async function reloadGeometry() {
-    setLoading(true);
-    setLoadError(null);
-    try {
-      const response = await getVirtualPitchSpecification();
-      setModel(adaptVirtualPitchResponse(response));
-    } catch (error) {
-      setLoadError(error instanceof Error ? error.message : "The Virtual Pitch geometry response is invalid.");
-    } finally {
-      setLoading(false);
-    }
-  }
+  const canvas = model && cameraPreset ? (
+    <RendererBoundary>
+      <VirtualPitchCanvas
+        model={model}
+        mode={(calibrated ? (sourceMode === "real-analysis" ? "real-frame-overlay" : "camera-validation") : "development") as VirtualPitchSceneProps["mode"]}
+        camera={cameraPreset}
+        calibratedCamera={threeBridge ?? undefined}
+        visualOptions={rendererOptions}
+      />
+    </RendererBoundary>
+  ) : null;
 
   return (
     <div className="mx-auto max-w-[96rem] overflow-x-hidden py-1">
       <header className="flex flex-wrap items-end justify-between gap-4 border-b border-white/10 pb-5">
         <div>
-          <div className="flex flex-wrap items-center gap-2">
-            <p className="text-xs font-bold uppercase tracking-[0.18em] text-lime">Developer tool</p>
-            <span className="rounded border border-[#ffe761]/30 bg-[#ffe761]/10 px-2 py-1 text-[10px] font-black uppercase text-[#ffe761]">Development only</span>
-          </div>
+          <div className="flex flex-wrap items-center gap-2"><p className="text-xs font-bold uppercase tracking-[0.18em] text-lime">Developer tool</p><span className="rounded border border-[#ffe761]/30 bg-[#ffe761]/10 px-2 py-1 text-[10px] font-black uppercase text-[#ffe761]">Development only</span></div>
           <h1 className="mt-2 text-3xl font-black sm:text-4xl">Virtual Pitch Lab</h1>
-          <p className="mt-2 text-sm text-white/45">Standalone 3D inspection of the backend-owned Virtual Pitch model.</p>
+          <p className="mt-2 text-sm text-white/45">OpenCV-to-Three.js camera validation and real-frame overlay inspection.</p>
         </div>
-        <div className="text-left sm:text-right">
-          <p className="text-xs uppercase tracking-[0.14em] text-white/35">Model</p>
-          <p className="mt-1 text-sm font-bold text-white/80">{model ? summary.version : "Loading..."}</p>
-        </div>
+        <p className="text-sm font-bold text-white/70">{model?.modelVersion ?? "Loading Virtual Pitch V1..."}</p>
       </header>
 
-      <div className="mt-5 grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_21rem]">
-        <div className="min-w-0 space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex rounded-lg border border-white/10 bg-white/[0.03] p-1">
-              {(["landscape", "portrait"] as const).map((option) => (
-                <button
-                  key={option}
-                  type="button"
-                  aria-pressed={layout === option}
-                  className={`rounded-md px-3 py-2 text-xs font-bold capitalize transition ${layout === option ? "bg-white/12 text-white" : "text-white/45 hover:text-white"}`}
-                  onClick={() => selectLayout(option)}
-                >
-                  {option}
-                </button>
-              ))}
-            </div>
-            <div className="flex min-w-0 flex-1 flex-wrap justify-end gap-2">
-              <select
-                aria-label="Camera preset"
-                className="min-w-0 rounded-lg border border-white/15 bg-[#0b1510] px-3 py-2 text-xs font-bold text-white outline-none focus:border-lime"
-                value={preset}
-                onChange={(event) => selectPreset(event.target.value as CameraPresetId)}
-              >
-                {PRESETS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
-              </select>
-              <Button className="px-3 py-2 text-xs" variant="secondary" onClick={() => resetCamera()}>Reset camera</Button>
-            </div>
-          </div>
+      <div className="mt-5 flex overflow-x-auto rounded border border-white/10 bg-white/[0.03] p-1">
+        {SOURCE_OPTIONS.map((source) => (
+          <button key={source.id} type="button" aria-pressed={sourceMode === source.id} className={`min-w-fit flex-1 px-3 py-2 text-xs font-bold transition ${sourceMode === source.id ? "bg-white/12 text-white" : "text-white/45 hover:text-white"}`} onClick={() => setSourceMode(source.id)}>{source.label}</button>
+        ))}
+      </div>
 
-          <div className={`mx-auto w-full overflow-hidden rounded-lg border border-white/10 bg-black shadow-glow ${layout === "portrait" ? "max-w-[32rem] aspect-[9/16]" : "aspect-video"}`}>
-            {loading ? (
-              <ViewportMessage title="Loading Virtual Pitch V1" detail="Requesting canonical geometry from the API..." />
-            ) : loadError ? (
-              <div className="grid h-full min-h-[28rem] place-items-center bg-[#100b0b] p-8 text-center">
-                <div className="max-w-md">
-                  <p className="text-base font-bold text-[#ffaaa6]">Virtual Pitch geometry unavailable</p>
-                  <p className="mt-2 text-sm leading-6 text-white/50">{loadError}</p>
-                  <Button className="mt-5" variant="secondary" onClick={() => void reloadGeometry()}>Retry API</Button>
+      <div className="mt-5 grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_21rem]">
+        <main className="min-w-0 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            {sourceMode === "development" ? (
+              <>
+                <div className="flex rounded border border-white/10 bg-white/[0.03] p-1">
+                  {(["landscape", "portrait"] as const).map((option) => <button key={option} type="button" className={`px-3 py-2 text-xs font-bold capitalize ${layout === option ? "bg-white/12 text-white" : "text-white/45"}`} onClick={() => setLayout(option)}>{option}</button>)}
                 </div>
-              </div>
-            ) : webglAvailable === false ? (
-              <ViewportMessage title="WebGL is unavailable" detail="Enable hardware acceleration or use a browser with WebGL support to open the 3D lab." />
-            ) : model && cameraPreset ? (
-              <RendererBoundary>
-                <VirtualPitchCanvas model={model} mode="development" camera={cameraPreset} visualOptions={rendererOptions} />
-              </RendererBoundary>
+                <select aria-label="Camera preset" className="rounded border border-white/15 bg-[#0b1510] px-3 py-2 text-xs font-bold text-white" value={preset} onChange={(event) => { setPreset(event.target.value as CameraPresetId); setCameraAdjustments({}); }}>{PRESETS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select>
+              </>
+            ) : sourceMode === "synthetic-opencv" ? (
+              <select aria-label="Synthetic OpenCV camera" className="rounded border border-white/15 bg-[#0b1510] px-3 py-2 text-xs font-bold text-white" value={syntheticCameraName} onChange={(event) => setSyntheticCameraName(event.target.value)}>{(model?.syntheticCameraNames ?? []).map((name) => <option key={name} value={name}>{cameraLabel(name)}</option>)}</select>
             ) : (
-              <ViewportMessage title="Geometry is incomplete" detail="The API returned no validated Virtual Pitch model." />
+              <div className="flex min-w-0 flex-1 gap-2"><input aria-label="Analysis ID" className="min-w-0 flex-1 rounded border border-white/15 bg-[#0b1510] px-3 py-2 text-xs text-white" value={analysisId} onChange={(event) => setAnalysisId(event.target.value)} /><Button className="px-3 py-2 text-xs" disabled={cameraLoading || !analysisId.trim()} variant="secondary" onClick={() => void loadRealCamera()}>Load</Button></div>
+            )}
+            {calibrated && (
+              <select aria-label="Overlay comparison" className="rounded border border-white/15 bg-[#0b1510] px-3 py-2 text-xs font-bold text-white" value={comparisonMode} onChange={(event) => setComparisonMode(event.target.value as OverlayComparisonMode)}>
+                <option value="three">Three.js only</option><option value="svg">OpenCV SVG only</option><option value="both">Both overlays</option><option value="side-by-side">Side by side</option>
+              </select>
             )}
           </div>
 
-          <Card className="shadow-none">
-            <p className="text-xs font-bold uppercase tracking-[0.14em] text-white/40">Scene information</p>
-            <dl className="mt-4 grid gap-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
-              <div><dt className="text-white/35">Camera position</dt><dd className="mt-1 font-semibold tabular-nums">{cameraPreset ? formatVector(cameraPreset.position) : "-"}</dd></div>
-              <div><dt className="text-white/35">Target</dt><dd className="mt-1 font-semibold tabular-nums">{cameraPreset ? formatVector(cameraPreset.target) : "-"}</dd></div>
-              <div><dt className="text-white/35">Field of view</dt><dd className="mt-1 font-semibold">{cameraPreset?.verticalFovDegrees.toFixed(0) ?? "-"} degrees</dd></div>
-              <div><dt className="text-white/35">Pitch dimensions</dt><dd className="mt-1 font-semibold">{summary.pitchLengthM?.toFixed(2) ?? "-"} x {summary.pitchWidthM?.toFixed(2) ?? "-"} m</dd></div>
-              <div><dt className="text-white/35">Stumps</dt><dd className="mt-1 font-semibold">{summary.stumpCount}</dd></div>
-              <div><dt className="text-white/35">Lines</dt><dd className="mt-1 font-semibold">{summary.lineCount}</dd></div>
-              <div><dt className="text-white/35">Polygons</dt><dd className="mt-1 font-semibold">{summary.polygonCount}</dd></div>
-              <div className="sm:col-span-2 lg:col-span-1"><dt className="text-white/35">Coordinates</dt><dd className="mt-1 leading-5 text-white/70">{summary.coordinateDescription}</dd></div>
-            </dl>
-          </Card>
-        </div>
+          <div className={`overflow-hidden rounded border border-white/10 bg-black shadow-glow ${sourceMode === "development" ? (layout === "portrait" ? "mx-auto aspect-[9/16] w-full max-w-[32rem]" : "aspect-video") : "h-[min(68dvh,48rem)] min-h-[22rem]"}`}>
+            {loading || cameraLoading ? <ViewportMessage title="Loading camera stage" detail="Preparing canonical geometry and camera evidence..." />
+              : loadError || cameraError ? <ViewportMessage title="Camera stage unavailable" detail={loadError ?? cameraError ?? "Unknown camera error."} />
+              : webglAvailable === false ? <ViewportMessage title="WebGL is unavailable" detail="Enable hardware acceleration to inspect the 3D overlay." />
+              : sourceMode === "development" ? (canvas ?? <ViewportMessage title="Geometry is incomplete" detail="No validated Virtual Pitch model was returned." />)
+              : activePayload && canvas ? (
+                <OverlayStage
+                  imageWidth={nativeWidth}
+                  imageHeight={nativeHeight}
+                  frameUrl={sourceMode === "real-analysis" ? activePayload.camera.setup_frame_url : null}
+                  threeCanvas={canvas}
+                  projection={activePayload.projection}
+                  comparisons={comparisons}
+                  comparisonMode={comparisonMode}
+                  overlayOpacity={overlayOpacity}
+                  showOpenCvMarkers={showOpenCvMarkers}
+                  showThreeMarkers={showThreeMarkers}
+                  showResiduals={showResiduals}
+                  showLabels={showLabels}
+                />
+              ) : <ViewportMessage title="No calibrated camera" detail="Select a synthetic camera or load a real analysis camera candidate." />}
+          </div>
+
+          {calibrated && (
+            <div className="flex flex-wrap gap-x-5 gap-y-2 border border-white/10 bg-white/[0.02] px-3 py-2 text-[11px] text-white/60">
+              <span><span className="mr-1 inline-block h-2.5 w-2.5 rounded-full border-2 border-[#ffe56b]" /> OpenCV marker</span>
+              <span><span className="mr-1 font-black text-[#5ee7ff]">+</span> Three.js marker</span>
+              <span><span className="mr-1 inline-block h-px w-4 bg-[#ff5f87] align-middle" /> Residual</span>
+              <span className="ml-auto tabular-nums">Native {nativeWidth} x {nativeHeight}</span>
+            </div>
+          )}
+        </main>
 
         <aside className="min-w-0 space-y-4">
           <Card className="shadow-none">
-            <div className="flex items-center justify-between gap-3">
-              <p className="text-xs font-bold uppercase tracking-[0.14em] text-white/40">Camera</p>
-              <span className="text-[10px] font-bold uppercase text-[#ffe761]">Synthetic</span>
-            </div>
-            <div className="mt-5 space-y-5">
-              <RangeControl label="Height" value={displayedCamera.heightM} min={0.2} max={8} step={0.1} suffix=" m" onChange={(value) => updateCamera("heightM", value)} />
-              <RangeControl label="Distance behind wicket" value={displayedCamera.distanceBehindM} min={0.5} max={18} step={0.1} suffix=" m" onChange={(value) => updateCamera("distanceBehindM", value)} />
-              <RangeControl label="Lateral offset" value={displayedCamera.lateralOffsetM} min={-8} max={8} step={0.1} suffix=" m" onChange={(value) => updateCamera("lateralOffsetM", value)} />
-              <RangeControl label="Field of view" value={displayedCamera.verticalFovDegrees} min={20} max={90} step={1} suffix=" deg" onChange={(value) => updateCamera("verticalFovDegrees", value)} />
-              <RangeControl label="Target height" value={displayedCamera.targetHeightM} min={0} max={4} step={0.1} suffix=" m" onChange={(value) => updateCamera("targetHeightM", value)} />
-              <RangeControl label="Yaw" value={displayedCamera.yawDegrees} min={-45} max={45} step={1} suffix=" deg" onChange={(value) => updateCamera("yawDegrees", value)} />
-              <RangeControl label="Pitch" value={displayedCamera.pitchDegrees} min={-45} max={45} step={1} suffix=" deg" onChange={(value) => updateCamera("pitchDegrees", value)} />
-              <RangeControl label="Roll" value={displayedCamera.rollDegrees} min={-30} max={30} step={1} suffix=" deg" onChange={(value) => updateCamera("rollDegrees", value)} />
-            </div>
+            <div className="flex items-center justify-between gap-3"><p className="text-xs font-bold uppercase tracking-[0.14em] text-white/40">Camera</p><span className="text-[10px] font-bold uppercase text-[#ffe761]">{calibrated ? "Calibrated" : "Development"}</span></div>
+            {displayedCamera && <div className="mt-5 space-y-5">
+              <RangeControl disabled={calibrated} label="Height" value={displayedCamera.heightM} min={0.2} max={8} step={0.1} suffix=" m" onChange={(value) => setCameraAdjustments((current) => ({ ...current, heightM: value }))} />
+              <RangeControl disabled={calibrated} label="Distance behind wicket" value={displayedCamera.distanceBehindM} min={0.5} max={18} step={0.1} suffix=" m" onChange={(value) => setCameraAdjustments((current) => ({ ...current, distanceBehindM: value }))} />
+              <RangeControl disabled={calibrated} label="Field of view" value={displayedCamera.verticalFovDegrees} min={20} max={90} step={1} suffix=" deg" onChange={(value) => setCameraAdjustments((current) => ({ ...current, verticalFovDegrees: value }))} />
+              <Toggle disabled={calibrated} label="Orbit controls" checked={!calibrated && visualOptions.enableOrbitControls} onChange={(value) => updateVisual("enableOrbitControls", value)} />
+              {!calibrated && <Button className="w-full text-xs" variant="secondary" onClick={() => setCameraAdjustments({})}>Reset camera</Button>}
+            </div>}
           </Card>
 
           <Card className="shadow-none">
             <p className="text-xs font-bold uppercase tracking-[0.14em] text-white/40">Visual and debug</p>
-            <div className="mt-4 space-y-2">
-              <label className="block text-xs text-white/55">
-                <span>Material style</span>
-                <select
-                  className="mt-2 w-full rounded-lg border border-white/15 bg-[#0b1510] px-3 py-2.5 text-xs font-bold text-white outline-none focus:border-lime"
-                  value={materialStyle}
-                  onChange={(event) => setMaterialStyle(event.target.value as Exclude<MaterialPresetName, "debug-wireframe">)}
-                >
-                  <option value="cricvision-dark">CricVision Dark</option>
-                  <option value="broadcast-light">Broadcast Light</option>
-                </select>
-              </label>
+            <div className="mt-4 space-y-3">
+              <RangeControl label="Overlay opacity" value={overlayOpacity} min={0.1} max={1} step={0.05} suffix="" onChange={setOverlayOpacity} />
+              <label className="block text-xs text-white/55">Material style<select className="mt-2 w-full rounded border border-white/15 bg-[#0b1510] px-3 py-2.5 text-xs font-bold text-white" value={materialStyle} onChange={(event) => setMaterialStyle(event.target.value as Exclude<MaterialPresetName, "debug-wireframe">)}><option value="cricvision-dark">CricVision Dark</option><option value="broadcast-light">Broadcast Light</option></select></label>
               <RangeControl label="Corridor opacity" value={visualOptions.corridorOpacity} min={0} max={0.8} step={0.05} suffix="" onChange={(value) => updateVisual("corridorOpacity", value)} />
-              <div className="grid grid-cols-2 gap-2 pt-2 xl:grid-cols-1 2xl:grid-cols-2">
+              <div className="grid grid-cols-2 gap-2 xl:grid-cols-1 2xl:grid-cols-2">
                 <Toggle label="Pitch" checked={visualOptions.showPitch} onChange={(value) => updateVisual("showPitch", value)} />
                 <Toggle label="Stumps" checked={visualOptions.showStumps} onChange={(value) => updateVisual("showStumps", value)} />
                 <Toggle label="Creases" checked={visualOptions.showCreases} onChange={(value) => updateVisual("showCreases", value)} />
-                <Toggle label="Axes" checked={visualOptions.showAxes} onChange={(value) => updateVisual("showAxes", value)} />
-                <Toggle label="Grid" checked={visualOptions.showGrid} onChange={(value) => updateVisual("showGrid", value)} />
+                <Toggle label="Corridor" checked={visualOptions.showCorridor} onChange={(value) => updateVisual("showCorridor", value)} />
+                {calibrated && <><Toggle label="OpenCV markers" checked={showOpenCvMarkers} onChange={setShowOpenCvMarkers} /><Toggle label="Three markers" checked={showThreeMarkers} onChange={setShowThreeMarkers} /><Toggle label="Residual lines" checked={showResiduals} onChange={setShowResiduals} /><Toggle label="Marker labels" checked={showLabels} onChange={setShowLabels} /><Toggle label="Camera diagnostics" checked={showCameraDiagnostics} onChange={setShowCameraDiagnostics} /></>}
+                {!calibrated && <><Toggle label="Axes" checked={visualOptions.showAxes} onChange={(value) => updateVisual("showAxes", value)} /><Toggle label="Grid" checked={visualOptions.showGrid} onChange={(value) => updateVisual("showGrid", value)} /></>}
                 <Toggle label="Wireframe" checked={visualOptions.wireframe} onChange={(value) => updateVisual("wireframe", value)} />
-                <Toggle label="Orbit controls" checked={visualOptions.enableOrbitControls} onChange={(value) => updateVisual("enableOrbitControls", value)} />
                 <Toggle label="Low performance" checked={visualOptions.lowPerformanceMode} onChange={(value) => updateVisual("lowPerformanceMode", value)} />
               </div>
             </div>
           </Card>
+
+          {calibrated && showCameraDiagnostics && <Card className="shadow-none"><p className="mb-4 text-xs font-bold uppercase tracking-[0.14em] text-white/40">Bridge diagnostics</p><CameraDiagnosticsPanel camera={activePayload?.camera ?? null} diagnostics={diagnostics} /></Card>}
         </aside>
       </div>
     </div>

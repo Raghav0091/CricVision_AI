@@ -15,6 +15,7 @@ import type { VirtualPitchSceneProps } from "./rendererTypes";
 export function VirtualPitchScene({
   model,
   camera,
+  calibratedCamera,
   visualOptions,
   mode = "development"
 }: VirtualPitchSceneProps) {
@@ -28,12 +29,14 @@ export function VirtualPitchScene({
     [model.polygons]
   );
   const debugEnabled = mode === "development";
+  const transparentBackground = mode === "real-frame-overlay";
 
   return (
     <>
-      <color attach="background" args={[materials.background]} />
+      {!transparentBackground && <color attach="background" args={[materials.background]} />}
       <VirtualPitchCamera
         configuration={camera}
+        calibratedCamera={calibratedCamera}
         enableOrbitControls={debugEnabled && (visualOptions.enableOrbitControls ?? false)}
       />
       <VirtualPitchLighting
