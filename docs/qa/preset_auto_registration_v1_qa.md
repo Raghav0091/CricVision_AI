@@ -126,6 +126,32 @@ after implementation integration.
   both with and without the dev server. No compiler error was emitted before
   timeout; this check is not recorded as passed.
 
+## Solver Calibration Patch Results - 2026-08-01
+
+- Safety checkpoint: `5bfb0f230b25e75096b15ec6fefa954575a82581`.
+- Camera parameterization tests: 18 passed; all 36 landmarks round trip at
+  `7.81e-14 px` RMSE with no mirror, end reversal, or depth mismatch.
+- Corrected strongest fit: no active bounds; height `1.9197 m`, distance
+  `12.3480 m`, HFOV `27.4621 deg`; persisted observations reused.
+- Strongest evidence: anchor RMSE `18.9362 px`, near/far IoU `0.4598/0.2498`,
+  temporal score `0.2526`, stable uncertainty, score `0.3321`.
+- Status remains honest `NEEDS_ASSISTANCE / VISUAL_ONLY`; a bridge camera and
+  projected pitch exist, but the unchanged `0.48` visual-readiness threshold is
+  not met. Production acceptance is false and metrics remain locked.
+- All three weak clips remain `INSUFFICIENT_WICKETS`, with zero candidates and
+  no detector rerun.
+- Focused camera/auto/real-registration tests: 68 passed.
+- Complete backend suite after integration: 426 passed.
+- Production build passed in `88.685 s` after clearing only the ignored,
+  permission-blocked `.next`; final lead verification passed in `39.421 s`.
+  No frontend source or configuration changed.
+- Strict TypeScript, five deterministic camera/bridge scripts, desktop
+  `1440x900`, and mobile `390x844` checks passed with one canvas, no overflow,
+  and no console errors.
+
+See `docs/architecture/auto_registration_solver_calibration_patch_v1.md` and
+`docs/qa/auto_registration_build_patch_v1.md` for the measured diagnostics.
+
 ## Risks Found
 
 1. `scene_calibration_service.py` can run wicket observation and can accept a

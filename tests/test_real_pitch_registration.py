@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -405,6 +406,15 @@ def test_six_complete_manual_anchors_can_seed_assisted_pose() -> None:
         minimum_pointlike_anchors=MIN_ASSISTED_POINTLIKE_ANCHORS,
     )
     assert candidate.solver_success
+    expected_fov = math.degrees(
+        2.0
+        * math.atan(
+            1280.0 / (2.0 * candidate.intrinsics.focal_length_x_px)
+        )
+    )
+    assert candidate.intrinsics.horizontal_fov_degrees == pytest.approx(
+        expected_fov
+    )
 
 
 def test_intrinsics_are_bounded_centred_and_zero_distortion() -> None:

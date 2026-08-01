@@ -69,9 +69,10 @@ checks, uncertainty, ambiguity, timings, warnings, and failure reasons.
 `STANDARD_REAR_WICKET_NET_V1` is development-only and assumes a fixed tripod
 behind the bowler-end wicket, both wickets visible, and FullTrack-style
 practice-net framing. Its reference clip is portrait `720 x 1280`; the strongest
-existing refined solution is approximately `0.053 m` lateral, `7.74 m` behind
-the wicket, and `1.39 m` high with the selected `45 deg` focal hypothesis. These
-observations inform broad priors only.
+  existing refined solution is approximately `0.053 m` lateral, `7.74 m` behind
+  the wicket, and `1.39 m` high. Its persisted candidate label says `45 deg`, but
+  final `K` has an effective `21.9609 deg` horizontal FOV. Final camera matrices,
+  not seed labels, are authoritative. These observations inform broad priors only.
 
 | Constraint | Nominal | Bounds |
 | --- | ---: | ---: |
@@ -89,6 +90,10 @@ camera elevation relative to the horizontal pitch direction, with downward
 pitch negative. Roll is clockwise around the optical axis when viewed from the
 camera. Distance is positive behind the preset near wicket; lateral offset
 follows CricVision `+x`.
+
+The exact inverse camera conventions, solver calibration, objective ablations,
+and build-stability findings are documented in
+`auto_registration_solver_calibration_patch_v1.md`.
 
 The preset accepts native portrait or landscape orientation, uses the
 `official_core` pitch profile, fixes the camera end to `bowler`, and defines
@@ -126,6 +131,10 @@ poses and existing PnP/refined candidates. A robust objective should combine
 confidence-weighted exact or pointlike reprojection, soft wicket envelopes and
 lines, temporal agreement, camera/focal priors, and physical plausibility.
 Preset priors guide weak evidence but cannot override contradictory observations.
+Coarse detector intersections, lines, and repeated envelopes are correlated soft
+evidence. V1 applies semantic uncertainty floors and correlation normalization;
+the solver uses normalized `[-1, 1]` variables and the central preset/OpenCV
+camera conversion utility.
 
 ## Temporal, physical, and uncertainty validation
 

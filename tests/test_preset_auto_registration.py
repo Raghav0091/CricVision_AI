@@ -11,6 +11,7 @@ import ast
 import importlib.util
 import inspect
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -382,3 +383,62 @@ def test_persistence_writes_only_unaccepted_report(monkeypatch: pytest.MonkeyPat
     assert Path(path).name == "preset_auto_registration_v1.json"
     assert list(tmp_path.glob("*accepted*")) == []
     assert list(tmp_path.glob("*snapshot*")) == []
+
+
+def test_existing_candidate_fov_is_derived_from_k_not_stale_label() -> None:
+    preset = service._normalise_preset(_preset())
+    width, height = 720, 1280
+    effective_fov = 21.960861554185316
+    camera = service.build_opencv_camera_from_preset_parameters(
+        service.PresetCameraParameters(
+            lateral_offset_m=0.1,
+            distance_behind_wicket_m=8.0,
+            camera_height_m=1.5,
+            yaw_deg=-0.4,
+            pitch_deg=-1.3,
+            roll_deg=0.4,
+            horizontal_fov_deg=effective_fov,
+        ),
+        image_width=width,
+        image_height=height,
+        camera_end="bowler",
+        image_left_mapping="image_left_to_world_left",
+    )
+    candidate = SimpleNamespace(
+        rotation_matrix=camera.rotation_matrix.tolist(),
+        translation_vector=camera.translation_vector.tolist(),
+        camera_world_position=camera.camera_position_world.tolist(),
+        intrinsics=SimpleNamespace(
+            focal_length_x_px=float(camera.camera_matrix[0, 0]),
+            focal_length_y_px=float(camera.camera_matrix[1, 1]),
+            principal_point_x_px=width / 2.0,
+            principal_point_y_px=height / 2.0,
+            horizontal_fov_degrees=45.0,
+        ),
+    )
+    parameters = service._parameters_from_candidate(
+        candidate,
+        preset,
+        20.12,
+        image_width=width,
+        image_height=height,
+    )
+    assert parameters is not None
+    assert parameters[6] == pytest.approx(effective_fov, abs=1e-10)
+    assert parameters[6] != pytest.approx(candidate.intrinsics.horizontal_fov_degrees)
+
+
+def test_optimizer_uses_normalized_variables_and_explicit_x_scale() -> None:
+    source = (ROOT / "services/api/services/preset_auto_registration.py").read_text(
+        encoding="utf-8"
+    )
+    assert "normalize_parameters(initial" in source
+    assert "denormalize_parameters(" in source
+    assert "x_scale=np.ones_like" in source
+
+
+def test_normal_objective_treats_coarse_evidence_as_correlated_and_soft() -> None:
+    profile = service._NORMAL_OBJECTIVE
+    assert profile.correlated_evidence_normalization is True
+    assert profile.coarse_uncertainty_floor_ratio > 0.0
+    assert profile.prior_weight == pytest.approx(2.0)

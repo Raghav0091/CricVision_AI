@@ -15,7 +15,6 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any, Mapping, Sequence
 
-import cv2
 import numpy as np
 from scipy.optimize import least_squares
 
@@ -43,6 +42,13 @@ from .real_pitch_registration_service import (
     load_real_pitch_registration,
 )
 from .camera_bridge_service import DEFAULT_FAR_M, DEFAULT_NEAR_M, _distortion
+from .camera_preset_parameterization import (
+    PresetCameraParameters,
+    build_opencv_camera_from_preset_parameters,
+    decompose_opencv_camera_to_preset_parameters,
+    denormalize_parameters,
+    normalize_parameters,
+)
 from .video_analysis_service import (
     VIDEO_ANALYSIS_ROOT,
     VideoAnalysisServiceError,
@@ -112,6 +118,32 @@ class _Fit:
     score: float
     eligible: bool
     rejection_reasons: list[str]
+    objective_components: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _ObjectiveProfile:
+    point_weight: float = 1.0
+    coarse_point_weight: float = 1.0
+    line_weight: float = 1.0
+    envelope_weight: float = 1.0
+    temporal_weight: float = 1.0
+    prior_weight: float = 1.0
+    coarse_uncertainty_floor_ratio: float = 0.35
+    correlated_evidence_normalization: bool = True
+
+
+_LEGACY_OBJECTIVE = _ObjectiveProfile(
+    coarse_uncertainty_floor_ratio=0.0,
+    correlated_evidence_normalization=False,
+)
+_CORRELATED_SOFT_OBJECTIVE = _ObjectiveProfile(prior_weight=2.0)
+# One detector/Hough region produces six coarse points, four lines, and repeated
+# frame boxes. Treating those as independent 1.66 px measurements caused 99.4%
+# of the assisted-camera data loss and pulled height to its ceiling. The normal
+# profile preserves the evidence but applies semantic uncertainty, correlation
+# normalization, and enough preset regularization to keep weak geometry bounded.
+_NORMAL_OBJECTIVE = _CORRELATED_SOFT_OBJECTIVE
 
 
 _PARAMETER_NAMES = (
@@ -468,62 +500,71 @@ def _evidence(observation: WicketObservationResult, preset: _Preset) -> _Evidenc
 
 
 def _pose(parameters: np.ndarray, preset: _Preset, pitch_length_m: float):
-    lateral, distance, height, yaw_deg, pitch_deg, roll_deg, fov_deg = parameters
-    if preset.camera_end == "bowler":
-        position = np.asarray([lateral, -distance, height], dtype=np.float64)
-        base_yaw = 0.0
-    else:
-        position = np.asarray(
-            [lateral, pitch_length_m + distance, height], dtype=np.float64
-        )
-        base_yaw = math.pi
-    yaw = base_yaw + math.radians(yaw_deg)
-    pitch = math.radians(pitch_deg)
-    roll = math.radians(roll_deg)
-    forward = np.asarray(
-        [
-            math.sin(yaw) * math.cos(pitch),
-            math.cos(yaw) * math.cos(pitch),
-            math.sin(pitch),
-        ],
-        dtype=np.float64,
+    del pitch_length_m  # Geometry ownership remains in the central conversion utility.
+    camera = build_opencv_camera_from_preset_parameters(
+        PresetCameraParameters(
+            lateral_offset_m=float(parameters[0]),
+            distance_behind_wicket_m=float(parameters[1]),
+            camera_height_m=float(parameters[2]),
+            yaw_deg=float(parameters[3]),
+            pitch_deg=float(parameters[4]),
+            roll_deg=float(parameters[5]),
+            horizontal_fov_deg=float(parameters[6]),
+        ),
+        image_width=2,
+        image_height=2,
+        camera_end=preset.camera_end,
+        image_left_mapping=preset.image_left_mapping,
     )
-    forward /= np.linalg.norm(forward)
-    right = np.cross(forward, np.asarray([0.0, 0.0, 1.0]))
-    right /= max(np.linalg.norm(right), 1e-9)
-    down = np.cross(forward, right)
-    rolled_right = math.cos(roll) * right + math.sin(roll) * down
-    rolled_down = -math.sin(roll) * right + math.cos(roll) * down
-    rotation_matrix = np.vstack([rolled_right, rolled_down, forward])
-    rotation, _ = cv2.Rodrigues(rotation_matrix)
-    translation = -rotation_matrix @ position.reshape(3, 1)
-    focal_ratio = 1.0 / (2.0 * math.tan(math.radians(fov_deg) / 2.0))
-    return rotation, translation, rotation_matrix, position, focal_ratio
+    focal_ratio = float(camera.camera_matrix[0, 0] / 2.0)
+    return (
+        camera.rotation_vector.reshape(3, 1),
+        camera.translation_vector.reshape(3, 1),
+        camera.rotation_matrix,
+        camera.camera_position_world,
+        focal_ratio,
+    )
 
 
 def _camera_arrays(parameters: np.ndarray, preset: _Preset, evidence: _Evidence):
-    pitch = build_virtual_pitch_specification()
-    rotation, translation, matrix, position, focal_ratio = _pose(
-        parameters, preset, pitch.dimensions.pitch_length_m
+    camera = build_opencv_camera_from_preset_parameters(
+        PresetCameraParameters(
+            lateral_offset_m=float(parameters[0]),
+            distance_behind_wicket_m=float(parameters[1]),
+            camera_height_m=float(parameters[2]),
+            yaw_deg=float(parameters[3]),
+            pitch_deg=float(parameters[4]),
+            roll_deg=float(parameters[5]),
+            horizontal_fov_deg=float(parameters[6]),
+        ),
+        image_width=evidence.image_width,
+        image_height=evidence.image_height,
+        camera_end=preset.camera_end,
+        image_left_mapping=preset.image_left_mapping,
     )
-    focal = evidence.image_width * focal_ratio
-    camera_matrix = np.asarray(
-        [
-            [focal, 0.0, evidence.image_width / 2.0],
-            [0.0, focal, evidence.image_height / 2.0],
-            [0.0, 0.0, 1.0],
-        ],
-        dtype=np.float64,
+    return (
+        camera.rotation_vector.reshape(3, 1),
+        camera.translation_vector.reshape(3, 1),
+        camera.rotation_matrix,
+        camera.camera_position_world,
+        float(camera.camera_matrix[0, 0]),
+        camera.camera_matrix,
     )
-    return rotation, translation, matrix, position, focal, camera_matrix
 
 
 def _box_residuals(
-    projected: PixelBox | None, observed: PixelBox, weight: float
+    projected: PixelBox | None,
+    observed: PixelBox,
+    weight: float,
+    *,
+    uncertainty_scale_ratio: float = 0.08,
 ) -> list[float]:
     if projected is None:
         return [25.0 * weight] * 4
-    scale = max(4.0, math.hypot(observed.width, observed.height) * 0.08)
+    scale = max(
+        4.0,
+        math.hypot(observed.width, observed.height) * uncertainty_scale_ratio,
+    )
     return [
         ((projected.x + projected.width / 2) - (observed.x + observed.width / 2))
         / scale
@@ -536,13 +577,55 @@ def _box_residuals(
     ]
 
 
-def _objective(
-    parameters: np.ndarray, preset: _Preset, evidence: _Evidence
-) -> np.ndarray:
+def _wicket_for_role(evidence: _Evidence, role: str) -> Any:
+    return (
+        evidence.observation.near_wicket
+        if role == "near"
+        else evidence.observation.far_wicket
+    )
+
+
+def _objective_component_vectors(
+    parameters: np.ndarray,
+    preset: _Preset,
+    evidence: _Evidence,
+    profile: _ObjectiveProfile = _NORMAL_OBJECTIVE,
+) -> dict[str, np.ndarray]:
     rotation, translation, _, _, _, camera_matrix = _camera_arrays(
         parameters, preset, evidence
     )
-    residuals: list[float] = []
+    components: dict[str, list[float]] = {
+        "exact_points": [],
+        "coarse_points": [],
+        "lines": [],
+        "setup_envelopes": [],
+        "temporal_envelopes": [],
+        "preset_priors": [],
+    }
+    coarse_counts = {
+        role: max(
+            1,
+            sum(
+                item.status == "USED"
+                and item.mapping_type == "COARSE_POINTLIKE"
+                and item.correspondence_id.startswith(f"{role}:")
+                for item in evidence.correspondences
+            ),
+        )
+        for role in ("near", "far")
+    }
+    line_counts = {
+        role: max(
+            1,
+            sum(
+                item.status == "SOFT_ONLY"
+                and item.mapping_type in {"TOP_LINE", "BASE_LINE", "OUTER_AXIS"}
+                and item.correspondence_id.startswith(f"{role}:")
+                for item in evidence.correspondences
+            ),
+        )
+        for role in ("near", "far")
+    }
     for item in evidence.correspondences:
         if (
             item.status == "USED"
@@ -554,24 +637,63 @@ def _objective(
             )
             projected, depths = _project(world, rotation, translation, camera_matrix)
             if depths[0] <= 0:
-                residuals.extend([25.0, 25.0])
+                values = [25.0, 25.0]
             else:
                 uncertainty = max(item.uncertainty_px, 1.0)
                 weight = math.sqrt(max(item.registration_weight, 1e-6))
-                residuals.extend(
-                    (
-                        (projected[0] - [item.observed_pixel.x, item.observed_pixel.y])
-                        / uncertainty
-                        * weight
-                    ).tolist()
-                )
+                role = item.correspondence_id.split(":", 1)[0]
+                if item.mapping_type == "COARSE_POINTLIKE":
+                    wicket = _wicket_for_role(evidence, role)
+                    if wicket is not None:
+                        semantic_floor = (
+                            max(wicket.region.bbox.width, wicket.region.bbox.height)
+                            * profile.coarse_uncertainty_floor_ratio
+                        )
+                        uncertainty = max(uncertainty, semantic_floor)
+                    if profile.correlated_evidence_normalization:
+                        weight /= math.sqrt(coarse_counts[role])
+                values = (
+                    (projected[0] - [item.observed_pixel.x, item.observed_pixel.y])
+                    / uncertainty
+                    * weight
+                ).tolist()
+            key = (
+                "coarse_points"
+                if item.mapping_type == "COARSE_POINTLIKE"
+                else "exact_points"
+            )
+            scale = (
+                profile.coarse_point_weight
+                if key == "coarse_points"
+                else profile.point_weight
+            )
+            components[key].extend((np.asarray(values) * scale).tolist())
         elif item.status == "SOFT_ONLY" and item.mapping_type in {
             "TOP_LINE",
             "BASE_LINE",
             "OUTER_AXIS",
         }:
-            residuals.extend(
-                _line_residuals(item, rotation, translation, camera_matrix)
+            values = _line_residuals(item, rotation, translation, camera_matrix)
+            role = item.correspondence_id.split(":", 1)[0]
+            if profile.correlated_evidence_normalization:
+                wicket = _wicket_for_role(evidence, role)
+                floor = 1.0
+                if wicket is not None:
+                    floor = max(
+                        floor,
+                        max(wicket.region.bbox.width, wicket.region.bbox.height)
+                        * profile.coarse_uncertainty_floor_ratio,
+                    )
+                original_uncertainty = max(item.uncertainty_px, 1.0)
+                values = [
+                    value
+                    * original_uncertainty
+                    / floor
+                    / math.sqrt(line_counts[role])
+                    for value in values
+                ]
+            components["lines"].extend(
+                (np.asarray(values) * profile.line_weight).tolist()
             )
     ends = {
         "near": "bowler" if evidence.assignment == "A" else "striker",
@@ -586,19 +708,242 @@ def _objective(
         projected = _projected_wicket_box(
             ends[role], rotation, translation, camera_matrix
         )
-        residuals.extend(
+        components["setup_envelopes"].extend(
             _box_residuals(
                 projected,
                 wicket.region.bbox,
-                0.7 * math.sqrt(max(wicket.quality_score, 0.05)),
+                0.7
+                * math.sqrt(max(wicket.quality_score, 0.05))
+                * profile.envelope_weight,
+                uncertainty_scale_ratio=(
+                    0.35 if profile.correlated_evidence_normalization else 0.08
+                ),
             )
+        )
+        role_frame_count = max(
+            1,
+            sum(frame_role == role for _, frame_role in evidence.frame_boxes),
         )
         for (frame_index, frame_role), observed in evidence.frame_boxes.items():
             if frame_role == role:
-                residuals.extend(_box_residuals(projected, observed, 0.18))
+                correlation_scale = (
+                    math.sqrt(role_frame_count)
+                    if profile.correlated_evidence_normalization
+                    else 1.0
+                )
+                components["temporal_envelopes"].extend(
+                    _box_residuals(
+                        projected,
+                        observed,
+                        0.18 * profile.temporal_weight / correlation_scale,
+                        uncertainty_scale_ratio=(
+                            0.35
+                            if profile.correlated_evidence_normalization
+                            else 0.08
+                        ),
+                    )
+                )
     half_ranges = np.maximum((preset.upper - preset.lower) / 2.0, 1e-6)
-    residuals.extend(((parameters - preset.nominal) / half_ranges * 0.22).tolist())
-    return np.asarray(residuals, dtype=np.float64)
+    components["preset_priors"].extend(
+        (
+            (parameters - preset.nominal)
+            / half_ranges
+            * 0.22
+            * profile.prior_weight
+        ).tolist()
+    )
+    return {
+        name: np.asarray(values, dtype=np.float64)
+        for name, values in components.items()
+    }
+
+
+def _objective(
+    parameters: np.ndarray,
+    preset: _Preset,
+    evidence: _Evidence,
+    profile: _ObjectiveProfile = _NORMAL_OBJECTIVE,
+) -> np.ndarray:
+    components = _objective_component_vectors(parameters, preset, evidence, profile)
+    return np.concatenate(list(components.values()))
+
+
+def _objective_diagnostics(
+    parameters: np.ndarray,
+    preset: _Preset,
+    evidence: _Evidence,
+    profile: _ObjectiveProfile = _NORMAL_OBJECTIVE,
+) -> dict[str, Any]:
+    components = _objective_component_vectors(parameters, preset, evidence, profile)
+    result = {
+        name: {
+            "residual_count": int(values.size),
+            "squared_loss": float(np.sum(values**2) / 2.0),
+            "rms_residual": (
+                float(np.sqrt(np.mean(values**2))) if values.size else None
+            ),
+            "maximum_absolute_residual": (
+                float(np.max(np.abs(values))) if values.size else None
+            ),
+        }
+        for name, values in components.items()
+    }
+    data_names = (
+        "exact_points",
+        "coarse_points",
+        "lines",
+        "setup_envelopes",
+        "temporal_envelopes",
+    )
+    result["raw_data_loss"] = sum(result[name]["squared_loss"] for name in data_names)
+    result["prior_loss"] = result["preset_priors"]["squared_loss"]
+    result["physical_loss"] = 0.0
+    result["final_weighted_loss"] = result["raw_data_loss"] + result["prior_loss"]
+    result["profile"] = {
+        name: getattr(profile, name)
+        for name in profile.__dataclass_fields__
+    }
+    result["semantic_evidence"] = _semantic_objective_diagnostics(
+        parameters, preset, evidence, profile
+    )
+    return result
+
+
+def _semantic_objective_diagnostics(
+    parameters: np.ndarray,
+    preset: _Preset,
+    evidence: _Evidence,
+    profile: _ObjectiveProfile,
+) -> dict[str, Any]:
+    """Describe physical evidence without changing the residual vector."""
+    rotation, translation, _, _, _, camera_matrix = _camera_arrays(
+        parameters, preset, evidence
+    )
+    points: list[dict[str, Any]] = []
+    lines: list[dict[str, Any]] = []
+    for item in evidence.correspondences:
+        if (
+            item.status == "USED"
+            and item.observed_pixel is not None
+            and item.world_point is not None
+        ):
+            world = np.asarray(
+                [[item.world_point.x, item.world_point.y, item.world_point.z]]
+            )
+            projected, depths = _project(world, rotation, translation, camera_matrix)
+            observed = np.asarray([item.observed_pixel.x, item.observed_pixel.y])
+            points.append(
+                {
+                    "correspondence_id": item.correspondence_id,
+                    "mapping_type": item.mapping_type,
+                    "projected_pixel": projected[0].tolist(),
+                    "observed_pixel": observed.tolist(),
+                    "pixel_residual": (
+                        float(np.linalg.norm(projected[0] - observed))
+                        if depths[0] > 0
+                        else None
+                    ),
+                    "positive_depth": bool(depths[0] > 0),
+                    "uncertainty_px": float(item.uncertainty_px),
+                    "registration_weight": float(item.registration_weight),
+                }
+            )
+        elif item.status == "SOFT_ONLY" and item.mapping_type in {
+            "TOP_LINE",
+            "BASE_LINE",
+            "OUTER_AXIS",
+        }:
+            residuals = _line_residuals(item, rotation, translation, camera_matrix)
+            lines.append(
+                {
+                    "correspondence_id": item.correspondence_id,
+                    "mapping_type": item.mapping_type,
+                    "normalised_residuals": [float(value) for value in residuals],
+                    "uncertainty_px": float(item.uncertainty_px),
+                    "registration_weight": float(item.registration_weight),
+                }
+            )
+
+    ends = {
+        "near": "bowler" if evidence.assignment == "A" else "striker",
+        "far": "striker" if evidence.assignment == "A" else "bowler",
+    }
+    envelopes: dict[str, Any] = {}
+    for role, wicket in (
+        ("near", evidence.observation.near_wicket),
+        ("far", evidence.observation.far_wicket),
+    ):
+        if wicket is None:
+            envelopes[role] = None
+            continue
+        projected = _projected_wicket_box(
+            ends[role], rotation, translation, camera_matrix
+        )
+        observed = wicket.region.bbox
+        envelopes[role] = {
+            "centre_residual_px": (
+                math.hypot(
+                    projected.x + projected.width / 2
+                    - observed.x
+                    - observed.width / 2,
+                    projected.y + projected.height / 2
+                    - observed.y
+                    - observed.height / 2,
+                )
+                if projected is not None
+                else None
+            ),
+            "width_residual_px": (
+                float(projected.width - observed.width)
+                if projected is not None
+                else None
+            ),
+            "height_residual_px": (
+                float(projected.height - observed.height)
+                if projected is not None
+                else None
+            ),
+            "intersection_over_union": (
+                _box_iou(projected, observed) if projected is not None else None
+            ),
+            "quality_score": float(wicket.quality_score),
+        }
+
+    half_ranges = np.maximum((preset.upper - preset.lower) / 2.0, 1e-6)
+    prior_residuals = (
+        (parameters - preset.nominal)
+        / half_ranges
+        * 0.22
+        * profile.prior_weight
+    )
+    return {
+        "points": points,
+        "lines": lines,
+        "setup_envelopes": envelopes,
+        "temporal": _temporal_metrics(parameters, preset, evidence),
+        "preset_priors": {
+            name: {
+                "value": float(parameters[index]),
+                "nominal": float(preset.nominal[index]),
+                "normalised_residual": float(prior_residuals[index]),
+                "squared_loss": float(prior_residuals[index] ** 2 / 2.0),
+            }
+            for index, name in enumerate(_PARAMETER_NAMES)
+        },
+        "physical_checks": _physical_checks(parameters, preset, evidence),
+    }
+
+
+def _normalised_objective(
+    normalised_parameters: np.ndarray,
+    preset: _Preset,
+    evidence: _Evidence,
+    profile: _ObjectiveProfile = _NORMAL_OBJECTIVE,
+) -> np.ndarray:
+    parameters = denormalize_parameters(
+        normalised_parameters, preset.lower, preset.upper
+    )
+    return _objective(parameters, preset, evidence, profile)
 
 
 def _anchor_metrics(parameters: np.ndarray, preset: _Preset, evidence: _Evidence):
@@ -729,9 +1074,11 @@ def _physical_checks(
     direction = pitch_centre - position
     direction /= max(np.linalg.norm(direction), 1e-9)
     margin = np.maximum((preset.upper - preset.lower) * 1e-4, 1e-6)
-    critical_bound = bool(
-        np.any(parameters <= preset.lower + margin)
-        or np.any(parameters >= preset.upper - margin)
+    critical_indices = (1, 2, 6)  # distance, height, and focal/FOV only
+    critical_bound = any(
+        parameters[index] <= preset.lower[index] + margin[index]
+        or parameters[index] >= preset.upper[index] - margin[index]
+        for index in critical_indices
     )
     fov = float(parameters[6])
     checks = [
@@ -748,6 +1095,41 @@ def _physical_checks(
                 and np.all(parameters <= preset.upper)
             ),
             None,
+        ),
+        (
+            "camera_height_bounds",
+            bool(preset.lower[2] <= parameters[2] <= preset.upper[2]),
+            float(parameters[2]),
+        ),
+        (
+            "distance_bounds",
+            bool(preset.lower[1] <= parameters[1] <= preset.upper[1]),
+            float(parameters[1]),
+        ),
+        (
+            "lateral_bounds",
+            bool(preset.lower[0] <= parameters[0] <= preset.upper[0]),
+            float(parameters[0]),
+        ),
+        (
+            "yaw_bounds",
+            bool(preset.lower[3] <= parameters[3] <= preset.upper[3]),
+            float(parameters[3]),
+        ),
+        (
+            "pitch_bounds",
+            bool(preset.lower[4] <= parameters[4] <= preset.upper[4]),
+            float(parameters[4]),
+        ),
+        (
+            "roll_bounds",
+            bool(preset.lower[5] <= parameters[5] <= preset.upper[5]),
+            float(parameters[5]),
+        ),
+        (
+            "fov_bounds",
+            bool(preset.lower[6] <= parameters[6] <= preset.upper[6]),
+            float(parameters[6]),
         ),
         ("wickets_in_front", bool(np.all(depths > 0.05)), float(np.min(depths))),
         (
@@ -827,22 +1209,27 @@ def _fit_candidate(
     initial: np.ndarray,
     preset: _Preset,
     evidence: _Evidence,
+    profile: _ObjectiveProfile = _NORMAL_OBJECTIVE,
 ) -> _Fit:
     initial = np.clip(initial, preset.lower + 1e-8, preset.upper - 1e-8)
-    initial_residual = _objective(initial, preset, evidence)
+    initial_normalised = normalize_parameters(initial, preset.lower, preset.upper)
+    initial_residual = _objective(initial, preset, evidence, profile)
     result = least_squares(
-        _objective,
-        initial,
-        args=(preset, evidence),
-        bounds=(preset.lower, preset.upper),
+        _normalised_objective,
+        initial_normalised,
+        args=(preset, evidence, profile),
+        bounds=(-np.ones_like(initial_normalised), np.ones_like(initial_normalised)),
         loss="soft_l1",
         f_scale=1.0,
+        x_scale=np.ones_like(initial_normalised),
         max_nfev=160,
         xtol=1e-9,
         ftol=1e-9,
         gtol=1e-9,
     )
-    fitted = result.x.astype(np.float64)
+    fitted = denormalize_parameters(
+        result.x.astype(np.float64), preset.lower, preset.upper
+    )
     rmse, median = _anchor_metrics(fitted, preset, evidence)
     rotation, translation, _, _, _, camera_matrix = _camera_arrays(
         fitted, preset, evidence
@@ -886,39 +1273,235 @@ def _fit_candidate(
         eligible=bool(result.success and not rejected),
         rejection_reasons=rejected
         or ([] if result.success else ["optimisation_failed"]),
+        objective_components=_objective_diagnostics(fitted, preset, evidence, profile),
     )
 
 
+def diagnose_objective_components(
+    *,
+    parameters: Sequence[float],
+    preset: Any,
+    observation: WicketObservationResult,
+    legacy: bool = False,
+) -> dict[str, Any]:
+    """Expose every objective family without changing or persisting a fit."""
+    normalised = _normalise_preset(preset)
+    evidence = _evidence(observation, normalised)
+    values = np.asarray(parameters, dtype=np.float64)
+    if values.shape != (len(_PARAMETER_NAMES),) or not np.isfinite(values).all():
+        raise ValueError("Expected seven finite preset parameters.")
+    return _objective_diagnostics(
+        values,
+        normalised,
+        evidence,
+        _LEGACY_OBJECTIVE if legacy else _NORMAL_OBJECTIVE,
+    )
+
+
+def replay_physical_eligibility(
+    *,
+    parameters: Sequence[float],
+    preset: Any,
+    observation: WicketObservationResult,
+) -> list[dict[str, Any]]:
+    """Replay deterministic geometric gates for diagnostic initial candidates."""
+    normalised = _normalise_preset(preset)
+    evidence = _evidence(observation, normalised)
+    values = np.asarray(parameters, dtype=np.float64)
+    checks = _physical_checks(values, normalised, evidence)
+    thresholds = {
+        "camera_above_pitch": "> 0 m",
+        "camera_height_bounds": f"[{normalised.lower[2]}, {normalised.upper[2]}] m",
+        "distance_bounds": f"[{normalised.lower[1]}, {normalised.upper[1]}] m",
+        "lateral_bounds": f"[{normalised.lower[0]}, {normalised.upper[0]}] m",
+        "yaw_bounds": f"[{normalised.lower[3]}, {normalised.upper[3]}] deg",
+        "pitch_bounds": f"[{normalised.lower[4]}, {normalised.upper[4]}] deg",
+        "roll_bounds": f"[{normalised.lower[5]}, {normalised.upper[5]}] deg",
+        "fov_bounds": f"[{normalised.lower[6]}, {normalised.upper[6]}] deg",
+        "wickets_in_front": "> 0.05 m minimum depth",
+        "camera_faces_pitch": "> 0.25 forward dot product",
+        "near_far_perspective_order": ">= 0.85 near/far height ratio",
+        "projected_wickets_scene_sized": "each width/height < 80% of frame",
+        "focal_not_extreme": "5 < HFOV < 150 deg and focal > 0",
+        "critical_bounds_clear": "distance, height, and HFOV not at a bound",
+    }
+    return [
+        {
+            **check,
+            "threshold": thresholds.get(check["check_id"]),
+            "severity": "ERROR" if not check["passed"] else "INFO",
+            "reason": (
+                f"{check['check_id']} passed."
+                if check["passed"]
+                else f"{check['check_id']} failed."
+            ),
+        }
+        for check in checks
+    ]
+
+
+def run_objective_ablation_matrix(
+    *,
+    preset: Any,
+    observation: WicketObservationResult,
+    initial_candidates: Mapping[str, Sequence[float]] | None = None,
+) -> list[dict[str, Any]]:
+    """Run deterministic diagnostic fits; this never persists or accepts a camera."""
+    normalised = _normalise_preset(preset)
+    evidence = _evidence(observation, normalised)
+    profiles = {
+        "A_POINT_EVIDENCE_ONLY": _ObjectiveProfile(
+            line_weight=0.0,
+            envelope_weight=0.0,
+            temporal_weight=0.0,
+            prior_weight=0.0,
+        ),
+        "B_COARSE_POINT_ONLY": _ObjectiveProfile(
+            point_weight=0.0,
+            line_weight=0.0,
+            envelope_weight=0.0,
+            temporal_weight=0.0,
+            prior_weight=0.0,
+        ),
+        "C_ENVELOPE_ONLY": _ObjectiveProfile(
+            point_weight=0.0,
+            coarse_point_weight=0.0,
+            line_weight=0.0,
+            temporal_weight=0.0,
+            prior_weight=0.0,
+        ),
+        "D_POINT_PLUS_ENVELOPE": _ObjectiveProfile(
+            line_weight=0.0,
+            temporal_weight=0.0,
+            prior_weight=0.0,
+        ),
+        "E_POINT_ENVELOPE_TEMPORAL": _ObjectiveProfile(
+            line_weight=0.0,
+            prior_weight=0.0,
+        ),
+        "F_DATA_WITHOUT_PRIORS": _ObjectiveProfile(prior_weight=0.0),
+        "G_NORMAL_PRIORS": _NORMAL_OBJECTIVE,
+        "H_STRONGER_PRIORS": _ObjectiveProfile(prior_weight=4.0),
+    }
+    seeds: dict[str, np.ndarray] = {"nominal": normalised.nominal.copy()}
+    for name, values in (initial_candidates or {}).items():
+        array = np.asarray(values, dtype=np.float64)
+        if array.shape != normalised.nominal.shape or not np.isfinite(array).all():
+            raise ValueError(f"Initial candidate {name!r} must contain seven values.")
+        seeds[str(name)] = array
+    matrix: list[dict[str, Any]] = []
+    for ablation_id, profile in profiles.items():
+        fit = _fit_candidate(
+            ablation_id,
+            "diagnostic_ablation",
+            seeds["nominal"],
+            normalised,
+            evidence,
+            profile,
+        )
+        matrix.append(_ablation_payload(ablation_id, "nominal", fit))
+    for seed_name in sorted(name for name in seeds if name != "nominal"):
+        fit = _fit_candidate(
+            f"NORMAL_{seed_name}",
+            "diagnostic_initial_candidate",
+            seeds[seed_name],
+            normalised,
+            evidence,
+            _NORMAL_OBJECTIVE,
+        )
+        matrix.append(_ablation_payload(f"NORMAL_{seed_name}", seed_name, fit))
+    return matrix
+
+
+def _ablation_payload(
+    ablation_id: str, seed_name: str, fit: _Fit
+) -> dict[str, Any]:
+    temporal_score = float(fit.temporal["temporal_stability_score"])
+    if fit.eligible and fit.score >= 0.48 and temporal_score >= 0.25:
+        status = "VISUAL_OVERLAY_READY"
+    else:
+        status = "NEEDS_ASSISTANCE"
+    return {
+        "ablation_id": ablation_id,
+        "seed_name": seed_name,
+        "initial_parameters": _parameters_payload(fit.initial),
+        "final_parameters": _parameters_payload(fit.parameters),
+        "height_trajectory_m": [float(fit.initial[2]), float(fit.parameters[2])],
+        "objective_components": fit.objective_components,
+        "initial_cost": fit.initial_cost,
+        "final_cost": fit.final_cost,
+        "active_bounds": fit.active_bounds,
+        "physical_checks": fit.physical_checks,
+        "eligible": fit.eligible,
+        "registration_classification": (
+            "GROUND_PLANE_CANDIDATE" if fit.score >= 0.55 else "VISUAL_ONLY"
+        ),
+        "automation_status": status,
+        "score": fit.score,
+        "anchor_rmse_px": fit.anchor_rmse_px,
+        "temporal_stability_score": temporal_score,
+    }
+
+
 def _parameters_from_candidate(
-    candidate: Any, preset: _Preset, pitch_length_m: float
+    candidate: Any,
+    preset: _Preset,
+    pitch_length_m: float,
+    *,
+    image_width: int | None = None,
+    image_height: int | None = None,
 ) -> np.ndarray | None:
+    del pitch_length_m
     if (
         not candidate
         or not candidate.rotation_matrix
         or not candidate.camera_world_position
+        or not candidate.translation_vector
+        or not candidate.intrinsics
     ):
         return None
-    position = np.asarray(candidate.camera_world_position, dtype=np.float64)
-    matrix = np.asarray(candidate.rotation_matrix, dtype=np.float64)
-    forward = matrix.T @ np.asarray([0.0, 0.0, 1.0])
-    base_yaw = 0.0 if preset.camera_end == "bowler" else math.pi
-    yaw = math.degrees(math.atan2(forward[0], forward[1]) - base_yaw)
-    yaw = (yaw + 180.0) % 360.0 - 180.0
-    pitch = math.degrees(math.asin(max(-1.0, min(1.0, float(forward[2])))))
-    reference_right = np.cross(forward, np.asarray([0.0, 0.0, 1.0]))
-    reference_right /= max(np.linalg.norm(reference_right), 1e-9)
-    actual_right = matrix[0]
-    roll = math.degrees(
-        math.atan2(
-            float(actual_right @ np.cross(forward, reference_right)),
-            float(actual_right @ reference_right),
-        )
+    intrinsics = candidate.intrinsics
+    width = int(image_width or round(float(intrinsics.principal_point_x_px) * 2.0))
+    height = int(image_height or round(float(intrinsics.principal_point_y_px) * 2.0))
+    if width <= 0 or height <= 0:
+        return None
+    camera_matrix = np.asarray(
+        [
+            [
+                float(intrinsics.focal_length_x_px),
+                0.0,
+                float(intrinsics.principal_point_x_px),
+            ],
+            [
+                0.0,
+                float(intrinsics.focal_length_y_px),
+                float(intrinsics.principal_point_y_px),
+            ],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
     )
-    distance = (
-        -position[1] if preset.camera_end == "bowler" else position[1] - pitch_length_m
+    decomposition = decompose_opencv_camera_to_preset_parameters(
+        camera_matrix=camera_matrix,
+        rotation_matrix=candidate.rotation_matrix,
+        translation_vector=candidate.translation_vector,
+        image_width=width,
+        image_height=height,
+        camera_end=preset.camera_end,
+        image_left_mapping=preset.image_left_mapping,
     )
-    fov = float(candidate.intrinsics.horizontal_fov_degrees)
-    values = np.asarray([position[0], distance, position[2], yaw, pitch, roll, fov])
+    values = np.asarray(
+        [
+            decomposition.parameters.lateral_offset_m,
+            decomposition.parameters.distance_behind_wicket_m,
+            decomposition.parameters.camera_height_m,
+            decomposition.parameters.yaw_deg,
+            decomposition.parameters.pitch_deg,
+            decomposition.parameters.roll_deg,
+            decomposition.parameters.horizontal_fov_deg,
+        ],
+        dtype=np.float64,
+    )
     return values if np.isfinite(values).all() else None
 
 
@@ -944,7 +1527,21 @@ def _candidate_seeds(
             registration.selected_candidate,
             registration.competing_candidate,
         ):
-            values = _parameters_from_candidate(candidate, preset, pitch_length)
+            values = _parameters_from_candidate(
+                candidate,
+                preset,
+                pitch_length,
+                image_width=(
+                    registration.setup_frame.image_width
+                    if registration.setup_frame is not None
+                    else None
+                ),
+                image_height=(
+                    registration.setup_frame.image_height
+                    if registration.setup_frame is not None
+                    else None
+                ),
+            )
             if values is not None:
                 seeds.append(
                     (
@@ -1171,6 +1768,20 @@ def _standalone_objective(
     return np.asarray(residuals, dtype=np.float64)
 
 
+def _standalone_normalised_objective(
+    values: np.ndarray,
+    preset: _Preset,
+    width: int,
+    height: int,
+    frames: Sequence[dict[str, Any]],
+    anchors: Sequence[dict[str, Any]],
+) -> np.ndarray:
+    parameters = denormalize_parameters(values, preset.lower, preset.upper)
+    return _standalone_objective(
+        parameters, preset, width, height, frames, anchors
+    )
+
+
 def fit_bounded_camera(
     *,
     preset: Any,
@@ -1198,18 +1809,22 @@ def fit_bounded_camera(
     attempts: list[tuple[str, Any]] = []
     for candidate_id, seed in seeds:
         clipped = np.clip(seed, normalised.lower + 1e-8, normalised.upper - 1e-8)
+        scaled = normalize_parameters(clipped, normalised.lower, normalised.upper)
         result = least_squares(
-            _standalone_objective,
-            clipped,
+            _standalone_normalised_objective,
+            scaled,
             args=(normalised, width, height, frames, anchors),
-            bounds=(normalised.lower, normalised.upper),
+            bounds=(-np.ones_like(scaled), np.ones_like(scaled)),
             loss="soft_l1",
+            x_scale=np.ones_like(scaled),
             max_nfev=160,
         )
         attempts.append((candidate_id, result))
     attempts.sort(key=lambda item: (float(item[1].cost), item[0]))
     selected_id, selected = attempts[0]
-    parameters = selected.x.astype(np.float64)
+    parameters = denormalize_parameters(
+        selected.x.astype(np.float64), normalised.lower, normalised.upper
+    )
     rotation, translation, _, _, _, camera_matrix = _standalone_arrays(
         parameters, normalised, width, height
     )
@@ -1259,16 +1874,22 @@ def fit_bounded_camera(
             normalised.lower,
             normalised.upper,
         )
+        scaled = normalize_parameters(seed, normalised.lower, normalised.upper)
         probe = least_squares(
-            _standalone_objective,
-            seed,
+            _standalone_normalised_objective,
+            scaled,
             args=(normalised, width, height, frames, anchors),
-            bounds=(normalised.lower, normalised.upper),
+            bounds=(-np.ones_like(scaled), np.ones_like(scaled)),
             loss="soft_l1",
+            x_scale=np.ones_like(scaled),
             max_nfev=100,
         )
         if probe.success:
-            probes.append(probe.x)
+            probes.append(
+                denormalize_parameters(
+                    probe.x, normalised.lower, normalised.upper
+                )
+            )
     spread = (
         np.max(np.abs(np.asarray(probes) - parameters), axis=0)
         if probes
