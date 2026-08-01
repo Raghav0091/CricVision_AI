@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { containedMediaRect, type ContainedMediaRect } from "@/lib/calibrationCoordinates";
 import type { ProjectedPitchGeometry } from "@/lib/api";
+import { validRenderBounds } from "@/lib/virtual-pitch/cameraOwnership";
 
 import { ProjectedPitchSvg } from "./ProjectedPitchSvg";
 import { ProjectionDiagnosticsOverlay } from "./ProjectionDiagnosticsOverlay";
@@ -48,11 +49,13 @@ function StageContent({
     if (!container) return;
     const update = () => {
       const bounds = container.getBoundingClientRect();
-      if (bounds.width > 0 && bounds.height > 0) {
+      if (validRenderBounds(bounds.width, bounds.height)) {
         setMediaRect(containedMediaRect(
           { width: imageWidth, height: imageHeight },
           { width: bounds.width, height: bounds.height }
         ));
+      } else {
+        setMediaRect(null);
       }
     };
     update();
@@ -101,21 +104,34 @@ function StageContent({
 }
 
 
-export function OverlayStage(props: StageContentProps) {
+export function OverlayStage(props: StageContentProps & { onCanvasCountChange?: (count: number) => void }) {
+  const { onCanvasCountChange, ...stageProps } = props;
+  const stageRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage || !onCanvasCountChange) return;
+    const update = () => onCanvasCountChange(stage.querySelectorAll("canvas").length);
+    update();
+    const observer = new MutationObserver(update);
+    observer.observe(stage, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [onCanvasCountChange, props.comparisonMode]);
+
   if (props.comparisonMode === "side-by-side") {
     return (
-      <div className="grid h-full min-h-[22rem] gap-px bg-white/10 lg:grid-cols-2">
+      <div ref={stageRef} className="grid h-full min-h-[22rem] gap-px bg-white/10 lg:grid-cols-2">
         <div className="relative min-h-[22rem]">
           <span className="absolute left-3 top-3 z-20 bg-black/70 px-2 py-1 text-[10px] font-black uppercase text-white">OpenCV SVG</span>
-          <StageContent {...props} comparisonMode="svg" />
+          <StageContent {...stageProps} comparisonMode="svg" />
         </div>
         <div className="relative hidden min-h-[22rem] lg:block">
           <span className="absolute left-3 top-3 z-20 bg-black/70 px-2 py-1 text-[10px] font-black uppercase text-white">Three.js</span>
-          <StageContent {...props} comparisonMode="three" />
+          <StageContent {...stageProps} comparisonMode="three" />
         </div>
         <p className="grid min-h-[5rem] place-items-center px-4 text-center text-xs text-white/45 lg:hidden">Side-by-side comparison is available on wider screens. Select one overlay on mobile.</p>
       </div>
     );
   }
-  return <StageContent {...props} />;
+  return <div ref={stageRef} className="h-full"><StageContent {...stageProps} /></div>;
 }

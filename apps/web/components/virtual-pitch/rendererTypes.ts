@@ -5,6 +5,7 @@ import type {
 } from "@/lib/virtual-pitch";
 
 import type { CalibratedThreeCameraConfiguration } from "./calibratedCameraTypes";
+import type { ActiveCameraDiagnostics } from "./VirtualPitchCameraController";
 
 
 export type VirtualPitchRendererMode =
@@ -43,4 +44,5 @@ export interface VirtualPitchSceneProps {
   calibratedCamera?: CalibratedThreeCameraConfiguration;
   visualOptions: VirtualPitchVisualOptions;
   mode?: VirtualPitchRendererMode;
+  onCameraDiagnostics?: (diagnostics: ActiveCameraDiagnostics) => void;
 }

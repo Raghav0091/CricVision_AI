@@ -2,7 +2,10 @@ import { useMemo } from "react";
 
 import type { PitchPolygon } from "@/lib/virtual-pitch";
 
-import { VirtualPitchCamera } from "./VirtualPitchCamera";
+import {
+  VirtualPitchCameraController,
+  type OwnedPitchCamera
+} from "./VirtualPitchCameraController";
 import { VirtualPitchCorridor } from "./VirtualPitchCorridor";
 import { VirtualPitchDebugHelpers } from "./VirtualPitchDebugHelpers";
 import { VirtualPitchLighting } from "./VirtualPitchLighting";
@@ -15,10 +18,15 @@ import type { VirtualPitchSceneProps } from "./rendererTypes";
 export function VirtualPitchScene({
   model,
   camera,
-  calibratedCamera,
   visualOptions,
-  mode = "development"
-}: VirtualPitchSceneProps) {
+  mode = "development",
+  onCameraDiagnostics,
+  ownedCamera,
+  onCameraReadyChange
+}: VirtualPitchSceneProps & {
+  ownedCamera: OwnedPitchCamera;
+  onCameraReadyChange: (cameraUuid: string, ready: boolean) => void;
+}) {
   const materials = visualOptions.materialPreset;
   const surface = useMemo(
     () => model.polygons.find((polygon) => polygon.polygonCategory === "pitch_surface"),
@@ -28,17 +36,24 @@ export function VirtualPitchScene({
     () => model.polygons.filter((polygon) => polygon.polygonCategory === "lbw_corridor"),
     [model.polygons]
   );
+  const landmarks = useMemo(
+    () => model.landmarks.map((landmark) => ({ semanticId: landmark.semanticId, world: landmark.point })),
+    [model.landmarks]
+  );
   const debugEnabled = mode === "development";
   const transparentBackground = mode === "real-frame-overlay";
 
   return (
-    <>
+    <VirtualPitchCameraController
+      ownedCamera={ownedCamera}
+      configuration={camera}
+      mode={mode}
+      landmarks={landmarks}
+      enableOrbitControls={debugEnabled && (visualOptions.enableOrbitControls ?? false)}
+      onReadyChange={onCameraReadyChange}
+      onDiagnostics={onCameraDiagnostics}
+    >
       {!transparentBackground && <color attach="background" args={[materials.background]} />}
-      <VirtualPitchCamera
-        configuration={camera}
-        calibratedCamera={calibratedCamera}
-        enableOrbitControls={debugEnabled && (visualOptions.enableOrbitControls ?? false)}
-      />
       <VirtualPitchLighting
         ambientColour={materials.ambientLight}
         keyColour={materials.keyLight}
@@ -88,6 +103,6 @@ export function VirtualPitchScene({
           labelColour={materials.officialLine.color}
         />
       )}
-    </>
+    </VirtualPitchCameraController>
   );
 }

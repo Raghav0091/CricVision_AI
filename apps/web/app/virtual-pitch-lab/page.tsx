@@ -6,6 +6,7 @@ import {
   type ComponentType,
   type ErrorInfo,
   type PropsWithChildren,
+  useCallback,
   useEffect,
   useMemo,
   useState
@@ -13,7 +14,11 @@ import {
 
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
-import type { VirtualPitchSceneProps, VirtualPitchVisualOptions } from "@/components/virtual-pitch";
+import type {
+  ActiveCameraDiagnostics,
+  VirtualPitchSceneProps,
+  VirtualPitchVisualOptions
+} from "@/components/virtual-pitch";
 import {
   CameraDiagnosticsPanel,
   OverlayStage,
@@ -198,6 +203,8 @@ export default function VirtualPitchLabPage() {
   const [showResiduals, setShowResiduals] = useState(true);
   const [showLabels, setShowLabels] = useState(false);
   const [showCameraDiagnostics, setShowCameraDiagnostics] = useState(true);
+  const [activeCameraDiagnostics, setActiveCameraDiagnostics] = useState<ActiveCameraDiagnostics | null>(null);
+  const [activeCanvasCount, setActiveCanvasCount] = useState(0);
 
   const calibrated = sourceMode !== "development";
   const aspectRatio = layout === "portrait" ? 9 / 16 : 16 / 9;
@@ -318,6 +325,11 @@ export default function VirtualPitchLabPage() {
     setVisualOptions((current) => ({ ...current, [key]: value }));
   }
 
+  const handleCameraDiagnostics = useCallback((value: ActiveCameraDiagnostics) => {
+    setActiveCameraDiagnostics(value);
+  }, []);
+  const handleCanvasCountChange = useCallback((count: number) => setActiveCanvasCount(count), []);
+
   const canvas = model && cameraPreset ? (
     <RendererBoundary>
       <VirtualPitchCanvas
@@ -326,6 +338,7 @@ export default function VirtualPitchLabPage() {
         camera={cameraPreset}
         calibratedCamera={threeBridge ?? undefined}
         visualOptions={rendererOptions}
+        onCameraDiagnostics={handleCameraDiagnostics}
       />
     </RendererBoundary>
   ) : null;
@@ -388,6 +401,7 @@ export default function VirtualPitchLabPage() {
                   showThreeMarkers={showThreeMarkers}
                   showResiduals={showResiduals}
                   showLabels={showLabels}
+                  onCanvasCountChange={handleCanvasCountChange}
                 />
               ) : <ViewportMessage title="No calibrated camera" detail="Select a synthetic camera or load a real analysis camera candidate." />}
           </div>
@@ -433,7 +447,7 @@ export default function VirtualPitchLabPage() {
             </div>
           </Card>
 
-          {calibrated && showCameraDiagnostics && <Card className="shadow-none"><p className="mb-4 text-xs font-bold uppercase tracking-[0.14em] text-white/40">Bridge diagnostics</p><CameraDiagnosticsPanel camera={activePayload?.camera ?? null} diagnostics={diagnostics} /></Card>}
+          {calibrated && showCameraDiagnostics && <Card className="shadow-none"><p className="mb-4 text-xs font-bold uppercase tracking-[0.14em] text-white/40">Bridge diagnostics</p><CameraDiagnosticsPanel camera={activePayload?.camera ?? null} diagnostics={diagnostics} activeCamera={activeCameraDiagnostics} requestedCamera={sourceMode} activeCanvasCount={activeCanvasCount} /></Card>}
         </aside>
       </div>
     </div>

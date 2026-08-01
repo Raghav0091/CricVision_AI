@@ -144,6 +144,37 @@ that the OpenCV camera matches the photographed scene. For
 camera while the unaccepted scene candidate itself has approximately 3.2456 px
 anchor RMSE.
 
+## Camera Ownership And Responsive Stability
+
+Each WebGL canvas has one `VirtualPitchCameraController` and one camera family.
+Development mode owns a conventional FOV-based `PerspectiveCamera`; calibrated
+mode owns a separate bridge-configured `PerspectiveCamera`. A camera object is
+never shared between canvases. Orbit controls are mounted only for the
+development family and have bounded distance and polar angles.
+
+The calibrated camera is configured atomically before it is passed to R3F's
+`Canvas`: projection, projection inverse, world matrix, world inverse, near,
+far, and matrix-update policy are all complete. Its `manual` marker prevents
+R3F's responsive `updateCamera` path from assigning a display aspect ratio and
+calling `updateProjectionMatrix()`. The scene remains unmounted until the inner
+controller confirms that `useThree().camera` is the exact owned instance and
+that its pose and projection checksums still match the bridge. Source changes
+create a fully configured replacement and remount the isolated canvas; ordinary
+CSS resize, DPR changes, and overlay changes retain camera identity.
+
+The giant-wicket defect was caused by calibrated mode mutating R3F's ordinary
+default camera after Canvas mount without marking it manual. On a renderer or
+container resize, R3F therefore treated it as a normal development camera,
+replaced the calibrated projection with a FOV/aspect projection, and left the
+independent screen-space diagnostics correctly positioned. The stability patch
+removes that overwrite path and the temporary default-camera frame.
+
+The lab reports the active camera UUID, family, readiness, camera/canvas counts,
+controls state, native and displayed dimensions, pose/projection checksums, and
+actual-camera RMSE. Every validation landmark includes OpenCV, bridge, and
+active-renderer pixels plus both residuals. Invalid zero-sized contained bounds
+suspend the stage instead of retaining or expanding a stale canvas rectangle.
+
 ## Future Boundaries
 
 Video Analysis may later compose accepted calibration and current video frames

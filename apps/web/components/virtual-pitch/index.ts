@@ -1,5 +1,8 @@
 export { VirtualBail, VirtualBails } from "./VirtualBails";
-export { VirtualPitchCamera } from "./VirtualPitchCamera";
+export {
+  VirtualPitchCameraController,
+  type ActiveCameraDiagnostics
+} from "./VirtualPitchCameraController";
 export { VirtualPitchCanvas } from "./VirtualPitchCanvas";
 export { VirtualPitchCorridor } from "./VirtualPitchCorridor";
 export { VirtualPitchDebugHelpers } from "./VirtualPitchDebugHelpers";
