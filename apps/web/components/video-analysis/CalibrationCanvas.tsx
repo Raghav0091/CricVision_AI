@@ -134,6 +134,7 @@ export function CalibrationCanvas({
   pitchGeometry,
   interactionMode = "locked",
   showGuides,
+  guideLabels,
   onGuideChange
 }: {
   imageUrl: string;
@@ -146,6 +147,7 @@ export function CalibrationCanvas({
   pitchGeometry: PitchGeometry | null;
   interactionMode?: InteractionMode;
   showGuides?: boolean;
+  guideLabels?: Partial<Record<WicketLabel, string>>;
   onGuideChange?: (label: WicketLabel, box: NormalizedBox) => void;
 }) {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
@@ -205,18 +207,24 @@ export function CalibrationCanvas({
 
   function renderGuide(label: WicketLabel, box: NormalizedBox | null) {
     if (!box || !shouldShowGuides) return null;
-    const title = label === "striker" ? "Striker Guide" : "Non-Striker Guide";
+    const title = guideLabels?.[label]
+      ?? (label === "striker" ? "Striker Guide" : "Non-Striker Guide");
     const dimmed = interactionMode !== "guides";
+    const isFarWicket = label === "striker";
     return (
       <div
-        className="absolute rounded-md border-2 border-dashed border-signal"
+        className={`absolute rounded-md border-2 border-dashed ${isFarWicket ? "border-[#4cc9f0]" : "border-signal"}`}
         style={{
           left: `${box.x * 100}%`,
           top: `${box.y * 100}%`,
           width: `${box.width * 100}%`,
           height: `${box.height * 100}%`,
           opacity: dimmed ? 0.45 : 1,
-          boxShadow: dimmed ? undefined : "0 0 18px rgba(255,85,79,0.32)",
+          boxShadow: dimmed
+            ? undefined
+            : isFarWicket
+              ? "0 0 18px rgba(76,201,240,0.32)"
+              : "0 0 18px rgba(255,85,79,0.32)",
           cursor: guidesEditable ? "move" : "default",
           touchAction: "none",
           pointerEvents: guidesEditable ? "auto" : "none"
@@ -225,7 +233,7 @@ export function CalibrationCanvas({
           ? (event) => startGuideOperation(event, label, box, "move")
           : undefined}
       >
-        <span className="absolute -top-7 left-0 whitespace-nowrap rounded bg-signal px-2 py-1 text-[10px] font-black uppercase tracking-wide text-white">
+        <span className={`absolute -top-7 left-0 whitespace-nowrap rounded px-2 py-1 text-[10px] font-black uppercase tracking-wide text-white ${isFarWicket ? "bg-[#168aad]" : "bg-signal"}`}>
           {title}
         </span>
         {guidesEditable && (["nw", "ne", "sw", "se"] as ResizeCorner[]).map((corner) => (
@@ -233,7 +241,7 @@ export function CalibrationCanvas({
             key={corner}
             type="button"
             aria-label={`Resize ${title} from ${corner}`}
-            className={`absolute h-4 w-4 rounded-sm border-2 border-ink bg-signal ${
+            className={`absolute h-4 w-4 rounded-sm border-2 border-ink ${isFarWicket ? "bg-[#4cc9f0]" : "bg-signal"} ${
               corner.includes("n") ? "-top-2" : "-bottom-2"
             } ${
               corner.includes("w") ? "-left-2" : "-right-2"

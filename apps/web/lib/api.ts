@@ -217,6 +217,7 @@ export type VideoAnalysisPreparedResponse = {
     reason?: string;
   } | null;
   original_video_url: string;
+  playback_video_url?: string | null;
   reference_frame_url: string;
   calibration_status?: "confirmed" | null;
   calibration_url?: string | null;
@@ -261,6 +262,7 @@ function withBrowserSafeAnalysisUrls(record: VideoAnalysisPreparedResponse): Vid
   return {
     ...record,
     original_video_url: resolveApiUrl(record.original_video_url) ?? record.original_video_url,
+    playback_video_url: resolveApiUrl(record.playback_video_url),
     reference_frame_url: resolveApiUrl(record.reference_frame_url) ?? record.reference_frame_url,
     calibration_url: resolveApiUrl(record.calibration_url),
     calibration_overlay_url: resolveApiUrl(record.calibration_overlay_url),
@@ -423,6 +425,7 @@ export type VideoCalibrationConfirmationRequest = {
   user_note?: string | null;
   striker_guide?: NormalizedBox | null;
   non_striker_guide?: NormalizedBox | null;
+  render_scene_overlay?: boolean;
 };
 
 
@@ -913,13 +916,15 @@ export async function detectVideoAnalysisCalibration(
   analysisId: string,
   options?: {
     refreshEarlyReference?: boolean;
+    frameZeroOnly?: boolean;
     strikerGuide?: NormalizedBox;
     nonStrikerGuide?: NormalizedBox;
   }
 ): Promise<VideoCalibrationDetectionResponse> {
-  const params = options?.refreshEarlyReference
-    ? "?refresh_early_reference=true"
-    : "";
+  const query = new URLSearchParams();
+  if (options?.refreshEarlyReference) query.set("refresh_early_reference", "true");
+  if (options?.frameZeroOnly) query.set("frame_zero_only", "true");
+  const params = query.size > 0 ? `?${query.toString()}` : "";
   const body = {
     striker_guide: options?.strikerGuide ?? null,
     non_striker_guide: options?.nonStrikerGuide ?? null
@@ -1116,6 +1121,16 @@ export type VideoBallDetectionJobStatus =
   | "ball_detector_missing";
 
 
+export type VideoBallAnalysisFailureCode =
+  | "BALL_DETECTOR_UNAVAILABLE"
+  | "BALL_DETECTION_FAILED"
+  | "NO_MOVING_BALL_CANDIDATES"
+  | "TRACK_UNAVAILABLE"
+  | "TRACK_TOO_SHORT"
+  | "VIDEO_FPS_UNAVAILABLE"
+  | "TRACK_RESULT_LOAD_FAILED";
+
+
 export type VideoBallDetectionResultLinks = {
   processed_video_url: string;
   detections_json_url: string;
@@ -1152,6 +1167,7 @@ export type VideoBallDetectionJobResponse = {
   ball_detector_model_key: string;
   ball_detector_model_name: string;
   error_message?: string | null;
+  failure_code?: VideoBallAnalysisFailureCode | null;
   result?: VideoBallDetectionResultLinks | null;
   message: string;
 };
@@ -1209,7 +1225,32 @@ export type VideoBallDetectionResultResponse = {
   analysis_id: string;
   summary: VideoBallDetectionSummary;
   frame_candidate_counts: number[];
+  frames?: VideoBallDetectionFrame[] | null;
   message: string;
+};
+
+
+export type VideoBallDetectionCandidate = {
+  candidate_id: string;
+  class_id: number;
+  class_name: string;
+  confidence: number;
+  bbox_xyxy: [number, number, number, number];
+  bbox_normalized: NormalizedBox;
+  center: { x: number; y: number };
+  center_normalized: { x: number; y: number };
+  width_pixels: number;
+  height_pixels: number;
+  area_pixels: number;
+  inside_pitch_corridor?: boolean | null;
+};
+
+
+export type VideoBallDetectionFrame = {
+  frame_index: number;
+  timestamp_seconds: number;
+  processed: true;
+  detections: VideoBallDetectionCandidate[];
 };
 
 
@@ -1294,10 +1335,12 @@ export async function getVideoBallDetectionJob(
 
 
 export async function getVideoBallDetectionResult(
-  analysisId: string
+  analysisId: string,
+  includeFrames = false
 ): Promise<VideoBallDetectionResultResponse | null> {
+  const query = includeFrames ? "?include_frames=true" : "";
   const response = await fetch(
-    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/ball-detection`,
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/ball-detection${query}`,
     { cache: "no-store" }
   );
   if (response.status === 404) return null;
@@ -1353,6 +1396,7 @@ export type VideoBallTrackingJobResponse = {
   created_at: string;
   updated_at: string;
   error_message?: string | null;
+  failure_code?: VideoBallAnalysisFailureCode | null;
   result?: VideoBallTrackingResultLinks | null;
   message: string;
 };
@@ -1371,11 +1415,17 @@ export type VideoBallTrackingPoint = {
   source: "observed" | "predicted" | "recovered";
   provenance: TrackingProvenance;
   candidate_id?: string | null;
+  bounding_box?: [number, number, number, number] | null;
   x: number;
   y: number;
+  image_x_px?: number | null;
+  image_y_px?: number | null;
   normalized_x: number;
   normalized_y: number;
   confidence: number;
+  detector_confidence?: number | null;
+  tracking_confidence?: number | null;
+  valid?: boolean;
   uncertainty?: number;
   vx: number;
   vy: number;
@@ -2099,12 +2149,37 @@ export type DeliveryPhysicsResult = {
 };
 
 
+export type TrackingCandidateScoreComponents = {
+  detector_confidence: number;
+  motion: number;
+  prediction_proximity: number;
+  direction: number;
+  size_consistency: number;
+  corridor: number;
+  static_penalty: number;
+  jump_penalty: number;
+  total: number;
+};
+
+
+export type TrackingCandidateDiagnostic = {
+  frame_index: number;
+  candidate_id: string;
+  selected: boolean;
+  selection_reason: string;
+  static_likelihood: number;
+  score_components?: TrackingCandidateScoreComponents | null;
+};
+
+
 export type VideoBallTrackingResultResponse = {
   success: boolean;
   status: "ready" | "no_reliable_track";
   analysis_id: string;
   summary: VideoBallTrackingSummary;
   primary_track: VideoBallTrackingPoint[];
+  raw_primary_track?: VideoBallTrackingPoint[];
+  candidate_diagnostics?: TrackingCandidateDiagnostic[];
   bounce?: PrimaryBounceResult | null;
   physics?: DeliveryPhysicsResult | null;
   message: string;
@@ -2635,14 +2710,61 @@ export type CameraBridgeApiResponse = {
     warnings: string[];
   } | null;
   projected_pitch_geometry?: PitchProjectionGeometry | null;
+  fit_status?: "FIT_READY" | "FIT_APPROXIMATE" | "FIT_FAILED" | null;
+  fit_validation?: ConfirmedWicketFitValidation | null;
   warnings: string[];
   message: string;
+};
+
+
+export type WicketProjectionFitMetrics = {
+  observed_bounds: { x_min: number; y_min: number; x_max: number; y_max: number };
+  projected_bounds?: { x_min: number; y_min: number; x_max: number; y_max: number } | null;
+  centre_error_px?: number | null;
+  width_error_px?: number | null;
+  height_error_px?: number | null;
+  base_error_px?: number | null;
+  width_error_ratio?: number | null;
+  height_error_ratio?: number | null;
+  box_iou?: number | null;
+};
+
+
+export type ConfirmedWicketBoxEvidence = {
+  bounds: { x_min: number; y_min: number; x_max: number; y_max: number };
+  width: number;
+  height: number;
+  frame_width: number;
+  frame_height: number;
+  role: "NEAR_WICKET" | "FAR_WICKET";
+  source: "DETECTOR" | "MANUAL" | "DETECTOR_ADJUSTED";
+  detector_confidence?: number | null;
+  bottom_left: { x: number; y: number };
+  bottom_right: { x: number; y: number };
+  bottom_centre: { x: number; y: number };
+  top_centre: { x: number; y: number };
+  box_centre: { x: number; y: number };
+};
+
+
+export type ConfirmedWicketFitValidation = {
+  status: "FIT_READY" | "FIT_APPROXIMATE" | "FIT_FAILED";
+  fit_score: number;
+  native_image_width: number;
+  native_image_height: number;
+  near_wicket_evidence: ConfirmedWicketBoxEvidence;
+  far_wicket_evidence: ConfirmedWicketBoxEvidence;
+  near_wicket: WicketProjectionFitMetrics;
+  far_wicket: WicketProjectionFitMetrics;
+  reasons: string[];
 };
 
 
 export type NormalizedCameraBridgeResponse = {
   camera: CameraBridgeInput & { setup_frame_url?: string | null };
   projection: PitchProjectionGeometry | null;
+  fitStatus: "FIT_READY" | "FIT_APPROXIMATE" | "FIT_FAILED" | null;
+  fitValidation: ConfirmedWicketFitValidation | null;
 };
 
 
@@ -3028,7 +3150,9 @@ function normalizeCameraBridgeResponse(response: CameraBridgeApiResponse): Norma
       far: camera.far_m,
       warnings: [...camera.warnings, ...response.warnings]
     },
-    projection: response.projected_pitch_geometry ?? null
+    projection: response.projected_pitch_geometry ?? null,
+    fitStatus: response.fit_status ?? null,
+    fitValidation: response.fit_validation ?? null
   };
 }
 
@@ -3193,12 +3317,70 @@ export function getAnalysisCameraBridge(analysisId: string): Promise<NormalizedC
 }
 
 
+export type ConfirmedWicketPixelBox = {
+  x_min: number;
+  y_min: number;
+  x_max: number;
+  y_max: number;
+  width: number;
+  height: number;
+  frame_width: number;
+  frame_height: number;
+  role: "NEAR_WICKET" | "FAR_WICKET";
+  source: "DETECTOR" | "MANUAL" | "DETECTOR_ADJUSTED";
+  detector_confidence?: number | null;
+};
+
+
+type ConfirmedWicketPixelBoxInput = Omit<ConfirmedWicketPixelBox, "width" | "height"> & {
+  width?: number;
+  height?: number;
+};
+
+
+export async function fitConfirmedWicketCamera(
+  analysisId: string,
+  request: {
+    preset_id: string;
+    near_wicket: ConfirmedWicketPixelBoxInput;
+    far_wicket: ConfirmedWicketPixelBoxInput;
+  }
+): Promise<NormalizedCameraBridgeResponse> {
+  const completeBox = (box: ConfirmedWicketPixelBoxInput): ConfirmedWicketPixelBox => ({
+    ...box,
+    width: box.width ?? box.x_max - box.x_min,
+    height: box.height ?? box.y_max - box.y_min
+  });
+  const response = await fetch(
+    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/camera-bridge/fit-confirmed-wickets`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...request,
+        near_wicket: completeBox(request.near_wicket),
+        far_wicket: completeBox(request.far_wicket)
+      })
+    }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(response, `Confirmed wicket fit returned ${response.status}.`);
+  }
+  return normalizeCameraBridgeResponse(await response.json() as CameraBridgeApiResponse);
+}
+
+
 export async function startVideoBallTracking(
-  analysisId: string
+  analysisId: string,
+  includeDeliveryAnalysis = true
 ): Promise<VideoBallTrackingStartResponse> {
   const response = await fetch(
     `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/tracking/start`,
-    { method: "POST" }
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ include_delivery_analysis: includeDeliveryAnalysis })
+    }
   );
   if (!response.ok) {
     throw await videoAnalysisError(response, `Moving Ball Tracker start returned ${response.status}.`);

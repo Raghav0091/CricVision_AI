@@ -1,7 +1,7 @@
 "use client";
 
 import { Canvas } from "@react-three/fiber";
-import { Component, useCallback, useEffect, useMemo, useState, type ErrorInfo, type ReactNode } from "react";
+import { Component, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 
 import {
   buildThreeCameraFromOpenCv,
@@ -105,6 +105,27 @@ function ReadyVirtualPitchCanvas(props: VirtualPitchSceneProps) {
     ? 1
     : Math.max(1, Math.min(2, requestedCap));
   const transparent = props.mode === "real-frame-overlay";
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [displaySize, setDisplaySize] = useState({ width: 0, height: 0 });
+  useLayoutEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const updateSize = () => {
+      const bounds = container.getBoundingClientRect();
+      setDisplaySize({ width: bounds.width, height: bounds.height });
+    };
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
+  const nativeDpr = calibratedMode && bridge && displaySize.width > 0 && displaySize.height > 0
+    ? Math.max(
+        bridge.intrinsics.imageWidth / displaySize.width,
+        bridge.intrinsics.imageHeight / displaySize.height
+      ) + 1e-6
+    : null;
+  const renderDpr: number | [number, number] = nativeDpr ?? [1, dprCap];
   const overlayOpacity = transparent
     ? Math.max(0, Math.min(1, props.visualOptions.overlayOpacity ?? 1))
     : 1;
@@ -114,11 +135,18 @@ function ReadyVirtualPitchCanvas(props: VirtualPitchSceneProps) {
 
   return (
     <RendererErrorBoundary>
-      <div className="relative h-full w-full" data-camera-family={ownedCamera.family} data-camera-ready={cameraReady}>
+      <div
+        ref={containerRef}
+        className="relative h-full w-full"
+        data-camera-family={ownedCamera.family}
+        data-camera-ready={cameraReady}
+        data-native-image-height={bridge?.intrinsics.imageHeight}
+        data-native-image-width={bridge?.intrinsics.imageWidth}
+      >
         <Canvas
           key={ownedCamera.camera.uuid}
           camera={ownedCamera.camera}
-          dpr={[1, dprCap]}
+          dpr={renderDpr}
           fallback={<RendererFallback message="WebGL is unavailable. Enable hardware acceleration to view the 3D pitch." />}
           flat
           frameloop="demand"
@@ -133,6 +161,7 @@ function ReadyVirtualPitchCanvas(props: VirtualPitchSceneProps) {
             background: transparent ? "transparent" : undefined,
             height: "100%",
             opacity: overlayOpacity,
+            pointerEvents: transparent ? "none" : undefined,
             width: "100%"
           }}
         >

@@ -10,8 +10,7 @@ const links = [
   ["Video Analysis", "/video-analysis"],
   ["Sessions", "/sessions"],
   ["Session Results", "/sessions/results"],
-  ["Virtual Pitch Lab", "/virtual-pitch-lab"],
-  ["Pitch-Space Analysis", "/pitch-space-analysis"]
+  ["Virtual Pitch Lab", "/virtual-pitch-lab"]
 ];
 
 
@@ -22,7 +21,7 @@ export function Sidebar() {
       <p className="mb-4 text-xs font-bold uppercase tracking-[0.2em] text-white/35">Workspace</p>
       <nav className="space-y-1">
         {links.map(([label, href]) => {
-          const developerLink = href === "/virtual-pitch-lab" || href === "/pitch-space-analysis";
+          const developerLink = href === "/virtual-pitch-lab";
           return (
           <Link
             key={href}

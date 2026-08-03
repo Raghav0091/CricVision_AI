@@ -107,6 +107,7 @@ class VideoAnalysisPreparedResponse(BaseModel):
     reference_frame_index: int
     reference_frame_selection: dict[str, object] | None = None
     original_video_url: str
+    playback_video_url: str | None = None
     reference_frame_url: str
     calibration_status: Literal["confirmed"] | None = None
     calibration_url: str | None = None
@@ -244,6 +245,7 @@ class VideoCalibrationConfirmationRequest(BaseModel):
     # ponytail: optional for older clients; guided UI always sends both.
     striker_guide: NormalizedBox | None = None
     non_striker_guide: NormalizedBox | None = None
+    render_scene_overlay: bool = True
 
 
 class ConfirmedVideoCalibrationResponse(BaseModel):
@@ -715,6 +717,17 @@ class WicketCameraPoseResult(BaseModel):
     message: str
 
 
+VideoBallAnalysisFailureCode = Literal[
+    "BALL_DETECTOR_UNAVAILABLE",
+    "BALL_DETECTION_FAILED",
+    "NO_MOVING_BALL_CANDIDATES",
+    "TRACK_UNAVAILABLE",
+    "TRACK_TOO_SHORT",
+    "VIDEO_FPS_UNAVAILABLE",
+    "TRACK_RESULT_LOAD_FAILED",
+]
+
+
 VideoBallDetectionJobStatus = Literal[
     "queued",
     "loading_model",
@@ -779,6 +792,7 @@ class VideoBallDetectionJobResponse(BaseModel):
     ball_detector_model_key: str
     ball_detector_model_name: str
     error_message: str | None = None
+    failure_code: VideoBallAnalysisFailureCode | None = None
     result: VideoBallDetectionResultLinks | None = None
     message: str
 
@@ -879,6 +893,7 @@ class VideoBallDetectionResultResponse(BaseModel):
     analysis_id: str
     summary: VideoBallDetectionSummary
     frame_candidate_counts: list[int]
+    frames: list[FrameDetectionRecord] | None = None
     message: str
 
 
@@ -915,6 +930,12 @@ TrackingProvenance = Literal[
 ]
 
 
+class VideoBallTrackingStartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    include_delivery_analysis: bool = True
+
+
 class VideoBallTrackingStartResponse(BaseModel):
     success: Literal[True]
     status: Literal["queued"]
@@ -933,6 +954,7 @@ class VideoBallTrackingJobResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     error_message: str | None = None
+    failure_code: VideoBallAnalysisFailureCode | None = None
     result: VideoBallTrackingResultLinks | None = None
     message: str
 
@@ -944,16 +966,41 @@ class TrackingPoint(StrictGeometryModel):
     source: Literal["observed", "predicted", "recovered"]
     provenance: TrackingProvenance
     candidate_id: str | None = None
+    bounding_box: list[float] | None = Field(
+        default=None,
+        min_length=4,
+        max_length=4,
+    )
     x: float = Field(ge=0)
     y: float = Field(ge=0)
+    image_x_px: float | None = Field(default=None, ge=0)
+    image_y_px: float | None = Field(default=None, ge=0)
     normalized_x: float = Field(ge=0, le=1)
     normalized_y: float = Field(ge=0, le=1)
     confidence: float = Field(ge=0, le=1)
+    detector_confidence: float | None = Field(default=None, ge=0, le=1)
+    tracking_confidence: float | None = Field(default=None, ge=0, le=1)
+    valid: bool = True
     uncertainty: float = Field(default=0.0, ge=0, le=1)
     vx: float
     vy: float
     prediction_error: float | None = Field(default=None, ge=0)
     inside_pitch_corridor: bool | None = None
+
+    @model_validator(mode="after")
+    def populate_replay_fields(self) -> "TrackingPoint":
+        # Historical delivery_track_v2 documents only stored x/y/confidence.
+        if self.image_x_px is None:
+            self.image_x_px = self.x
+        if self.image_y_px is None:
+            self.image_y_px = self.y
+        if self.tracking_confidence is None:
+            self.tracking_confidence = self.confidence
+        if self.detector_confidence is None:
+            self.detector_confidence = (
+                self.confidence if self.provenance == "OBSERVED" else 0.0
+            )
+        return self
 
 
 class TrackingCandidateScoreComponents(StrictGeometryModel):
@@ -1071,6 +1118,10 @@ class VideoBallTrackingResultResponse(BaseModel):
     analysis_id: str
     summary: VideoBallTrackingSummary
     primary_track: list[TrackingPoint]
+    raw_primary_track: list[TrackingPoint] = Field(default_factory=list)
+    candidate_diagnostics: list[TrackingCandidateDiagnostic] = Field(
+        default_factory=list
+    )
     bounce: PrimaryBounceResult | None = None
     physics: DeliveryPhysicsResult | None = None
     message: str

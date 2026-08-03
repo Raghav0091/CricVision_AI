@@ -18,7 +18,17 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 from scipy.optimize import least_squares
 
-from ..schemas.camera_bridge import CameraBridgeInput
+from ..schemas.camera_bridge import (
+    CameraBridgeInput,
+    CameraBridgePixelBounds,
+    CameraBridgePixelPoint,
+    CameraBridgeResponse,
+    ConfirmedWicketBoxEvidence,
+    ConfirmedWicketFitValidation,
+    ConfirmedWicketCameraFitRequest,
+    ConfirmedWicketPixelBox,
+    WicketProjectionFitMetrics,
+)
 from ..schemas.real_pitch_registration import (
     CameraIntrinsicsCandidate,
     CameraPoseCandidate,
@@ -76,6 +86,7 @@ from .wicket_observation_service import (
 
 
 RESULT_FILENAME = "preset_auto_registration_v1.json"
+CONFIRMED_WICKET_CAMERA_FILENAME = "confirmed_wicket_camera_fit_v1.json"
 RESULT_VERSION = "v1"
 OPTIMISATION_SEED = 2718
 UNCERTAINTY_PERTURBATIONS = 8
@@ -2056,6 +2067,39 @@ def _box_frames(observations: Any) -> tuple[list[dict[str, Any]], list[int]]:
     ], sorted(outliers)
 
 
+def _standalone_anchor_world(preset: _Preset) -> dict[str, list[float]]:
+    dimensions = build_virtual_pitch_specification().dimensions
+    near_end = "bowler" if preset.camera_end == "bowler" else "striker"
+    far_end = "striker" if near_end == "bowler" else "bowler"
+    end_y = {
+        "bowler": 0.0,
+        "striker": dimensions.pitch_length_m,
+    }
+    image_left_x = (
+        -dimensions.wicket_width_m / 2.0
+        if preset.image_left_mapping == "image_left_to_world_left"
+        else dimensions.wicket_width_m / 2.0
+    )
+    image_right_x = -image_left_x
+    world: dict[str, list[float]] = {}
+    for role, end in (("near", near_end), ("far", far_end)):
+        y = end_y[end]
+        world.update(
+            {
+                f"{role}_bottom_left": [image_left_x, y, 0.0],
+                f"{role}_bottom_right": [image_right_x, y, 0.0],
+                f"{role}_base_center": [0.0, y, 0.0],
+                f"{role}_top_center": [0.0, y, dimensions.stump_height_m],
+                f"{role}_box_center": [
+                    0.0,
+                    y,
+                    dimensions.stump_height_m / 2.0,
+                ],
+            }
+        )
+    return world
+
+
 def _standalone_objective(
     parameters: np.ndarray,
     preset: _Preset,
@@ -2084,11 +2128,7 @@ def _standalone_objective(
             residuals.extend(
                 _box_residuals(projected, observed, math.sqrt(max(confidence, 0.05)))
             )
-    pitch_length = build_virtual_pitch_specification().dimensions.pitch_length_m
-    anchor_world = {
-        "near_base_center": [0.0, 0.0 if near_end == "bowler" else pitch_length, 0.0],
-        "far_base_center": [0.0, pitch_length if far_end == "striker" else 0.0, 0.0],
-    }
+    anchor_world = _standalone_anchor_world(preset)
     for anchor in anchors:
         world_value = anchor_world.get(str(anchor.get("semantic_id")))
         if world_value is None:
@@ -2100,11 +2140,13 @@ def _standalone_objective(
             residuals.extend([25.0, 25.0])
         else:
             uncertainty = max(float(anchor.get("uncertainty_px", 3.0)), 1.0)
+            confidence = math.sqrt(max(float(anchor.get("confidence", 1.0)), 0.05))
             residuals.extend(
                 (
                     (projected[0] - [float(anchor["x"]), float(anchor["y"])])
                     / uncertainty
                     * 5.0
+                    * confidence
                 ).tolist()
             )
     half_ranges = np.maximum((preset.upper - preset.lower) / 2.0, 1e-6)
@@ -2176,19 +2218,15 @@ def fit_bounded_camera(
     rotation, translation, _, _, _, camera_matrix = _standalone_arrays(
         parameters, normalised, width, height
     )
-    pitch_length = build_virtual_pitch_specification().dimensions.pitch_length_m
+    anchor_world = _standalone_anchor_world(normalised)
     anchor_errors: list[float] = []
     for anchor in anchors:
         semantic_id = str(anchor.get("semantic_id"))
-        y = (
-            0.0
-            if semantic_id == "near_base_center"
-            else pitch_length if semantic_id == "far_base_center" else None
-        )
-        if y is None:
+        world_value = anchor_world.get(semantic_id)
+        if world_value is None:
             continue
         projected, depths = _project(
-            np.asarray([[0.0, y, 0.0]]), rotation, translation, camera_matrix
+            np.asarray([world_value]), rotation, translation, camera_matrix
         )
         if depths[0] > 0:
             anchor_errors.append(
@@ -2289,6 +2327,374 @@ def fit_bounded_camera(
 
 
 fit_preset_registration = fit_bounded_camera
+
+
+def _confirmed_wicket_box_evidence(
+    box: ConfirmedWicketPixelBox,
+) -> ConfirmedWicketBoxEvidence:
+    centre_x = (box.x_min + box.x_max) / 2.0
+    centre_y = (box.y_min + box.y_max) / 2.0
+    return ConfirmedWicketBoxEvidence(
+        bounds=CameraBridgePixelBounds(
+            x_min=box.x_min,
+            y_min=box.y_min,
+            x_max=box.x_max,
+            y_max=box.y_max,
+        ),
+        width=box.width,
+        height=box.height,
+        frame_width=box.frame_width,
+        frame_height=box.frame_height,
+        role=box.role,
+        source=box.source,
+        detector_confidence=box.detector_confidence,
+        bottom_left=CameraBridgePixelPoint(x=box.x_min, y=box.y_max),
+        bottom_right=CameraBridgePixelPoint(x=box.x_max, y=box.y_max),
+        bottom_centre=CameraBridgePixelPoint(x=centre_x, y=box.y_max),
+        top_centre=CameraBridgePixelPoint(x=centre_x, y=box.y_min),
+        box_centre=CameraBridgePixelPoint(x=centre_x, y=centre_y),
+    )
+
+
+def _confirmed_wicket_point_anchors(
+    role: str,
+    evidence: ConfirmedWicketBoxEvidence,
+) -> list[dict[str, Any]]:
+    uncertainty = max(2.0, evidence.width * 0.06)
+    return [
+        {
+            "semantic_id": semantic_id,
+            "x": point.x,
+            "y": point.y,
+            "uncertainty_px": uncertainty,
+            "confidence": 1.0,
+        }
+        for semantic_id, point in (
+            (f"{role}_bottom_left", evidence.bottom_left),
+            (f"{role}_bottom_right", evidence.bottom_right),
+            (f"{role}_base_center", evidence.bottom_centre),
+            (f"{role}_top_center", evidence.top_centre),
+            (f"{role}_box_center", evidence.box_centre),
+        )
+    ]
+
+
+def _wicket_projection_fit(
+    observed: PixelBox,
+    projected: PixelBox | None,
+) -> WicketProjectionFitMetrics:
+    observed_bounds = CameraBridgePixelBounds(
+        x_min=observed.x,
+        y_min=observed.y,
+        x_max=observed.x + observed.width,
+        y_max=observed.y + observed.height,
+    )
+    if projected is None:
+        return WicketProjectionFitMetrics(observed_bounds=observed_bounds)
+    projected_bounds = CameraBridgePixelBounds(
+        x_min=projected.x,
+        y_min=projected.y,
+        x_max=projected.x + projected.width,
+        y_max=projected.y + projected.height,
+    )
+    centre_error = math.hypot(
+        projected.x + projected.width / 2.0 - observed.x - observed.width / 2.0,
+        projected.y + projected.height / 2.0 - observed.y - observed.height / 2.0,
+    )
+    width_error = abs(projected.width - observed.width)
+    height_error = abs(projected.height - observed.height)
+    base_error = math.hypot(
+        projected.x + projected.width / 2.0 - observed.x - observed.width / 2.0,
+        projected.y + projected.height - observed.y - observed.height,
+    )
+    return WicketProjectionFitMetrics(
+        observed_bounds=observed_bounds,
+        projected_bounds=projected_bounds,
+        centre_error_px=centre_error,
+        width_error_px=width_error,
+        height_error_px=height_error,
+        base_error_px=base_error,
+        width_error_ratio=width_error / observed.width,
+        height_error_ratio=height_error / observed.height,
+        box_iou=_box_iou(projected, observed),
+    )
+
+
+def _catastrophic_wicket_alignment_threshold(observed: PixelBox) -> float:
+    return max(24.0, math.hypot(observed.width, observed.height) * 1.0)
+
+
+def _ready_wicket_alignment_threshold(observed: PixelBox) -> float:
+    return max(5.0, math.hypot(observed.width, observed.height) * 0.15)
+
+
+def _wicket_projection_ready(
+    metrics: WicketProjectionFitMetrics,
+    observed: PixelBox,
+    *,
+    minimum_iou: float,
+) -> bool:
+    alignment_limit = _ready_wicket_alignment_threshold(observed)
+    return (
+        metrics.box_iou is not None
+        and metrics.box_iou >= minimum_iou
+        and metrics.centre_error_px is not None
+        and metrics.centre_error_px <= alignment_limit
+        and metrics.width_error_ratio is not None
+        and metrics.width_error_ratio <= 0.30
+        and metrics.height_error_ratio is not None
+        and metrics.height_error_ratio <= 0.25
+        and metrics.base_error_px is not None
+        and metrics.base_error_px <= alignment_limit
+    )
+
+
+def _confirmed_wicket_fit_validation(
+    *,
+    width: int,
+    height: int,
+    observed_near: PixelBox,
+    observed_far: PixelBox,
+    near_evidence: ConfirmedWicketBoxEvidence,
+    far_evidence: ConfirmedWicketBoxEvidence,
+    projected_near: PixelBox | None,
+    projected_far: PixelBox | None,
+) -> ConfirmedWicketFitValidation:
+    near = _wicket_projection_fit(observed_near, projected_near)
+    far = _wicket_projection_fit(observed_far, projected_far)
+    failure_reasons: list[str] = []
+    if projected_near is None:
+        failure_reasons.append("NEAR_WICKET_NOT_PROJECTABLE")
+    if projected_far is None:
+        failure_reasons.append("FAR_WICKET_NOT_PROJECTABLE")
+    if projected_near is not None and (
+        projected_near.width > observed_near.width * 1.6
+        or projected_near.height > observed_near.height * 1.5
+    ):
+        failure_reasons.append("NEAR_WICKET_DRAMATICALLY_OVERSIZED")
+    if far.box_iou is not None and far.box_iou < 0.2:
+        failure_reasons.append("FAR_WICKET_OUTSIDE_CONFIRMED_BOX")
+
+    for role, observed, metrics in (
+        ("NEAR", observed_near, near),
+        ("FAR", observed_far, far),
+    ):
+        catastrophic = _catastrophic_wicket_alignment_threshold(observed)
+        if metrics.centre_error_px is not None and metrics.centre_error_px > catastrophic:
+            failure_reasons.append(f"{role}_WICKET_CENTRE_ERROR_EXCESSIVE")
+        if metrics.base_error_px is not None and metrics.base_error_px > catastrophic:
+            failure_reasons.append(f"{role}_WICKET_BASE_ERROR_EXCESSIVE")
+
+    if failure_reasons:
+        status = "FIT_FAILED"
+        reasons = failure_reasons
+    elif _wicket_projection_ready(near, observed_near, minimum_iou=0.55) and _wicket_projection_ready(
+        far, observed_far, minimum_iou=0.35
+    ):
+        status = "FIT_READY"
+        reasons = []
+    else:
+        status = "FIT_APPROXIMATE"
+        reasons = ["PROJECTED_WICKETS_REQUIRE_VISUAL_REVIEW"]
+
+    fit_channels: list[float] = []
+    for metrics, observed in ((near, observed_near), (far, observed_far)):
+        if metrics.box_iou is None:
+            continue
+        scale = max(math.hypot(observed.width, observed.height), 1.0)
+        fit_channels.extend(
+            [
+                metrics.box_iou,
+                max(0.0, 1.0 - (metrics.centre_error_px or 0.0) / scale),
+                max(0.0, 1.0 - (metrics.width_error_ratio or 0.0)),
+                max(0.0, 1.0 - (metrics.height_error_ratio or 0.0)),
+                max(0.0, 1.0 - (metrics.base_error_px or 0.0) / scale),
+            ]
+        )
+    fit_score = sum(fit_channels) / len(fit_channels) if fit_channels else 0.0
+    return ConfirmedWicketFitValidation(
+        status=status,
+        fit_score=fit_score,
+        native_image_width=width,
+        native_image_height=height,
+        near_wicket_evidence=near_evidence,
+        far_wicket_evidence=far_evidence,
+        near_wicket=near,
+        far_wicket=far,
+        reasons=reasons,
+    )
+
+
+def fit_confirmed_wicket_camera(
+    analysis_id: str,
+    request: ConfirmedWicketCameraFitRequest,
+) -> CameraBridgeResponse:
+    """Adapt two confirmed native-pixel boxes to the existing bounded camera fitter."""
+    if request.preset_id != "STANDARD_REAR_WICKET_NET_V1":
+        raise VideoAnalysisServiceError(
+            "Confirmed wicket fitting requires STANDARD_REAR_WICKET_NET_V1.",
+            status_code=422,
+        )
+    analysis = load_video_analysis(analysis_id)
+    width, height = int(analysis.width), int(analysis.height)
+    if (
+        request.near_wicket.frame_width != width
+        or request.near_wicket.frame_height != height
+    ):
+        raise VideoAnalysisServiceError(
+            "Confirmed wicket boxes do not match the native video dimensions.",
+            status_code=422,
+        )
+
+    def values(box: ConfirmedWicketPixelBox) -> list[float]:
+        return [
+            float(box.x_min),
+            float(box.y_min),
+            float(box.width),
+            float(box.height),
+        ]
+
+    near = values(request.near_wicket)
+    far = values(request.far_wicket)
+    near_evidence = _confirmed_wicket_box_evidence(request.near_wicket)
+    far_evidence = _confirmed_wicket_box_evidence(request.far_wicket)
+    observed_near = PixelBox(x=near[0], y=near[1], width=near[2], height=near[3])
+    observed_far = PixelBox(x=far[0], y=far[1], width=far[2], height=far[3])
+    observations = {
+        "image_width": width,
+        "image_height": height,
+        "frames": [{
+            "frame_index": 0,
+            "near_wicket_bbox": near,
+            "far_wicket_bbox": far,
+            "near_confidence": 1.0,
+            "far_confidence": 1.0,
+        }],
+        "point_anchors": [
+            *_confirmed_wicket_point_anchors("near", near_evidence),
+            *_confirmed_wicket_point_anchors("far", far_evidence),
+        ],
+    }
+    preset_value = _preset_by_id(request.preset_id)
+    normalised = _normalise_preset(preset_value)
+    fit = fit_bounded_camera(preset=preset_value, observations=observations)
+    parameters = np.asarray(
+        [fit["fitted_parameters"][name] for name in _PARAMETER_NAMES],
+        dtype=np.float64,
+    )
+    rotation, translation, rotation_matrix, position, focal, camera_matrix = (
+        _standalone_arrays(parameters, normalised, width, height)
+    )
+    intrinsics = type(
+        "_Intrinsics",
+        (),
+        {
+            "focal_length_x_px": focal,
+            "principal_point_x_px": width / 2.0,
+            "principal_point_y_px": height / 2.0,
+            "distortion_coefficients": [0.0] * 5,
+        },
+    )()
+    camera = _virtual_camera(
+        "confirmed_wicket_boxes",
+        width,
+        height,
+        intrinsics,
+        rotation,
+        translation,
+        rotation_matrix,
+        position,
+    ).model_copy(update={"horizontal_fov_degrees": float(parameters[6])})
+    projected_near = _projected_wicket_box(
+        "bowler" if normalised.camera_end == "bowler" else "striker",
+        rotation,
+        translation,
+        camera_matrix,
+    )
+    projected_far = _projected_wicket_box(
+        "striker" if normalised.camera_end == "bowler" else "bowler",
+        rotation,
+        translation,
+        camera_matrix,
+    )
+    validation = _confirmed_wicket_fit_validation(
+        width=width,
+        height=height,
+        observed_near=observed_near,
+        observed_far=observed_far,
+        near_evidence=near_evidence,
+        far_evidence=far_evidence,
+        projected_near=projected_near,
+        projected_far=projected_far,
+    )
+    projected = project_virtual_pitch(camera)
+    geometry = RealProjectedPitchGeometry(
+        source_camera=camera,
+        projected_landmarks=projected.projected_landmarks,
+        projected_line_segments=projected.projected_line_segments,
+        projected_stumps=projected.projected_stumps,
+        projected_polygons=projected.projected_polygons,
+        projected_bails=projected.projected_bails,
+        diagnostics=projected.diagnostics,
+    )
+    accepted = validation.status != "FIT_FAILED"
+    bridge = CameraBridgeInput(
+        source="REAL_PITCH_REGISTRATION_CANDIDATE",
+        source_version="preset_auto_registration_v1",
+        analysis_id=analysis_id,
+        candidate_id=str(fit["selected_candidate_id"]),
+        accepted=accepted,
+        classification=f"VISUAL_ONLY_CONFIRMED_WICKET_{validation.status}",
+        image_width=width,
+        image_height=height,
+        camera_matrix=camera.camera_matrix,
+        fx=float(camera.camera_matrix[0][0]),
+        fy=float(camera.camera_matrix[1][1]),
+        cx=float(camera.camera_matrix[0][2]),
+        cy=float(camera.camera_matrix[1][2]),
+        skew=0.0,
+        distortion=_distortion([0.0] * 5),
+        rotation_vector=rotation.reshape(-1).tolist(),
+        rotation_matrix=rotation_matrix.tolist(),
+        translation_vector=translation.reshape(-1).tolist(),
+        camera_world_position=position.tolist(),
+        near_m=DEFAULT_NEAR_M,
+        far_m=DEFAULT_FAR_M,
+        setup_frame=None,
+        warnings=[
+            "Visual-only fit from one confirmed frame; metric analytics remain locked."
+        ],
+    )
+    response = CameraBridgeResponse(
+        status="AVAILABLE",
+        camera=bridge,
+        projected_pitch_geometry=geometry,
+        fit_status=validation.status,
+        fit_validation=validation,
+        warnings=list(bridge.warnings),
+        message=(
+            "Confirmed wicket boxes fitted with the Virtual Pitch Lab preset-bounded camera solver."
+        ),
+    )
+    destination = (
+        VIDEO_ANALYSIS_ROOT
+        / analysis_id
+        / "calibration"
+        / CONFIRMED_WICKET_CAMERA_FILENAME
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(
+            response.model_dump(mode="json"),
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(destination)
+    return response
 
 
 def classify_auto_registration(

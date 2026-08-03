@@ -15,6 +15,7 @@ import cv2
 import numpy as np
 
 from ..schemas.video_analysis import VideoAnalysisPreparedResponse
+from .ball_detection_clip import transcode_browser_mp4
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -64,6 +65,15 @@ def prepare_video(
         file_size_bytes = _save_upload(upload, raw_path)
         reference_path = analysis_dir / "calibration" / "reference_frame.jpg"
         video_metadata = _read_video_metadata(raw_path, reference_path)
+        playback_filename = "playback.mp4"
+        playback_path = analysis_dir / "normalized" / playback_filename
+        try:
+            transcode_browser_mp4(raw_path, playback_path, timeout_seconds=600)
+        except Exception as exc:
+            raise VideoAnalysisServiceError(
+                f"Browser-compatible playback preparation failed: {type(exc).__name__}.",
+                status_code=500,
+            ) from exc
         created_at = datetime.now(timezone.utc)
 
         record = VideoAnalysisPreparedResponse(
@@ -75,6 +85,9 @@ def prepare_video(
             file_size_bytes=file_size_bytes,
             created_at=created_at,
             original_video_url=f"/static/video-analysis/{analysis_id}/raw/{stored_filename}",
+            playback_video_url=(
+                f"/static/video-analysis/{analysis_id}/normalized/{playback_filename}"
+            ),
             reference_frame_url=f"/static/video-analysis/{analysis_id}/calibration/reference_frame.jpg",
             message="Video uploaded and prepared for scene calibration.",
             **video_metadata,

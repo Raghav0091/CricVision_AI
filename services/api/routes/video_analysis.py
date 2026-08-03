@@ -3,7 +3,10 @@ from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Body, File, HTTPException, Response, UploadFile
 
-from ..schemas.camera_bridge import CameraBridgeResponse
+from ..schemas.camera_bridge import (
+    CameraBridgeResponse,
+    ConfirmedWicketCameraFitRequest,
+)
 from ..schemas.preset_auto_registration import (
     CameraSetupPresetListResponse,
     PresetAutoRegistrationResult,
@@ -24,6 +27,7 @@ from ..schemas.video_analysis import (
     VideoBallDetectionStartResponse,
     VideoBallTrackingJobResponse,
     VideoBallTrackingResultResponse,
+    VideoBallTrackingStartRequest,
     VideoBallTrackingStartResponse,
     VideoCalibrationConfirmationRequest,
     VideoCalibrationDetectionRequest,
@@ -105,6 +109,7 @@ from ..services.real_pitch_registration_service import (
 )
 from ..services.preset_auto_registration import (
     clear_preset_auto_registration,
+    fit_confirmed_wicket_camera,
     load_preset_auto_registration,
     run_preset_auto_registration,
 )
@@ -251,6 +256,20 @@ def get_analysis_camera_bridge(
             status_code=exc.status_code,
             detail=exc.message,
         ) from exc
+
+
+@router.post(
+    "/{analysis_id}/camera-bridge/fit-confirmed-wickets",
+    response_model=CameraBridgeResponse,
+)
+def fit_analysis_confirmed_wicket_camera(
+    analysis_id: str,
+    request: ConfirmedWicketCameraFitRequest,
+) -> CameraBridgeResponse:
+    try:
+        return fit_confirmed_wicket_camera(analysis_id, request)
+    except VideoAnalysisServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
 
 
 @router.post(
@@ -647,6 +666,8 @@ def start_analysis_ball_detection(
             analysis_id,
         )
         return VideoBallDetectionStartResponse.model_validate(job)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except BallDetectorModelMissing as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except VideoAnalysisServiceError as exc:
@@ -692,9 +713,13 @@ def get_analysis_ball_detection_job(
 )
 def get_analysis_ball_detection(
     analysis_id: str,
+    include_frames: bool = False,
 ) -> VideoBallDetectionResultResponse:
     try:
-        return load_video_ball_detection_result(analysis_id)
+        return load_video_ball_detection_result(
+            analysis_id,
+            include_frames=include_frames,
+        )
     except VideoAnalysisServiceError as exc:
         raise HTTPException(
             status_code=exc.status_code,
@@ -715,6 +740,9 @@ def get_analysis_ball_detection(
 def start_analysis_ball_tracking(
     analysis_id: str,
     background_tasks: BackgroundTasks,
+    request: VideoBallTrackingStartRequest = Body(
+        default=VideoBallTrackingStartRequest()
+    ),
 ) -> VideoBallTrackingStartResponse:
     job = None
     try:
@@ -733,6 +761,7 @@ def start_analysis_ball_tracking(
             run_video_ball_tracking_job,
             analysis_id,
             job["job_id"],
+            include_delivery_analysis=request.include_delivery_analysis,
         )
         logger.info(
             "Queued Moving Ball Tracker job %s for %s",
@@ -920,6 +949,7 @@ def get_analysis_camera_pose(
 def detect_analysis_calibration(
     analysis_id: str,
     refresh_early_reference: bool = False,
+    frame_zero_only: bool = False,
     body: Annotated[
         VideoCalibrationDetectionRequest | None, Body()
     ] = None,
@@ -928,6 +958,7 @@ def detect_analysis_calibration(
         return detect_video_calibration(
             analysis_id,
             refresh_early_reference=refresh_early_reference,
+            frame_zero_only=frame_zero_only,
             striker_guide=None if body is None else body.striker_guide,
             non_striker_guide=(
                 None if body is None else body.non_striker_guide

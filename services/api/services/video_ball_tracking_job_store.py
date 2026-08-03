@@ -47,6 +47,7 @@ class VideoBallTrackingJobStore:
                 "created_at": now,
                 "updated_at": now,
                 "error_message": None,
+                "failure_code": None,
                 "result": None,
                 "message": "Moving-ball tracking queued.",
             }
