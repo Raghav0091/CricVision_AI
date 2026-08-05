@@ -24,12 +24,16 @@ from .scene_calibration_service import (
     load_active_accepted_scene_calibration,
     load_scene_calibration,
 )
+from .wicket_box_calibration_service import (
+    load_active_accepted_wicket_box_calibration,
+)
 from .video_analysis_service import (
     ANALYSIS_ID_PATTERN,
     VIDEO_ANALYSIS_ROOT,
     VideoAnalysisServiceError,
     load_video_analysis,
 )
+from .frame_timing import resolve_frame_timestamp
 from .virtual_pitch_service import build_synthetic_preview
 
 
@@ -207,6 +211,106 @@ def _candidate_bridge(
     )
 
 
+def _accepted_wicket_box_bridge(
+    snapshot: dict[str, object],
+    setup_frame: CameraBridgeSetupFrame,
+) -> CameraBridgeInput:
+    matrix, fx, fy, cx, cy, skew = _matrix_values(snapshot["camera_matrix"])
+    distortion_coefficients = snapshot.get("distortion_coefficients") or [0.0] * 5
+    distortion = _distortion(distortion_coefficients)
+    warnings = [distortion.warning] if distortion.warning else []
+    return CameraBridgeInput(
+        source="ACCEPTED_WICKET_BOX_CALIBRATION",
+        source_version="wicket_box_calibration_accepted_v1",
+        analysis_id=str(snapshot["analysis_id"]),
+        candidate_id="wicket-box-accepted",
+        accepted=True,
+        classification="METRIC_3D_READY",
+        image_width=setup_frame.image_width,
+        image_height=setup_frame.image_height,
+        camera_matrix=matrix,
+        fx=fx,
+        fy=fy,
+        cx=cx,
+        cy=cy,
+        skew=skew,
+        distortion=distortion,
+        rotation_vector=[float(value) for value in snapshot["rotation_vector"]],
+        rotation_matrix=[
+            [float(value) for value in row] for row in snapshot["rotation_matrix"]
+        ],
+        translation_vector=[
+            float(value) for value in snapshot["translation_vector"]
+        ],
+        camera_world_position=[
+            float(value) for value in snapshot["camera_world_position"]
+        ],
+        near_m=DEFAULT_NEAR_M,
+        far_m=DEFAULT_FAR_M,
+        setup_frame=setup_frame,
+        warnings=warnings,
+    )
+
+
+def _wicket_box_setup_frame(
+    analysis_id: str,
+    snapshot: dict[str, object],
+) -> tuple[SetupFrameCandidate, str, list[str]]:
+    frame_index = int(snapshot["calibration_frame_index"])
+    width = int(snapshot["source_image_width"])
+    height = int(snapshot["source_image_height"])
+    analysis = load_video_analysis(analysis_id)
+    container_fps = getattr(analysis, "fps", None)
+    timestamp_seconds, timestamp_method = resolve_frame_timestamp(
+        frame_index,
+        fps=float(container_fps) if container_fps is not None else None,
+    )
+    timing_warnings: list[str] = []
+    if timestamp_method == "NOMINAL_FPS_FALLBACK":
+        timing_warnings.append(f"timestamp_method:{timestamp_method}")
+    setup = SetupFrameCandidate(
+        frame_index=frame_index,
+        timestamp_seconds=timestamp_seconds,
+        image_width=width,
+        image_height=height,
+        score=0.9,
+        sharpness=100.0,
+        brightness=120.0,
+        wicket_detection_count=2,
+        mean_detector_confidence=0.8,
+        detection_stability=0.9,
+        obstruction_score=0.0,
+        selected=True,
+    )
+    analysis_root = (VIDEO_ANALYSIS_ROOT / analysis_id).resolve()
+    relative_candidates = [
+        "calibration/setup.jpg",
+        f"calibration/wicket_observation_v1/setup_frame_{frame_index:06d}.jpg",
+    ]
+    calibration_dir = analysis_root / "calibration"
+    if calibration_dir.is_dir():
+        relative_candidates.extend(
+            path.relative_to(analysis_root).as_posix()
+            for path in sorted(calibration_dir.rglob(f"setup_frame_{frame_index:06d}.jpg"))
+        )
+    for relative in relative_candidates:
+        image_url = f"/static/video-analysis/{analysis_id}/{relative}"
+        try:
+            _validated_setup_frame(analysis_id, setup, image_url)
+            return setup, image_url, timing_warnings
+        except VideoAnalysisServiceError:
+            continue
+    scene = load_scene_calibration(analysis_id)
+    if scene.setup_frame is not None and scene.setup_frame_image_url:
+        _validated_setup_frame(
+            analysis_id, scene.setup_frame, scene.setup_frame_image_url
+        )
+        return scene.setup_frame, scene.setup_frame_image_url, timing_warnings
+    raise VideoAnalysisServiceError(
+        "Accepted wicket-box setup frame is unavailable.", status_code=404
+    )
+
+
 def _accepted_bridge(
     snapshot: AcceptedSceneCalibrationSnapshot,
     setup_frame: CameraBridgeSetupFrame,
@@ -292,6 +396,23 @@ def load_analysis_camera_bridge(analysis_id: str) -> CameraBridgeResponse:
     if not ANALYSIS_ID_PATTERN.fullmatch(analysis_id):
         raise VideoAnalysisServiceError("Invalid analysis ID.", status_code=404)
     load_video_analysis(analysis_id)
+
+    wicket_snapshot = load_active_accepted_wicket_box_calibration(analysis_id)
+    if wicket_snapshot is not None:
+        setup, image_url, timing_warnings = _wicket_box_setup_frame(analysis_id, wicket_snapshot)
+        frame = _validated_setup_frame(analysis_id, setup, image_url)
+        camera = _accepted_wicket_box_bridge(wicket_snapshot, frame)
+        if timing_warnings:
+            camera = camera.model_copy(
+                update={"warnings": [*camera.warnings, *timing_warnings]}
+            )
+        return CameraBridgeResponse(
+            status="AVAILABLE",
+            camera=camera,
+            projected_pitch_geometry=None,
+            message="Active accepted wicket-box calibration loaded for rendering.",
+        )
+
     scene = load_scene_calibration(analysis_id)
 
     if scene.accepted_calibration is not None:

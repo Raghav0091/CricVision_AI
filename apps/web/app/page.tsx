@@ -4,9 +4,9 @@ import { Card } from "@/components/ui/Card";
 
 
 const destinations = [
-  { href: "/live", eyebrow: "Primary workflow", title: "Live Bowling Session", copy: "Calibrate a fixed camera, capture deliveries, and review each replay." },
-  { href: "/video-analysis", eyebrow: "Diagnostics", title: "Video Analysis", copy: "Upload clips for model, tracker, and replay testing." },
-  { href: "/sessions", eyebrow: "History", title: "Sessions", copy: "Review session metadata and delivery records." }
+  { href: "/live", eyebrow: "Live", title: "Live Session", copy: "Calibrate a fixed camera and capture deliveries." },
+  { href: "/video-analysis", eyebrow: "Analysis", title: "Video Analysis", copy: "Upload clips, calibrate wickets, detect and track the ball, open 3D replay." },
+  { href: "/virtual-pitch-lab", eyebrow: "Dev", title: "Virtual Pitch Lab", copy: "Inspect pitch geometry, camera bridge, and projection alignment." }
 ];
 
 
@@ -15,7 +15,7 @@ export default function Dashboard() {
     <div className="mx-auto max-w-6xl py-6">
       <p className="text-xs font-bold uppercase tracking-[0.25em] text-lime">CricVision AI</p>
       <h1 className="mt-4 max-w-3xl text-4xl font-black tracking-[-0.04em] sm:text-6xl">See every delivery more clearly.</h1>
-      <p className="mt-5 max-w-2xl text-base leading-7 text-white/55">A professional foundation for live capture, honest calibration, moving-ball tracking, and replay analysis.</p>
+      <p className="mt-5 max-w-2xl text-base leading-7 text-white/55">Live capture, uploaded video analysis, and virtual pitch tooling.</p>
       <div className="mt-10 grid gap-4 md:grid-cols-3">
         {destinations.map((item) => (
           <Link key={item.href} href={item.href} className="group">

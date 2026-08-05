@@ -12,11 +12,12 @@ import numpy as np
 from scipy.optimize import least_squares
 
 from packages.cricket_vision.calibration.cricket_pitch_geometry import (
+    CALIBRATION_V2_WORLD_ORDER,
     CANONICAL_COORDINATE_SYSTEM,
+    CRICVISION_PITCH_V1,
     PITCH_LENGTH_M,
     PITCH_WIDTH_M,
     calibration_to_canonical_world,
-    canonical_to_calibration_world,
 )
 
 from ..schemas.delivery_physics import (
@@ -27,6 +28,8 @@ from ..schemas.delivery_physics import (
     DeliveryPhysicsResult,
     FitDiagnostics,
     FittedTrajectoryParameters,
+    GeometryValidationResult,
+    GeometryValidity,
     LateralMovementResult,
     LineLengthResult,
     MetricAvailability,
@@ -34,7 +37,10 @@ from ..schemas.delivery_physics import (
     PostBounceMovementResult,
     RejectedObservation,
     SpeedAnalytics,
+    OverallStumpToStumpSpeed,
+    StumpPlaneCrossing,
     TrajectorySample,
+    WorldCoordinateSystem,
 )
 from ..schemas.video_analysis import (
     PrimaryBounceResult,
@@ -44,7 +50,6 @@ from ..schemas.video_analysis import (
 from .video_calibration_v2_service import (
     image_point_to_pitch_ground,
     load_video_calibration_v2,
-    pitch_ground_point_to_image,
 )
 from .video_camera_pose_service import load_wicket_camera_pose
 
@@ -59,6 +64,10 @@ MIN_REASONABLE_SPEED_MPS = 4.0
 MAX_LATERAL_ACCELERATION_MPS2 = 20.0
 MAX_FORWARD_DECELERATION_MPS2 = 15.0
 OUTLIER_FLOOR_PX = 8.0
+MIN_IN_PITCH_FRACTION = 0.85
+REPROJECTION_THRESHOLD_FRACTION = 0.02
+REPROJECTION_THRESHOLD_MIN_PX = 25.0
+REPROJECTION_CALIBRATION_RMSE_MULTIPLIER = 2.5
 
 # CricVision coaching categories. These are not official MCC definitions.
 LENGTH_BANDS_M = (
@@ -119,10 +128,15 @@ def analyse_delivery_physics(
     width: int,
     height: int,
     total_frames: int,
+    calibration_override: CameraCalibration | None = None,
 ) -> DeliveryPhysicsResult:
     """Analyse one persisted tracker result without rerunning detection."""
     started = time.perf_counter()
-    calibration = load_physics_calibration(analysis_id, width, height)
+    calibration = calibration_override or load_physics_calibration(
+        analysis_id,
+        width,
+        height,
+    )
     accepted, rejected = canonical_observations(primary_track, detections, fps)
 
     if len(accepted) < MIN_IMAGE_OBSERVATIONS:
@@ -172,12 +186,163 @@ def analyse_delivery_physics(
     )
 
 
+def _geometry_validation_rank(
+    validation: GeometryValidationResult | None,
+) -> tuple[int, float, float]:
+    """Higher tuple values mean better metric geometry for track refinement."""
+    if validation is None:
+        return (0, float("-inf"), -1.0)
+    valid = 1 if validation.validity == "VALID_METRIC_3D" else 0
+    median = (
+        validation.median_reprojection_px
+        if validation.median_reprojection_px is not None
+        else float("inf")
+    )
+    in_pitch = (
+        validation.in_pitch_fraction
+        if validation.in_pitch_fraction is not None
+        else -1.0
+    )
+    return (valid, -median, in_pitch)
+
+
+def refine_metric_calibration_with_track(
+    analysis_id: str,
+    primary_track: list[TrackingPoint],
+    detections: VideoBallDetectionsDocument,
+    tracker_bounce: PrimaryBounceResult | None,
+    fps: float,
+    width: int,
+    height: int,
+    total_frames: int,
+    current_physics: DeliveryPhysicsResult,
+) -> DeliveryPhysicsResult | None:
+    """Re-score registration candidates with ball-track geometry validation."""
+    current_rank = _geometry_validation_rank(current_physics.geometry_validation)
+    if current_physics.geometry_validation is not None and (
+        current_physics.geometry_validation.validity == "VALID_METRIC_3D"
+    ):
+        return None
+
+    from .wicket_box_calibration_service import (
+        build_camera_calibration_from_pose_candidate,
+        list_track_refineable_calibration_candidates,
+        load_wicket_box_calibration,
+        persist_pose_candidate_as_accepted,
+    )
+
+    candidates = list_track_refineable_calibration_candidates(analysis_id)
+    if not candidates:
+        return None
+
+    accepted, rejected = canonical_observations(primary_track, detections, fps)
+    if len(accepted) < MIN_METRIC_OBSERVATIONS:
+        return None
+
+    best_candidate = None
+    best_physics: DeliveryPhysicsResult | None = None
+    best_rank = current_rank
+
+    for candidate in candidates:
+        try:
+            calibration = build_camera_calibration_from_pose_candidate(
+                candidate,
+                width,
+                height,
+            )
+            physics = _analyse_metric_3d(
+                analysis_id=analysis_id,
+                observations=accepted,
+                initially_rejected=rejected,
+                calibration=calibration,
+                tracker_bounce=tracker_bounce,
+                fps=fps,
+                total_frames=total_frames,
+                processing_started=time.perf_counter(),
+            )
+        except (ValueError, FloatingPointError, np.linalg.LinAlgError):
+            continue
+        rank = _geometry_validation_rank(physics.geometry_validation)
+        if rank > best_rank:
+            best_rank = rank
+            best_candidate = candidate
+            best_physics = physics
+
+    if best_physics is None or best_candidate is None:
+        return None
+
+    stored = load_wicket_box_calibration(analysis_id)
+    persist_pose_candidate_as_accepted(analysis_id, best_candidate, stored)
+    return best_physics
+
+
+def _physics_calibration_from_accepted_wicket_box(
+    analysis_id: str,
+    width: int,
+    height: int,
+) -> CameraCalibration | None:
+    try:
+        from .wicket_box_calibration_service import (
+            load_active_accepted_wicket_box_calibration,
+        )
+
+        snapshot = load_active_accepted_wicket_box_calibration(analysis_id)
+    except Exception:
+        return None
+    if snapshot is None:
+        return None
+    camera_matrix = np.asarray(snapshot["camera_matrix"], dtype=np.float64)
+    rotation_matrix = np.asarray(snapshot["rotation_matrix"], dtype=np.float64)
+    translation = np.asarray(
+        snapshot["translation_vector"],
+        dtype=np.float64,
+    ).reshape(3, 1)
+    rotation_vector = np.asarray(
+        snapshot["rotation_vector"],
+        dtype=np.float64,
+    ).reshape(3, 1)
+    projection = camera_matrix @ np.hstack([rotation_matrix, translation])
+    rmse = snapshot.get("reprojection_rmse_px")
+    confidence_score = (
+        _clamp(1.0 - float(rmse) / 20.0)
+        if rmse is not None
+        else 0.7
+    )
+    distortion = snapshot.get("distortion_coefficients") or [0.0] * 5
+    landmarks = snapshot.get("stump_landmarks") or []
+    return CameraCalibration(
+        mode="METRIC_3D",
+        confidence=_grade(confidence_score),
+        world_coordinate_system=CRICVISION_PITCH_V1,
+        image_width=width,
+        image_height=height,
+        camera_matrix=camera_matrix.tolist(),
+        distortion_coefficients=[float(value) for value in distortion],
+        rotation_vector=rotation_vector.reshape(-1).tolist(),
+        rotation_matrix=rotation_matrix.tolist(),
+        translation_vector=translation.reshape(-1).tolist(),
+        projection_matrix=projection.tolist(),
+        correspondences_used=len(landmarks),
+        reprojection_error_px=float(rmse) if rmse is not None else None,
+        calibration_confidence=confidence_score,
+        warnings=["Using accepted wicket-box calibration snapshot."],
+    )
+
+
 def load_physics_calibration(
     analysis_id: str,
     width: int,
     height: int,
 ) -> CameraCalibration:
     """Load the strongest already-confirmed calibration without fabricating it."""
+    wicket_box = _physics_calibration_from_accepted_wicket_box(
+        analysis_id,
+        width,
+        height,
+    )
+    if wicket_box is not None:
+        return wicket_box
+
     try:
         from .scene_calibration_service import (
             load_scene_calibration,
@@ -194,6 +359,7 @@ def load_physics_calibration(
                 return CameraCalibration(
                     mode="METRIC_3D",
                     confidence=_grade(confidence_score),
+                    world_coordinate_system=CRICVISION_PITCH_V1,
                     image_width=width,
                     image_height=height,
                     camera_matrix=accepted.camera_matrix,
@@ -219,6 +385,7 @@ def load_physics_calibration(
             return CameraCalibration(
                 mode="METRIC_GROUND_PLANE",
                 confidence=_grade(confidence_score),
+                world_coordinate_system=CRICVISION_PITCH_V1,
                 image_width=width,
                 image_height=height,
                 image_to_pitch_homography=(
@@ -312,6 +479,7 @@ def load_physics_calibration(
             return CameraCalibration(
                 mode="METRIC_3D",
                 confidence=_grade(confidence_score),
+                world_coordinate_system=CALIBRATION_V2_WORLD_ORDER,
                 image_width=width,
                 image_height=height,
                 camera_matrix=camera_matrix.tolist(),
@@ -351,6 +519,7 @@ def load_physics_calibration(
         return CameraCalibration(
             mode="METRIC_GROUND_PLANE",
             confidence=_grade(confidence_score),
+            world_coordinate_system=CRICVISION_PITCH_V1,
             image_width=width,
             image_height=height,
             image_to_pitch_homography=(
@@ -556,6 +725,7 @@ def _analyse_metric_3d(
         fit_rmse=fit.rmse_px,
     )
     speed = _speed_analytics(samples, bounce, metric_observations)
+    overall_stump = _overall_stump_to_stump_speed(samples)
     lateral = _lateral_movement(
         params,
         fit.model_name,
@@ -591,6 +761,26 @@ def _analyse_metric_3d(
     if speed.earliest_measured_speed_kmh is None:
         warnings.append("Metric speed was rejected as physically implausible.")
 
+    geometry_validation = validate_metric_geometry(
+        samples,
+        metric_observations,
+        calibration,
+    )
+    if geometry_validation.validity != "VALID_METRIC_3D":
+        warnings.append(
+            geometry_validation.reason
+            or "Metric geometry failed bidirectional reprojection validation."
+        )
+        samples = _strip_world_from_samples(samples)
+        bounce = bounce.model_copy(
+            update={
+                "world_x_m": None,
+                "world_y_m": None,
+                "distance_from_striker_wicket_m": None,
+                "lateral_offset_m": None,
+            }
+        )
+
     return DeliveryPhysicsResult(
         status=(
             "SUCCESS"
@@ -601,6 +791,7 @@ def _analyse_metric_3d(
         analysis_id=analysis_id,
         coordinate_system=COORDINATE_SYSTEM_DESCRIPTION,
         calibration=calibration,
+        geometry_validation=geometry_validation,
         fitted_parameters=_parameter_contract(
             params,
             fit.model_name,
@@ -614,6 +805,7 @@ def _analyse_metric_3d(
         delivery_interval=interval,
         bounce=bounce,
         speed=speed,
+        overall_stump_to_stump=overall_stump,
         pre_bounce_lateral_movement=lateral,
         post_bounce_movement=post_movement,
         line_and_length=line_length,
@@ -887,16 +1079,24 @@ def _project_observations(
     return _project_physics_world(world, calibration)
 
 
+def _calibration_world_from_physics(
+    world: np.ndarray,
+    calibration: CameraCalibration,
+) -> np.ndarray:
+    """Adapt physics canonical coords into the camera pose's object frame."""
+    points = np.asarray(world, dtype=np.float64)
+    if points.ndim == 1:
+        points = points.reshape(1, 3)
+    if calibration.world_coordinate_system == CALIBRATION_V2_WORLD_ORDER:
+        return np.column_stack([points[:, 1], points[:, 0], points[:, 2]])
+    return points
+
+
 def _project_physics_world(
     world: np.ndarray,
     calibration: CameraCalibration,
 ) -> np.ndarray:
-    # Explicit compatibility adapter: Calibration V2 stores
-    # longitudinal/lateral/up while the permanent model is
-    # lateral/longitudinal/up.
-    calibration_world = np.column_stack(
-        [world[:, 1], world[:, 0], world[:, 2]]
-    ).astype(np.float64)
+    calibration_world = _calibration_world_from_physics(world, calibration)
     projected, _ = cv2.projectPoints(
         calibration_world,
         np.asarray(calibration.rotation_vector, dtype=np.float64),
@@ -1127,6 +1327,11 @@ def _metric_samples(
     samples: list[TrajectorySample] = []
     origin = observations[0].timestamp_seconds
     terminal_reason = "maximum_projection_horizon"
+    last_pixel: tuple[float, float] | None = None
+    pixel_steps: list[float] = []
+    for item in accepted:
+        if item.pixel_x is not None and item.pixel_y is not None:
+            last_pixel = (float(item.pixel_x), float(item.pixel_y))
 
     for frame in range(first_frame, maximum_terminal + 1):
         timestamp = frame / fps
@@ -1164,11 +1369,20 @@ def _metric_samples(
         if world[1] >= PITCH_LENGTH_M:
             terminal_reason = "striker_wicket_plane"
         pixel = _project_physics_world(world.reshape(1, 3), calibration)[0]
+        if frame > last_observed and last_pixel is not None:
+            jump = float(np.linalg.norm(pixel - np.asarray(last_pixel)))
+            median_step = float(np.median(pixel_steps)) if pixel_steps else 24.0
+            jump_limit = max(80.0, median_step * 4.0)
+            if jump > jump_limit:
+                terminal_reason = "pixel_reprojection_discontinuity"
+                break
         nearest_index = int(np.argmin(np.abs(accepted_frames - frame)))
         nearest_frame = int(accepted_frames[nearest_index])
         delta_frames = abs(frame - nearest_frame)
         if frame in accepted_by_frame:
             provenance = "OBSERVED"
+            observed = accepted_by_frame[frame]
+            pixel = np.asarray([observed.pixel_x, observed.pixel_y], dtype=np.float64)
         elif frame <= last_observed:
             provenance = "RECONSTRUCTED"
         else:
@@ -1198,6 +1412,25 @@ def _metric_samples(
                 nearest_observation_delta_seconds=round(delta_frames / fps, 6),
             )
         )
+        if frame in accepted_by_frame:
+            last_pixel = (float(pixel[0]), float(pixel[1]))
+            if samples and samples[-1].pixel_x is not None and samples[-1].pixel_y is not None:
+                pixel_steps.append(
+                    math.hypot(
+                        float(pixel[0]) - samples[-1].pixel_x,
+                        float(pixel[1]) - samples[-1].pixel_y,
+                    )
+                )
+        elif last_pixel is not None and pixel_steps:
+            last_pixel = (float(pixel[0]), float(pixel[1]))
+            pixel_steps.append(
+                math.hypot(
+                    float(pixel[0]) - samples[-1].pixel_x,
+                    float(pixel[1]) - samples[-1].pixel_y,
+                )
+                if samples[-1].pixel_x is not None and samples[-1].pixel_y is not None
+                else 0.0
+            )
         if terminal_reason == "striker_wicket_plane":
             break
 
@@ -1567,6 +1800,161 @@ def _ground_or_image_bounce(
     )
 
 
+def _overall_stump_to_stump_speed(
+    samples: list[TrajectorySample],
+) -> OverallStumpToStumpSpeed:
+    """Path-average speed between bowler (y=0) and striker (y=PITCH_LENGTH_M) planes."""
+    unavailable = OverallStumpToStumpSpeed(
+        status="UNAVAILABLE",
+        unavailable_reason="Metric 3D trajectory does not span both wicket planes.",
+    )
+    if len(samples) < 2:
+        return unavailable
+
+    metric_samples = [
+        sample
+        for sample in samples
+        if sample.world_y_m is not None
+        and sample.world_x_m is not None
+        and sample.world_z_m is not None
+    ]
+    if len(metric_samples) < 2:
+        return unavailable
+
+    start = _interpolate_wicket_plane_crossing(metric_samples, plane_y=0.0)
+    end = _interpolate_wicket_plane_crossing(metric_samples, plane_y=PITCH_LENGTH_M)
+    if start is None or end is None:
+        return unavailable.model_copy(
+            update={
+                "unavailable_reason": (
+                    "Trajectory samples do not cross both non-striker and "
+                    "striker wicket planes."
+                )
+            }
+        )
+    if end.timestamp_seconds <= start.timestamp_seconds:
+        return unavailable.model_copy(
+            update={
+                "unavailable_reason": (
+                    "Striker wicket crossing occurs before non-striker crossing."
+                )
+            }
+        )
+
+    interval = [
+        sample
+        for sample in metric_samples
+        if start.timestamp_seconds <= sample.timestamp_seconds <= end.timestamp_seconds
+    ]
+    if len(interval) < 2:
+        interval = [metric_samples[0], metric_samples[-1]]
+
+    travelled = 0.0
+    for index in range(1, len(interval)):
+        previous = interval[index - 1]
+        current = interval[index]
+        travelled += math.sqrt(
+            (current.world_x_m - previous.world_x_m) ** 2
+            + (current.world_y_m - previous.world_y_m) ** 2
+            + (current.world_z_m - previous.world_z_m) ** 2
+        )
+    elapsed = end.timestamp_seconds - start.timestamp_seconds
+    if elapsed <= 0 or travelled <= 0:
+        return unavailable
+
+    speed_mps = travelled / elapsed
+    if speed_mps < MIN_REASONABLE_SPEED_MPS or speed_mps > MAX_REASONABLE_SPEED_MPS:
+        return unavailable.model_copy(
+            update={
+                "unavailable_reason": (
+                    "Overall stump-to-stump speed lies outside plausible bounds."
+                )
+            }
+        )
+
+    provenance_counts = {"OBSERVED": 0, "RECONSTRUCTED": 0, "PROJECTED": 0}
+    for sample in interval:
+        provenance_counts[sample.provenance] = (
+            provenance_counts.get(sample.provenance, 0) + 1
+        )
+    total = max(1, len(interval))
+    observed_fraction = provenance_counts["OBSERVED"] / total
+    recovered_fraction = provenance_counts["RECONSTRUCTED"] / total
+    projected_fraction = provenance_counts["PROJECTED"] / total
+    status = "MEASURED" if projected_fraction <= 0.05 else "PARTIALLY_PROJECTED"
+    confidence: ConfidenceGrade = (
+        "HIGH"
+        if projected_fraction <= 0.05 and observed_fraction >= 0.5
+        else "MEDIUM"
+        if projected_fraction <= 0.35
+        else "LOW"
+    )
+
+    return OverallStumpToStumpSpeed(
+        speed_mps=round(speed_mps, 3),
+        speed_kph=round(speed_mps * 3.6, 2),
+        start_time_seconds=round(start.timestamp_seconds, 6),
+        end_time_seconds=round(end.timestamp_seconds, 6),
+        travelled_distance_m=round(travelled, 3),
+        start_crossing=start,
+        end_crossing=end,
+        observed_fraction=round(observed_fraction, 4),
+        recovered_fraction=round(recovered_fraction, 4),
+        projected_fraction=round(projected_fraction, 4),
+        confidence=confidence,
+        status=status,
+    )
+
+
+def _interpolate_wicket_plane_crossing(
+    samples: list[TrajectorySample],
+    *,
+    plane_y: float,
+) -> StumpPlaneCrossing | None:
+    for index in range(1, len(samples)):
+        previous = samples[index - 1]
+        current = samples[index]
+        y0 = previous.world_y_m
+        y1 = current.world_y_m
+        if y0 is None or y1 is None:
+            continue
+        if y0 == y1:
+            if abs(y0 - plane_y) < 1e-6:
+                return StumpPlaneCrossing(
+                    timestamp_seconds=previous.timestamp_seconds,
+                    world_x_m=previous.world_x_m or 0.0,
+                    world_y_m=plane_y,
+                    world_z_m=max(0.0, previous.world_z_m or 0.0),
+                )
+            continue
+        if (y0 - plane_y) * (y1 - plane_y) > 0:
+            continue
+        fraction = (plane_y - y0) / (y1 - y0)
+        fraction = max(0.0, min(1.0, fraction))
+        timestamp = previous.timestamp_seconds + fraction * (
+            current.timestamp_seconds - previous.timestamp_seconds
+        )
+        return StumpPlaneCrossing(
+            timestamp_seconds=round(timestamp, 6),
+            world_x_m=round(
+                (previous.world_x_m or 0.0)
+                + fraction * ((current.world_x_m or 0.0) - (previous.world_x_m or 0.0)),
+                6,
+            ),
+            world_y_m=plane_y,
+            world_z_m=round(
+                max(
+                    0.0,
+                    (previous.world_z_m or 0.0)
+                    + fraction
+                    * ((current.world_z_m or 0.0) - (previous.world_z_m or 0.0)),
+                ),
+                6,
+            ),
+        )
+    return None
+
+
 def _speed_analytics(
     samples: list[TrajectorySample],
     bounce: BouncePhysicsResult,
@@ -1856,6 +2244,153 @@ def failed_physics_result(
     return result.model_copy(update={"status": "FAILED"})
 
 
+def _reprojection_threshold_px(calibration: CameraCalibration) -> float:
+    base = min(calibration.image_width, calibration.image_height) * (
+        REPROJECTION_THRESHOLD_FRACTION
+    )
+    threshold = max(REPROJECTION_THRESHOLD_MIN_PX, base)
+    if calibration.reprojection_error_px is not None:
+        threshold = max(
+            threshold,
+            calibration.reprojection_error_px * REPROJECTION_CALIBRATION_RMSE_MULTIPLIER,
+        )
+    return threshold
+
+
+def _world_point_in_pitch(x_m: float, y_m: float, z_m: float) -> bool:
+    half_width = PITCH_WIDTH_M / 2
+    return (
+        abs(x_m) <= half_width + 0.05
+        and -0.05 <= y_m <= PITCH_LENGTH_M + 0.05
+        and z_m >= -0.05
+    )
+
+
+def validate_metric_geometry(
+    samples: list[TrajectorySample],
+    observations: list[ObservedBallPoint],
+    calibration: CameraCalibration,
+) -> GeometryValidationResult:
+    """Bidirectional world→image check against accepted primary-track pixels."""
+    if calibration.mode != "METRIC_3D":
+        return GeometryValidationResult(
+            validity="IMAGE_SPACE_ONLY",
+            reason="Metric geometry validation requires METRIC_3D calibration.",
+        )
+
+    sample_by_frame = {item.frame_index: item for item in samples}
+    errors: list[float] = []
+    in_pitch = 0
+    checked = 0
+    half_width = PITCH_WIDTH_M / 2
+
+    for observation in observations:
+        sample = sample_by_frame.get(observation.frame_index)
+        if (
+            sample is None
+            or sample.world_x_m is None
+            or sample.world_y_m is None
+            or sample.world_z_m is None
+        ):
+            continue
+        checked += 1
+        projected = _project_physics_world(
+            np.array(
+                [[sample.world_x_m, sample.world_y_m, sample.world_z_m]],
+                dtype=np.float64,
+            ),
+            calibration,
+        )[0]
+        errors.append(
+            float(
+                np.linalg.norm(
+                    projected - np.asarray([observation.pixel_x, observation.pixel_y])
+                )
+            )
+        )
+        if _world_point_in_pitch(
+            sample.world_x_m,
+            sample.world_y_m,
+            sample.world_z_m,
+        ):
+            in_pitch += 1
+
+    if checked == 0:
+        return GeometryValidationResult(
+            validity="INVALID_REPROJECTION",
+            reason="No overlapping physics samples and observations for validation.",
+        )
+
+    error_array = np.asarray(errors, dtype=np.float64)
+    threshold = _reprojection_threshold_px(calibration)
+    in_pitch_fraction = in_pitch / checked
+    mean_px = float(np.mean(error_array))
+    median_px = float(np.median(error_array))
+    p95_px = float(np.percentile(error_array, 95))
+    max_px = float(np.max(error_array))
+
+    if in_pitch_fraction < MIN_IN_PITCH_FRACTION:
+        return GeometryValidationResult(
+            validity="OUTSIDE_PITCH_GEOMETRY",
+            mean_reprojection_px=round(mean_px, 6),
+            median_reprojection_px=round(median_px, 6),
+            p95_reprojection_px=round(p95_px, 6),
+            max_reprojection_px=round(max_px, 6),
+            in_pitch_fraction=round(in_pitch_fraction, 6),
+            threshold_px=round(threshold, 6),
+            reason=(
+                f"Only {in_pitch}/{checked} trajectory points lie inside pitch "
+                f"bounds (±{half_width:.3f} m lateral, 0–{PITCH_LENGTH_M:.2f} m "
+                "longitudinal)."
+            ),
+        )
+
+    if median_px > threshold or max_px > threshold * 2.0:
+        return GeometryValidationResult(
+            validity="INVALID_REPROJECTION",
+            mean_reprojection_px=round(mean_px, 6),
+            median_reprojection_px=round(median_px, 6),
+            p95_reprojection_px=round(p95_px, 6),
+            max_reprojection_px=round(max_px, 6),
+            in_pitch_fraction=round(in_pitch_fraction, 6),
+            threshold_px=round(threshold, 6),
+            reason=(
+                f"Reprojection exceeds resolution-relative threshold "
+                f"({median_px:.1f}px median / {max_px:.1f}px max vs "
+                f"{threshold:.1f}px)."
+            ),
+        )
+
+    return GeometryValidationResult(
+        validity="VALID_METRIC_3D",
+        mean_reprojection_px=round(mean_px, 6),
+        median_reprojection_px=round(median_px, 6),
+        p95_reprojection_px=round(p95_px, 6),
+        max_reprojection_px=round(max_px, 6),
+        in_pitch_fraction=round(in_pitch_fraction, 6),
+        threshold_px=round(threshold, 6),
+    )
+
+
+def _strip_world_from_samples(
+    samples: list[TrajectorySample],
+) -> list[TrajectorySample]:
+    return [
+        sample.model_copy(
+            update={
+                "world_x_m": None,
+                "world_y_m": None,
+                "world_z_m": None,
+                "velocity_x_mps": None,
+                "velocity_y_mps": None,
+                "velocity_z_mps": None,
+                "speed_mps": None,
+            }
+        )
+        for sample in samples
+    ]
+
+
 def _unavailable_bounce() -> BouncePhysicsResult:
     return BouncePhysicsResult(
         status="INSUFFICIENT_EVIDENCE",
@@ -1932,19 +2467,6 @@ def _image_to_physics_ground(
         0.0,
     )
     return canonical[0], canonical[1]
-
-
-def physics_ground_to_image(
-    homography: Sequence[Sequence[float]],
-    lateral_x_m: float,
-    longitudinal_y_m: float,
-) -> tuple[float, float]:
-    longitudinal, lateral, _ = canonical_to_calibration_world(
-        lateral_x_m,
-        longitudinal_y_m,
-        0.0,
-    )
-    return pitch_ground_point_to_image(homography, longitudinal, lateral)
 
 
 def _grade(score: float) -> ConfidenceGrade:

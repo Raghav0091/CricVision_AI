@@ -24,6 +24,13 @@ CalibrationMode = Literal[
     "IMAGE_SPACE_ONLY",
 ]
 CalibrationConfidence = Literal["HIGH", "MEDIUM", "LOW", "UNAVAILABLE"]
+WorldCoordinateSystem = Literal["CRICVISION_PITCH_V1", "CALIBRATION_V2"]
+GeometryValidity = Literal[
+    "VALID_METRIC_3D",
+    "INVALID_REPROJECTION",
+    "OUTSIDE_PITCH_GEOMETRY",
+    "IMAGE_SPACE_ONLY",
+]
 PhysicsStatus = Literal[
     "SUCCESS",
     "PARTIAL",
@@ -64,6 +71,7 @@ class RejectedObservation(PhysicsModel):
 class CameraCalibration(PhysicsModel):
     mode: CalibrationMode
     confidence: CalibrationConfidence
+    world_coordinate_system: WorldCoordinateSystem = "CRICVISION_PITCH_V1"
     image_width: int = Field(gt=0)
     image_height: int = Field(gt=0)
     camera_matrix: list[list[float]] | None = None
@@ -151,6 +159,38 @@ class SpeedAnalytics(PhysicsModel):
     unavailable_reason: str | None = None
 
 
+class StumpPlaneCrossing(PhysicsModel):
+    timestamp_seconds: float = Field(ge=0)
+    world_x_m: float
+    world_y_m: float
+    world_z_m: float = Field(ge=0)
+
+
+OverallStumpToStumpStatus = Literal[
+    "MEASURED",
+    "PARTIALLY_PROJECTED",
+    "UNAVAILABLE",
+]
+
+
+class OverallStumpToStumpSpeed(PhysicsModel):
+    """Average speed between non-striker and striker wicket plane crossings."""
+
+    speed_mps: float | None = Field(default=None, ge=0)
+    speed_kph: float | None = Field(default=None, ge=0)
+    start_time_seconds: float | None = Field(default=None, ge=0)
+    end_time_seconds: float | None = Field(default=None, ge=0)
+    travelled_distance_m: float | None = Field(default=None, ge=0)
+    start_crossing: StumpPlaneCrossing | None = None
+    end_crossing: StumpPlaneCrossing | None = None
+    observed_fraction: float = Field(default=0.0, ge=0, le=1)
+    recovered_fraction: float = Field(default=0.0, ge=0, le=1)
+    projected_fraction: float = Field(default=0.0, ge=0, le=1)
+    confidence: ConfidenceGrade = "INSUFFICIENT_EVIDENCE"
+    status: OverallStumpToStumpStatus = "UNAVAILABLE"
+    unavailable_reason: str | None = None
+
+
 class LateralMovementResult(PhysicsModel):
     movement_m: float | None = None
     movement_cm: float | None = None
@@ -233,6 +273,17 @@ class PhysicsPitchGeometry(PhysicsModel):
     pitch_width_m: float = PITCH_WIDTH_M
 
 
+class GeometryValidationResult(PhysicsModel):
+    validity: GeometryValidity
+    mean_reprojection_px: float | None = Field(default=None, ge=0)
+    median_reprojection_px: float | None = Field(default=None, ge=0)
+    p95_reprojection_px: float | None = Field(default=None, ge=0)
+    max_reprojection_px: float | None = Field(default=None, ge=0)
+    in_pitch_fraction: float | None = Field(default=None, ge=0, le=1)
+    threshold_px: float | None = Field(default=None, ge=0)
+    reason: str | None = None
+
+
 class DeliveryPhysicsResult(PhysicsModel):
     physics_engine_version: Literal["v1"] = "v1"
     status: PhysicsStatus
@@ -241,6 +292,7 @@ class DeliveryPhysicsResult(PhysicsModel):
     pitch_geometry: PhysicsPitchGeometry = Field(
         default_factory=PhysicsPitchGeometry
     )
+    geometry_validation: GeometryValidationResult | None = None
     calibration: CameraCalibration
     fitted_parameters: FittedTrajectoryParameters | None = None
     trajectory_samples: list[TrajectorySample] = Field(default_factory=list)
@@ -249,6 +301,9 @@ class DeliveryPhysicsResult(PhysicsModel):
     delivery_interval: DeliveryInterval
     bounce: BouncePhysicsResult
     speed: SpeedAnalytics
+    overall_stump_to_stump: OverallStumpToStumpSpeed = Field(
+        default_factory=OverallStumpToStumpSpeed
+    )
     pre_bounce_lateral_movement: LateralMovementResult
     post_bounce_movement: PostBounceMovementResult
     line_and_length: LineLengthResult

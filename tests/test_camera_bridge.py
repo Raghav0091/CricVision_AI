@@ -119,6 +119,45 @@ def test_synthetic_camera_bridge_api_normalizes_existing_camera() -> None:
     assert camera["extrinsic_convention"] == "X_CAMERA = R * X_CRICVISION_WORLD + T"
 
 
+def test_active_accepted_wicket_box_has_first_precedence(
+    bridge_analysis_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_url = _write_setup_frame(bridge_analysis_root)
+    wicket_snapshot = {
+        "schema_version": "wicket_box_calibration_accepted_v1",
+        "analysis_id": ANALYSIS_ID,
+        "frozen": True,
+        "calibration_frame_index": 10,
+        "source_image_width": 720,
+        "source_image_height": 1280,
+        "camera_matrix": [[900.0, 0.0, 351.0], [0.0, 880.0, 626.0], [0.0, 0.0, 1.0]],
+        "rotation_matrix": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        "translation_vector": [0.0, 1.0, 10.0],
+        "rotation_vector": [0.0, 0.0, 0.0],
+        "camera_world_position": [0.0, -1.0, -10.0],
+        "distortion_coefficients": [0.0] * 5,
+    }
+    monkeypatch.setattr(
+        bridge,
+        "load_active_accepted_wicket_box_calibration",
+        lambda analysis_id: wicket_snapshot,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "load_scene_calibration",
+        lambda analysis_id: pytest.fail("scene calibration must not run"),
+    )
+
+    result = bridge.load_analysis_camera_bridge(ANALYSIS_ID)
+
+    assert result.camera is not None
+    assert result.camera.source == "ACCEPTED_WICKET_BOX_CALIBRATION"
+    assert result.camera.accepted is True
+    assert result.camera.setup_frame is not None
+    assert result.camera.setup_frame.image_url == image_url
+
+
 def test_active_accepted_calibration_has_first_precedence(
     bridge_analysis_root: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -142,6 +181,9 @@ def test_active_accepted_calibration_has_first_precedence(
         rotation_matrix=[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
         translation_vector=[0.0, 1.0, 10.0],
         camera_world_position=[0.0, -1.0, 2.0],
+    )
+    monkeypatch.setattr(
+        bridge, "load_active_accepted_wicket_box_calibration", lambda analysis_id: None
     )
     monkeypatch.setattr(bridge, "load_scene_calibration", lambda analysis_id: scene)
     monkeypatch.setattr(
@@ -179,6 +221,9 @@ def test_refined_scene_candidate_is_unaccepted_and_precedes_registration(
         projected_pitch_geometry=None,
         warnings=[],
     )
+    monkeypatch.setattr(
+        bridge, "load_active_accepted_wicket_box_calibration", lambda analysis_id: None
+    )
     monkeypatch.setattr(bridge, "load_scene_calibration", lambda analysis_id: scene)
     monkeypatch.setattr(
         bridge,
@@ -213,6 +258,9 @@ def test_selected_real_registration_is_last_camera_fallback(
         projected_pitch_geometry=None,
     )
     monkeypatch.setattr(bridge, "load_scene_calibration", lambda analysis_id: scene)
+    monkeypatch.setattr(
+        bridge, "load_active_accepted_wicket_box_calibration", lambda analysis_id: None
+    )
     monkeypatch.setattr(
         bridge, "load_real_pitch_registration", lambda analysis_id: registration
     )

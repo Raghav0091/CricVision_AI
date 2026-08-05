@@ -54,6 +54,15 @@ CANONICAL_COORDINATE_SYSTEM = (
     "striker; +y points toward the striker; +z is upward."
 )
 
+# CRICVISION_PITCH_V1 / ReplayPayloadV1 / physics trajectory contract:
+#   world_x_m = lateral displacement across pitch width (±pitch_width/2)
+#   world_y_m = longitudinal progress bowler→striker (0 .. pitch_length)
+#   world_z_m = height above pitch surface (≥0 on or above ground)
+# Legacy Calibration V2 helpers below use longitudinal-X / lateral-Y ordering;
+# adapt through calibration_to_canonical_world() before publishing replay data.
+CRICVISION_PITCH_V1 = "CRICVISION_PITCH_V1"
+CALIBRATION_V2_WORLD_ORDER = "CALIBRATION_V2"
+
 
 @dataclass(frozen=True)
 class CricketPitchDimensions:

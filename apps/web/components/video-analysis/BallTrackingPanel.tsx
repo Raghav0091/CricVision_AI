@@ -1,22 +1,31 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import {
+  getVideoBallDetectionResult,
   getVideoBallTrackingJob,
   getVideoBallTrackingResult,
   startVideoBallTracking,
   type DeliveryPhysicsResult,
   type VideoAnalysisPreparedResponse,
+  type VideoBallDetectionFrame,
   type VideoBallDetectionResultResponse,
   type VideoBallTrackingJobStatus,
   type VideoBallTrackingResultResponse
 } from "@/lib/api";
+import {
+  buildReviewCandidates,
+  DEFAULT_BALL_REVIEW_TOGGLES,
+  type BallReviewDisplayToggles
+} from "@/lib/ball-analysis-review";
 
 import { MEDIA_FIT_CLASS } from "./AnalysisMediaStage";
+import { BallTrackOverlay } from "./BallTrackOverlay";
 
 
 type JobView = {
@@ -140,6 +149,16 @@ function PhysicsAnalytics({ physics }: { physics: DeliveryPhysicsResult }) {
     ["Earliest measured speed", metric(physics.speed.earliest_measured_speed_kmh, " km/h")],
     ["Average pre-bounce", metric(physics.speed.average_pre_bounce_speed_kmh, " km/h")],
     ["Speed at bounce", metric(physics.speed.speed_at_bounce_kmh, " km/h")],
+    [
+      "Overall stump-to-stump",
+      physics.overall_stump_to_stump.status === "UNAVAILABLE"
+        ? "Unavailable"
+        : `${physics.overall_stump_to_stump.speed_kph?.toFixed(1) ?? "—"} km/h${
+            physics.overall_stump_to_stump.status === "PARTIALLY_PROJECTED"
+              ? ` (est. ${Math.round((physics.overall_stump_to_stump.projected_fraction ?? 0) * 100)}% projected)`
+              : " (measured)"
+          }`
+    ],
     ["Pitching distance", metric(physics.bounce.distance_from_striker_wicket_m, " m", 2)],
     ["Line", physics.line_and_length.line],
     ["Length", physics.line_and_length.length],
@@ -218,7 +237,55 @@ function TrackingResult({
 }) {
   const summary = result.summary;
   const bounce = result.bounce;
+  const mainVideoRef = useRef<HTMLVideoElement | null>(null);
   const replayRef = useRef<HTMLVideoElement | null>(null);
+  const [detectionFrames, setDetectionFrames] = useState<VideoBallDetectionFrame[] | null>(
+    detection.frames ?? null
+  );
+  const [overlayToggles, setOverlayToggles] = useState<BallReviewDisplayToggles>(
+    DEFAULT_BALL_REVIEW_TOGGLES
+  );
+  const [mainTimeSeconds, setMainTimeSeconds] = useState(0);
+  const [mainFrameIndex, setMainFrameIndex] = useState<number | null>(null);
+  const [replayTimeSeconds, setReplayTimeSeconds] = useState(0);
+  const [replayFrameIndex, setReplayFrameIndex] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (detection.frames?.length) {
+      setDetectionFrames(detection.frames);
+      return;
+    }
+    let active = true;
+    void getVideoBallDetectionResult(analysis.analysis_id, true)
+      .then((loaded) => {
+        if (active && loaded?.frames?.length) {
+          setDetectionFrames(loaded.frames);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [analysis.analysis_id, detection.frames]);
+
+  const trackPoints = result.render_track?.length
+    ? result.render_track
+    : result.primary_track;
+
+  const overlayPoints = useMemo(
+    () => trackPoints.map((point) => ({
+      ...point,
+      image_x_px: point.x,
+      image_y_px: point.y
+    })),
+    [trackPoints]
+  );
+
+  const reviewCandidates = useMemo(
+    () => buildReviewCandidates(detectionFrames, result.candidate_diagnostics),
+    [detectionFrames, result.candidate_diagnostics]
+  );
+
   const bounceLabel =
     summary.bounce_detected === true
       ? `Yes (frame ${summary.bounce_frame ?? "—"})`
@@ -236,15 +303,25 @@ function TrackingResult({
     ["Track confidence", summary.track_confidence.toFixed(2)],
     ["Track quality", summary.track_quality]
   ];
-  const links = [
-    ["Download tracking JSON", summary.tracking_json_url],
-    ["Download tracking CSV", summary.tracking_csv_url],
-    ["Download tracking summary", summary.tracking_summary_url],
-    ["Open debug tracking video", summary.tracking_video_url],
+  const downloadLinks = [
+    ["Tracking JSON", summary.tracking_json_url],
+    ["Tracking CSV", summary.tracking_csv_url],
+    ["Tracking summary", summary.tracking_summary_url],
+    ["Debug tracking MP4", summary.tracking_video_url],
     ...(summary.delivery_replay_url
-      ? [["Open delivery replay", summary.delivery_replay_url] as const]
+      ? [["Delivery replay MP4", summary.delivery_replay_url] as const]
+      : []),
+    ...(summary.replay_payload_url
+      ? [["Replay payload JSON", summary.replay_payload_url] as const]
+      : []),
+    ...(summary.finalized_track_url
+      ? [["Finalized track JSON", summary.finalized_track_url] as const]
       : [])
   ];
+
+  const virtualReplayHref = summary.tracking_job_id
+    ? `/video-analysis/${encodeURIComponent(analysis.analysis_id)}/replay?tracking_job_id=${encodeURIComponent(summary.tracking_job_id)}`
+    : `/video-analysis/${encodeURIComponent(analysis.analysis_id)}/replay`;
 
   function setReplayRate(rate: number) {
     if (replayRef.current) {
@@ -252,11 +329,116 @@ function TrackingResult({
     }
   }
 
+  function syncMainOverlay() {
+    const video = mainVideoRef.current;
+    if (!video) return;
+    const timeSeconds = video.currentTime;
+    setMainTimeSeconds(timeSeconds);
+    if (analysis.fps > 0) {
+      setMainFrameIndex(Math.max(0, Math.round(timeSeconds * analysis.fps)));
+    }
+  }
+
+  function syncReplayOverlay() {
+    const video = replayRef.current;
+    if (!video) return;
+    const timeSeconds = video.currentTime;
+    setReplayTimeSeconds(timeSeconds);
+    if (analysis.fps > 0) {
+      setReplayFrameIndex(Math.max(0, Math.round(timeSeconds * analysis.fps)));
+    }
+  }
+
+  const imageSpaceOnly =
+    result.summary.physics_status === "IMAGE_SPACE_ONLY"
+    || result.physics?.status === "IMAGE_SPACE_ONLY"
+    || result.physics?.calibration.mode === "IMAGE_SPACE_ONLY";
+
+  const trackingComplete = result.status === "ready";
+
   return (
     <div className="mt-4 space-y-4">
+      <div className="rounded-xl border border-lime/25 bg-lime/[0.05] p-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-lime">
+              Tracking completed
+            </p>
+            <p className="mt-1 text-sm text-white/70">
+              {summary.message}
+            </p>
+            <p className="mt-1 text-xs text-white/45">
+              Track {frameRange(summary.track_start_frame, summary.track_end_frame)}
+              {" · "}
+              {summary.observed_track_points} observed
+              {" · "}
+              {summary.recovered_points} recovered
+            </p>
+          </div>
+          <Link
+            className="rounded-lg border border-lime/40 bg-lime px-3 py-2 text-xs font-black uppercase tracking-[0.08em] text-[#08100c] hover:bg-[#d7ff87]"
+            href={virtualReplayHref}
+          >
+            Open Virtual Replay
+          </Link>
+        </div>
+      </div>
+
       {result.status === "no_reliable_track" && (
         <p className="rounded-lg border border-[#ffca68]/30 bg-[#ffca68]/[0.05] px-3 py-2 text-sm leading-6 text-[#ffdc9a]">
           No coherent moving-ball track met the reliability threshold. Raw detection results remain available.
+        </p>
+      )}
+
+      {result.track_source_consistency_errors
+        && result.track_source_consistency_errors.length > 0 && (
+        <p className="rounded-lg border border-signal/30 bg-signal/10 px-3 py-2 text-sm leading-6 text-[#ffaaa6]">
+          {result.track_source_consistency_errors.join(" ")}
+        </p>
+      )}
+
+      {summary.track_source_consistent === false && (
+        <p className="rounded-lg border border-signal/30 bg-signal/10 px-3 py-2 text-sm leading-6 text-[#ffaaa6]">
+          Internal consistency error: replay renderers reference different source tracks.
+        </p>
+      )}
+
+      {trackingComplete && (
+        <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+          <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-white/45">
+            Main Tracking Video
+          </p>
+          <div className="relative mt-2 flex max-h-[min(42dvh,calc(100dvh-16rem))] min-h-[8rem] items-center justify-center overflow-hidden rounded-xl bg-[#050a08]">
+            <video
+              ref={mainVideoRef}
+              className={MEDIA_FIT_CLASS}
+              controls
+              preload="metadata"
+              src={analysis.original_video_url}
+              onTimeUpdate={syncMainOverlay}
+              onSeeked={syncMainOverlay}
+              onLoadedMetadata={syncMainOverlay}
+            />
+            <BallTrackOverlay
+              points={overlayPoints}
+              candidates={reviewCandidates}
+              toggles={overlayToggles}
+              currentTimeSeconds={mainTimeSeconds}
+              currentFrame={mainFrameIndex}
+              nativeWidth={analysis.width}
+              nativeHeight={analysis.height}
+              showCompleteTrail={trackingComplete}
+            />
+          </div>
+        </div>
+      )}
+
+      {imageSpaceOnly && (
+        <p className="rounded-lg border border-[#ffca68]/35 bg-[#ffca68]/[0.08] px-3 py-2 text-sm leading-6 text-[#ffdc9a]">
+          World measurements are unavailable for this analysis. Virtual replay shows the pitch without a measured 3D ball path.
+          {result.physics?.calibration.failure_reason
+            ? ` ${result.physics.calibration.failure_reason}`
+            : ""}
         </p>
       )}
 
@@ -278,14 +460,48 @@ function TrackingResult({
                 ))}
               </div>
             </div>
-            <div className="mt-2 flex max-h-[min(42dvh,calc(100dvh-16rem))] min-h-[8rem] items-center justify-center overflow-hidden rounded-xl bg-[#050a08] sm:max-h-[min(52dvh,calc(100dvh-14rem))]">
+            <div className="relative mt-2 flex max-h-[min(42dvh,calc(100dvh-16rem))] min-h-[8rem] items-center justify-center overflow-hidden rounded-xl bg-[#050a08] sm:max-h-[min(52dvh,calc(100dvh-14rem))]">
               <video
                 ref={replayRef}
                 className={MEDIA_FIT_CLASS}
                 controls
                 preload="metadata"
                 src={summary.delivery_replay_url}
+                onTimeUpdate={syncReplayOverlay}
+                onSeeked={syncReplayOverlay}
+                onLoadedMetadata={syncReplayOverlay}
               />
+              <BallTrackOverlay
+                points={overlayPoints}
+                candidates={reviewCandidates}
+                toggles={overlayToggles}
+                currentTimeSeconds={replayTimeSeconds}
+                currentFrame={replayFrameIndex}
+                nativeWidth={analysis.width}
+                nativeHeight={analysis.height}
+                showCompleteTrail={trackingComplete}
+              />
+            </div>
+            <div className="mt-2 flex flex-wrap gap-3 text-[11px] text-white/55">
+              {([
+                ["acceptedCandidates", "Accepted candidates"],
+                ["rejectedCandidates", "Rejected candidates"],
+                ["completeTrail", "Complete trail"]
+              ] as const).map(([key, label]) => (
+                <label key={key} className="inline-flex items-center gap-1.5">
+                  <input
+                    type="checkbox"
+                    checked={overlayToggles[key]}
+                    onChange={(event) => {
+                      setOverlayToggles((current) => ({
+                        ...current,
+                        [key]: event.target.checked
+                      }));
+                    }}
+                  />
+                  {label}
+                </label>
+              ))}
             </div>
           </div>
           <aside className="flex min-w-0 flex-col gap-2 xl:sticky xl:top-4 xl:max-h-[calc(100dvh-5rem)] xl:self-start xl:overflow-y-auto">
@@ -309,8 +525,28 @@ function TrackingResult({
                 {(summary.bounce_confidence ?? bounce?.confidence ?? 0).toFixed(2)}
               </strong>
             </div>
+            {result.physics?.overall_stump_to_stump.status !== "UNAVAILABLE" &&
+              result.physics?.overall_stump_to_stump.speed_kph != null && (
+              <div className="rounded-lg bg-black/25 p-2.5 text-sm">
+                <span className="block text-[10px] text-white/35">Overall stump-to-stump speed</span>
+                <strong className="mt-0.5 block">
+                  {result.physics.overall_stump_to_stump.speed_kph.toFixed(1)} km/h
+                  {result.physics.overall_stump_to_stump.status === "PARTIALLY_PROJECTED"
+                    ? ` · est. ${Math.round((result.physics.overall_stump_to_stump.projected_fraction ?? 0) * 100)}% projected`
+                    : " · measured"}
+                </strong>
+              </div>
+            )}
+            {result.physics?.speed.earliest_measured_speed_kmh != null && (
+              <div className="rounded-lg bg-black/25 p-2.5 text-sm">
+                <span className="block text-[10px] text-white/35">Earliest measured speed</span>
+                <strong className="mt-0.5 block">
+                  {result.physics.speed.earliest_measured_speed_kmh.toFixed(1)} km/h
+                </strong>
+              </div>
+            )}
             <div className="flex flex-wrap gap-2 pt-1">
-              {links.map(([label, url]) => (
+              {downloadLinks.map(([label, url]) => (
                 <a
                   key={label}
                   className="rounded-lg border border-white/15 bg-white/5 px-2.5 py-1.5 text-[11px] font-bold text-lime hover:bg-white/10"
@@ -328,7 +564,7 @@ function TrackingResult({
 
       {result.physics && <PhysicsAnalytics physics={result.physics} />}
 
-      <details className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+      <details className="rounded-xl border border-white/10 bg-black/20 px-3 py-2" open={!summary.delivery_replay_url}>
         <summary className="cursor-pointer text-sm font-bold text-white/55">
           Debug videos &amp; stats
         </summary>
@@ -374,7 +610,7 @@ function TrackingResult({
           )}
           {!summary.delivery_replay_url && (
             <div className="flex flex-wrap gap-2">
-              {links.map(([label, url]) => (
+              {downloadLinks.map(([label, url]) => (
                 <a
                   key={label}
                   className="rounded-lg border border-white/15 bg-white/5 px-2.5 py-1.5 text-[11px] font-bold text-lime hover:bg-white/10"

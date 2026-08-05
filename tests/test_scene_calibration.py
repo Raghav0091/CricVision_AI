@@ -5,9 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from fastapi.testclient import TestClient
 
-from services.api.main import app
 from services.api.schemas.real_pitch_registration import (
     RealPitchRegistrationResult,
     RegistrationDiagnostics,
@@ -782,43 +780,14 @@ def test_visual_assisted_state_keeps_physics_in_image_space(
     assert "acceptance" in calibration.failure_reason
 
 
-def test_unified_api_get_returns_backend_owned_state(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    payload = SceneCalibrationResult(
-        analysis_id=ANALYSIS_ID,
-        stage="NOT_STARTED",
-        updated_at=datetime.now(timezone.utc),
-        message="Detect wickets to begin scene calibration.",
-    )
-    monkeypatch.setattr(
-        "services.api.routes.video_analysis.load_scene_calibration",
-        lambda analysis_id: payload,
-    )
-    response = TestClient(app).get(
-        f"/video-analysis/{ANALYSIS_ID}/scene-calibration"
-    )
-    assert response.status_code == 200
-    assert response.json()["workflow"] == "ASSISTED_SCENE_CALIBRATION_V1"
-    assert response.json()["stage"] == "NOT_STARTED"
-
-
-def test_ui_keeps_one_workspace_and_developer_panels_collapsed() -> None:
+def test_ui_keeps_wicket_box_workspace_without_legacy_panels() -> None:
     page = Path("apps/web/app/video-analysis/page.tsx").read_text(
         encoding="utf-8"
     )
-    panel = Path(
-        "apps/web/components/video-analysis/AssistedSceneCalibrationPanel.tsx"
-    ).read_text(encoding="utf-8")
-    assert page.count("<AssistedSceneCalibrationPanel") == 1
-    assert 'sceneCalibration.stage !== "NOT_STARTED"' in page
-    assert "<summary" in page and "Developer Diagnostics" in page
-    before_detection = panel.split('if (result.stage === "NOT_STARTED")')[1].split(
-        "return (", 1
-    )[1].split(");", 1)[0]
-    assert "Detect Wickets" in before_detection
-    assert "Fine Adjust" not in before_detection
-    assert "Accept Calibration" not in before_detection
+    assert "WicketBoxCalibrationPanel" in page
+    assert "AssistedSceneCalibrationPanel" not in page
+    assert "Developer Diagnostics" not in page
+    assert "SceneCalibrationPanel" not in page
 
 
 def test_scene_orchestrator_does_not_import_detector_or_pose_research() -> None:

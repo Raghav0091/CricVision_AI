@@ -22,7 +22,8 @@ export function VirtualPitchScene({
   mode = "development",
   onCameraDiagnostics,
   ownedCamera,
-  onCameraReadyChange
+  onCameraReadyChange,
+  replayContent
 }: VirtualPitchSceneProps & {
   ownedCamera: OwnedPitchCamera;
   onCameraReadyChange: (cameraUuid: string, ready: boolean) => void;
@@ -42,6 +43,7 @@ export function VirtualPitchScene({
   );
   const debugEnabled = mode === "development";
   const transparentBackground = mode === "real-frame-overlay";
+  const replayMode = mode === "interactive-replay";
 
   return (
     <VirtualPitchCameraController
@@ -103,6 +105,7 @@ export function VirtualPitchScene({
           labelColour={materials.officialLine.color}
         />
       )}
+      {replayMode && replayContent}
     </VirtualPitchCameraController>
   );
 }

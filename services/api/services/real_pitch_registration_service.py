@@ -1647,6 +1647,79 @@ def _perturbation_uncertainty(
     )
 
 
+def build_pose_stability_diagnostics(
+    candidate: CameraPoseCandidate,
+    correspondences: Sequence[RegistrationCorrespondence],
+    width: int,
+    height: int,
+    *,
+    minimum_pointlike_anchors: int = MIN_POINTLIKE_ANCHORS,
+) -> dict[str, object]:
+    """Return per-candidate pose/stability diagnostics for debug reporting."""
+    uncertainty = candidate.uncertainty
+    if uncertainty is None and candidate.solver_success:
+        uncertainty = _perturbation_uncertainty(
+            candidate,
+            correspondences,
+            width,
+            height,
+            minimum_pointlike_anchors=minimum_pointlike_anchors,
+        )
+    temporal = candidate.temporal_validation
+    zero_reason = None
+    if temporal is not None and temporal.stability_score == 0.0:
+        if not temporal.evaluated_frame_ids:
+            zero_reason = "no_supporting_frame_raw_detections_for_temporal_iou"
+        elif temporal.warnings:
+            zero_reason = temporal.warnings[0]
+    spreads = (
+        uncertainty.camera_position_spread_m if uncertainty else None,
+        uncertainty.rotation_spread_degrees if uncertainty else None,
+        uncertainty.maximum_overlay_movement_px if uncertainty else None,
+    )
+    if any(value is not None and not math.isfinite(value) for value in spreads):
+        stability_failure = "Stability calculation produced a non-finite value"
+    elif uncertainty is None:
+        stability_failure = (
+            "Automatic stump landmarks are valid, but camera-stability "
+            "validation encountered an internal error."
+        )
+    elif uncertainty.perturbation_count == 0:
+        stability_failure = "PnP perturbation trials failed"
+    elif not uncertainty.stable_for_future_metric_use:
+        stability_failure = (
+            "Camera pose changes excessively under a one-pixel perturbation"
+        )
+    else:
+        stability_failure = None
+    return {
+        "candidate_id": candidate.candidate_id,
+        "baseline": {
+            "rotation_vector": candidate.rotation_vector,
+            "translation_vector": candidate.translation_vector,
+            "focal_length_px": candidate.intrinsics.focal_length_x_px,
+            "reprojection_rmse_px": candidate.reprojection_rmse_px,
+        },
+        "perturbation": (
+            uncertainty.model_dump(mode="json") if uncertainty is not None else None
+        ),
+        "perturbation_trial_count": (
+            uncertainty.perturbation_count if uncertainty is not None else 0
+        ),
+        "perturbation_trials_succeeded": (
+            uncertainty.perturbation_count if uncertainty is not None else 0
+        ),
+        "temporal_stability_score": (
+            temporal.stability_score if temporal is not None else None
+        ),
+        "temporal_zero_reason": zero_reason,
+        "stability_failure_reason": stability_failure,
+        "correspondence_count": len(
+            [item for item in correspondences if item.status == "USED"]
+        ),
+    }
+
+
 def _read_setup_frame(
     analysis_id: str,
     frame_index: int,

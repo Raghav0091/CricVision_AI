@@ -119,10 +119,8 @@ function DetectionCoverageTimeline({ counts }: { counts: number[] }) {
 
 
 function DetectionResult({
-  analysis,
   result
 }: {
-  analysis: VideoAnalysisPreparedResponse;
   result: VideoBallDetectionResultResponse;
 }) {
   const summary = result.summary;
@@ -179,29 +177,6 @@ function DetectionResult({
           </div>
         </aside>
       </div>
-
-      <details className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
-        <summary className="cursor-pointer text-sm font-bold text-white/55">Original video &amp; details</summary>
-        <div className="mt-3 space-y-3">
-          <div className="flex min-h-[8rem] items-center justify-center overflow-hidden rounded-xl bg-[#050a08]">
-            <video className={MEDIA_FIT_CLASS} controls preload="metadata" src={analysis.original_video_url} />
-          </div>
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-            {stats.slice(6).map(([label, value]) => (
-              <div key={label} className="rounded-lg bg-black/25 p-2.5">
-                <span className="block text-[10px] text-white/35">{label}</span>
-                <strong className="mt-0.5 block text-sm">{value}</strong>
-              </div>
-            ))}
-          </div>
-          <div className="grid gap-3 rounded-lg border border-white/10 bg-black/20 p-3 sm:grid-cols-2 xl:grid-cols-4">
-            <div><span className="block text-[10px] text-white/35">Detector</span><strong className="mt-0.5 block text-xs">{summary.detector?.display_name ?? summary.model_path_used}</strong><span className="mt-0.5 block break-all text-[10px] text-white/35">{summary.detector?.model_file ?? summary.model_path_used}</span></div>
-            <div><span className="block text-[10px] text-white/35">Device</span><strong className="mt-0.5 block text-xs">{summary.device_used}</strong></div>
-            <div><span className="block text-[10px] text-white/35">Settings</span><strong className="mt-0.5 block text-xs">{summary.imgsz}px · conf {summary.confidence_threshold} · stride {summary.frame_stride}</strong></div>
-            <div><span className="block text-[10px] text-white/35">Duration</span><strong className="mt-0.5 block text-xs">{summary.processing_duration_seconds.toFixed(2)}s</strong></div>
-          </div>
-        </div>
-      </details>
 
       <DetectionCoverageTimeline counts={result.frame_candidate_counts} />
 
@@ -414,7 +389,7 @@ export function BallDetectionPanel({
         <p className="mt-3 rounded-lg border border-signal/30 bg-signal/10 px-3 py-2 text-sm leading-6 text-[#ffaaa6]">{error}</p>
       )}
 
-      {result && <DetectionResult analysis={analysis} result={result} />}
+      {result && <DetectionResult result={result} />}
     </Card>
   );
 }

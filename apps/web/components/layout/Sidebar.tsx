@@ -8,8 +8,6 @@ const links = [
   ["Overview", "/"],
   ["Live Session", "/live"],
   ["Video Analysis", "/video-analysis"],
-  ["Sessions", "/sessions"],
-  ["Session Results", "/sessions/results"],
   ["Virtual Pitch Lab", "/virtual-pitch-lab"]
 ];
 
@@ -27,7 +25,7 @@ export function Sidebar() {
             key={href}
             href={href}
             aria-current={pathname === href ? "page" : undefined}
-            className={`mt-1 block rounded-xl py-3 text-sm font-semibold transition hover:bg-white/5 hover:text-white ${href === "/sessions/results" ? "pl-7 pr-4" : "px-4"} ${developerLink ? "border border-dashed border-[#ffe761]/20" : ""} ${pathname === href ? "bg-white/10 text-white" : "text-white/65"}`}
+            className={`mt-1 block rounded-xl px-4 py-3 text-sm font-semibold transition hover:bg-white/5 hover:text-white ${developerLink ? "border border-dashed border-[#ffe761]/20" : ""} ${pathname === href ? "bg-white/10 text-white" : "text-white/65"}`}
           >
             <span className="flex items-center justify-between gap-2">
               <span>{label}</span>

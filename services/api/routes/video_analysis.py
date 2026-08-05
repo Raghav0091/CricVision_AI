@@ -1,25 +1,12 @@
 import logging
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Body, File, HTTPException, Response, UploadFile
 
-from ..schemas.camera_bridge import (
-    CameraBridgeResponse,
-    ConfirmedWicketCameraFitRequest,
-)
-from ..schemas.preset_auto_registration import (
-    CameraSetupPresetListResponse,
-    PresetAutoRegistrationResult,
-    PresetAutoRegistrationRunRequest,
-    list_camera_setup_presets,
-)
+from ..schemas.camera_bridge import CameraBridgeResponse
 from ..schemas.video_analysis import (
     BallDetectorModelOption,
     BallDetectorModelsResponse,
-    CalibrationV2ConfirmRequest,
-    CalibrationV2InitialiseResponse,
-    CalibrationV2Result,
-    ConfirmedVideoCalibrationResponse,
     VideoAnalysisPreparedResponse,
     VideoBallDetectionJobResponse,
     VideoBallDetectionResultResponse,
@@ -27,33 +14,20 @@ from ..schemas.video_analysis import (
     VideoBallDetectionStartResponse,
     VideoBallTrackingJobResponse,
     VideoBallTrackingResultResponse,
-    VideoBallTrackingStartRequest,
     VideoBallTrackingStartResponse,
-    VideoCalibrationConfirmationRequest,
-    VideoCalibrationDetectionRequest,
-    VideoCalibrationDetectionResponse,
-    WicketCameraPoseInitialiseResponse,
-    WicketCameraPoseResult,
-    WicketCameraPoseSolveRequest,
 )
 from ..schemas.virtual_pitch import (
     SyntheticPitchPreviewResponse,
     VirtualPitchSpecification,
 )
-from ..schemas.real_pitch_registration import RealPitchRegistrationResult
-from ..schemas.scene_calibration import (
-    SceneCalibrationActionRequest,
-    SceneCalibrationAnchorUpdateRequest,
-    SceneCalibrationOrientationRequest,
-    SceneCalibrationPresetRequest,
-    SceneCalibrationPresetResponse,
-    SceneCalibrationRefineRequest,
-    SceneCalibrationResult,
-)
-from ..schemas.wicket_observation import WicketObservationResult
-from ..schemas.wicket_landmark_evidence import (
-    WicketLandmarkEvidenceResult,
-    WicketLandmarkEvidenceRunRequest,
+from ..schemas.replay_payload import ReplayPayloadV1
+from ..schemas.wicket_box_calibration import (
+    CalibrationResult,
+    WicketBoxCalibrationAcceptRequest,
+    WicketBoxCalibrationAcceptResponse,
+    WicketBoxCalibrationDetectResponse,
+    WicketBoxCalibrationRegisterRequest,
+    WicketBoxCalibrationRegisterResponse,
 )
 from ..services.ball_detector_registry import (
     BallDetectorModelMissing,
@@ -84,127 +58,25 @@ from ..services.video_ball_tracking_service import (
     run_video_ball_tracking_job,
     validate_video_ball_tracking_input,
 )
-from ..services.video_calibration_service import (
-    confirm_video_calibration,
-    detect_video_calibration,
-    load_video_calibration,
-)
-from ..services.video_calibration_v2_service import (
-    confirm_video_calibration_v2,
-    initialise_video_calibration_v2,
-    load_video_calibration_v2,
-)
-from ..services.video_camera_pose_service import (
-    initialise_wicket_camera_pose,
-    load_wicket_camera_pose,
-    solve_wicket_camera_pose,
-)
 from ..services.camera_bridge_service import (
     build_synthetic_camera_bridge,
     load_analysis_camera_bridge,
-)
-from ..services.real_pitch_registration_service import (
-    load_real_pitch_registration,
-    run_real_pitch_registration,
-)
-from ..services.preset_auto_registration import (
-    clear_preset_auto_registration,
-    fit_confirmed_wicket_camera,
-    load_preset_auto_registration,
-    run_preset_auto_registration,
-)
-from ..services.scene_calibration_service import (
-    accept_scene_calibration,
-    apply_scene_calibration_orientation,
-    apply_scene_calibration_preset,
-    clear_scene_calibration_orientation,
-    load_scene_calibration,
-    load_orientation_presets_for_analysis,
-    refine_scene_calibration,
-    reject_scene_calibration,
-    run_scene_calibration,
-    update_scene_calibration_anchors,
-    use_visual_overlay_only,
 )
 from ..services.virtual_pitch_service import (
     build_synthetic_preview,
     build_virtual_pitch_specification,
 )
-from ..services.wicket_observation_service import (
-    load_wicket_observation,
-    run_wicket_observation,
-)
-from ..services.wicket_landmark_evidence_service import (
-    clear_wicket_landmark_evidence,
-    load_wicket_landmark_evidence,
-    run_wicket_landmark_evidence,
+from ..services.replay_payload_service import load_replay_payload
+from ..services.wicket_box_calibration_service import (
+    accept_wicket_box_calibration,
+    detect_wicket_box_calibration,
+    load_wicket_box_calibration,
+    register_wicket_box_calibration,
 )
 
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/video-analysis", tags=["video-analysis"])
-
-
-@router.get(
-    "/scene-calibration/presets",
-    response_model=CameraSetupPresetListResponse,
-)
-def get_scene_calibration_presets() -> CameraSetupPresetListResponse:
-    return CameraSetupPresetListResponse(presets=list_camera_setup_presets())
-
-
-@router.post(
-    "/{analysis_id}/scene-calibration/auto-register",
-    response_model=PresetAutoRegistrationResult,
-)
-def run_analysis_preset_auto_registration(
-    analysis_id: str,
-    request: PresetAutoRegistrationRunRequest,
-) -> PresetAutoRegistrationResult:
-    try:
-        return run_preset_auto_registration(
-            analysis_id,
-            preset_id=request.preset_id,
-            reuse_existing_observations=request.reuse_existing_observations,
-            force_redetect=request.force_redetect,
-            development_diagnostics=request.development_diagnostics,
-        )
-    except VideoAnalysisServiceError as exc:
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.message,
-        ) from exc
-
-
-@router.get(
-    "/{analysis_id}/scene-calibration/auto-registration",
-    response_model=PresetAutoRegistrationResult,
-)
-def get_analysis_preset_auto_registration(
-    analysis_id: str,
-) -> PresetAutoRegistrationResult:
-    try:
-        return load_preset_auto_registration(analysis_id)
-    except VideoAnalysisServiceError as exc:
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.message,
-        ) from exc
-
-
-@router.post(
-    "/{analysis_id}/scene-calibration/auto-registration/clear",
-    status_code=204,
-)
-def clear_analysis_preset_auto_registration(analysis_id: str) -> Response:
-    try:
-        clear_preset_auto_registration(analysis_id)
-    except VideoAnalysisServiceError as exc:
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.message,
-        ) from exc
-    return Response(status_code=204)
 
 
 @router.get(
@@ -258,51 +130,57 @@ def get_analysis_camera_bridge(
         ) from exc
 
 
-@router.post(
-    "/{analysis_id}/camera-bridge/fit-confirmed-wickets",
-    response_model=CameraBridgeResponse,
+@router.get(
+    "/{analysis_id}/wicket-box-calibration",
+    response_model=CalibrationResult,
 )
-def fit_analysis_confirmed_wicket_camera(
+def get_analysis_wicket_box_calibration(
     analysis_id: str,
-    request: ConfirmedWicketCameraFitRequest,
-) -> CameraBridgeResponse:
+) -> CalibrationResult:
+    """Return persisted wicket-box calibration for session restore."""
     try:
-        return fit_confirmed_wicket_camera(analysis_id, request)
+        return load_wicket_box_calibration(analysis_id)
     except VideoAnalysisServiceError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
 
 
 @router.post(
-    "/{analysis_id}/wicket-observations/run",
-    response_model=WicketObservationResult,
+    "/{analysis_id}/wicket-box-calibration/detect",
+    response_model=WicketBoxCalibrationDetectResponse,
 )
-def run_analysis_wicket_observations(
+def detect_analysis_wicket_box_calibration(
     analysis_id: str,
-) -> WicketObservationResult:
-    """Run bounded real-frame observation without camera registration."""
+    request: WicketBoxCalibrationRegisterRequest,
+) -> WicketBoxCalibrationDetectResponse:
+    """Detect stump landmarks inside submitted NEAR/FAR wicket boxes."""
     try:
-        return run_wicket_observation(analysis_id)
+        return detect_wicket_box_calibration(analysis_id, request)
     except VideoAnalysisServiceError as exc:
-        logger.warning(
-            "Wicket observation rejected for %s: %s",
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+        ) from exc
+
+
+@router.post(
+    "/{analysis_id}/wicket-box-calibration/register",
+    response_model=WicketBoxCalibrationRegisterResponse,
+)
+def register_analysis_wicket_box_calibration(
+    analysis_id: str,
+    request: WicketBoxCalibrationRegisterRequest,
+    assignment_hypothesis: Literal["A", "B"] | None = None,
+) -> WicketBoxCalibrationRegisterResponse:
+    """Register camera pose from wicket-box landmarks via PnP."""
+    try:
+        return register_wicket_box_calibration(
             analysis_id,
-            exc.message,
+            request,
+            assignment_hypothesis=assignment_hypothesis,
         )
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.message,
-        ) from exc
-
-
-@router.get(
-    "/{analysis_id}/wicket-observations",
-    response_model=WicketObservationResult,
-)
-def get_analysis_wicket_observations(
-    analysis_id: str,
-) -> WicketObservationResult:
-    try:
-        return load_wicket_observation(analysis_id)
     except VideoAnalysisServiceError as exc:
         raise HTTPException(
             status_code=exc.status_code,
@@ -311,95 +189,21 @@ def get_analysis_wicket_observations(
 
 
 @router.post(
-    "/{analysis_id}/wicket-landmark-evidence/run",
-    response_model=WicketLandmarkEvidenceResult,
+    "/{analysis_id}/wicket-box-calibration/accept",
+    response_model=WicketBoxCalibrationAcceptResponse,
 )
-def run_analysis_wicket_landmark_evidence(
+def accept_analysis_wicket_box_calibration(
     analysis_id: str,
-    request: WicketLandmarkEvidenceRunRequest,
-) -> WicketLandmarkEvidenceResult:
+    request: WicketBoxCalibrationAcceptRequest,
+    assignment_hypothesis: Literal["A", "B"] | None = None,
+) -> WicketBoxCalibrationAcceptResponse:
+    """Accept registered wicket-box calibration and freeze pose."""
     try:
-        return run_wicket_landmark_evidence(analysis_id, request)
-    except VideoAnalysisServiceError as exc:
-        logger.warning(
-            "Wicket landmark evidence rejected for %s: %s",
+        return accept_wicket_box_calibration(
             analysis_id,
-            exc.message,
+            request,
+            assignment_hypothesis=assignment_hypothesis,
         )
-        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
-
-
-@router.get(
-    "/{analysis_id}/wicket-landmark-evidence",
-    response_model=WicketLandmarkEvidenceResult,
-)
-def get_analysis_wicket_landmark_evidence(
-    analysis_id: str,
-) -> WicketLandmarkEvidenceResult:
-    try:
-        return load_wicket_landmark_evidence(analysis_id)
-    except VideoAnalysisServiceError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
-
-
-@router.post(
-    "/{analysis_id}/wicket-landmark-evidence/clear",
-    status_code=204,
-)
-def clear_analysis_wicket_landmark_evidence(analysis_id: str) -> Response:
-    try:
-        clear_wicket_landmark_evidence(analysis_id)
-    except VideoAnalysisServiceError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
-    return Response(status_code=204)
-
-
-@router.post(
-    "/{analysis_id}/pitch-registration/run",
-    response_model=RealPitchRegistrationResult,
-)
-def run_analysis_pitch_registration(
-    analysis_id: str,
-) -> RealPitchRegistrationResult:
-    try:
-        return run_real_pitch_registration(analysis_id)
-    except VideoAnalysisServiceError as exc:
-        logger.warning(
-            "Real pitch registration rejected for %s: %s",
-            analysis_id,
-            exc.message,
-        )
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.message,
-        ) from exc
-
-
-@router.get(
-    "/{analysis_id}/pitch-registration",
-    response_model=RealPitchRegistrationResult,
-)
-def get_analysis_pitch_registration(
-    analysis_id: str,
-) -> RealPitchRegistrationResult:
-    try:
-        return load_real_pitch_registration(analysis_id)
-    except VideoAnalysisServiceError as exc:
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.message,
-        ) from exc
-
-
-@router.post(
-    "/{analysis_id}/scene-calibration/run",
-    response_model=SceneCalibrationResult,
-)
-def run_analysis_scene_calibration(
-    analysis_id: str,
-) -> SceneCalibrationResult:
-    try:
-        return run_scene_calibration(analysis_id)
     except VideoAnalysisServiceError as exc:
         raise HTTPException(
             status_code=exc.status_code,
@@ -408,166 +212,17 @@ def run_analysis_scene_calibration(
 
 
 @router.get(
-    "/{analysis_id}/scene-calibration",
-    response_model=SceneCalibrationResult,
+    "/{analysis_id}/replay-payload",
+    response_model=ReplayPayloadV1,
 )
-def get_analysis_scene_calibration(
+def get_analysis_replay_payload(
     analysis_id: str,
-) -> SceneCalibrationResult:
+    response: Response,
+) -> ReplayPayloadV1:
+    """Virtual Pitch Replay payload assembled from tracking and physics."""
+    response.headers["Cache-Control"] = "no-store"
     try:
-        return load_scene_calibration(analysis_id)
-    except VideoAnalysisServiceError as exc:
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.message,
-        ) from exc
-
-
-@router.post(
-    "/{analysis_id}/scene-calibration/anchors",
-    response_model=SceneCalibrationResult,
-)
-def update_analysis_scene_calibration_anchors(
-    analysis_id: str,
-    request: SceneCalibrationAnchorUpdateRequest,
-) -> SceneCalibrationResult:
-    try:
-        return update_scene_calibration_anchors(analysis_id, request)
-    except VideoAnalysisServiceError as exc:
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.message,
-        ) from exc
-
-
-@router.post(
-    "/{analysis_id}/scene-calibration/refine",
-    response_model=SceneCalibrationResult,
-)
-def refine_analysis_scene_calibration(
-    analysis_id: str,
-    request: SceneCalibrationRefineRequest,
-) -> SceneCalibrationResult:
-    try:
-        return refine_scene_calibration(analysis_id, request)
-    except VideoAnalysisServiceError as exc:
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.message,
-        ) from exc
-
-
-@router.post(
-    "/{analysis_id}/scene-calibration/orientation",
-    response_model=SceneCalibrationResult,
-)
-def confirm_analysis_scene_calibration_orientation(
-    analysis_id: str,
-    request: SceneCalibrationOrientationRequest,
-) -> SceneCalibrationResult:
-    try:
-        return apply_scene_calibration_orientation(analysis_id, request)
-    except VideoAnalysisServiceError as exc:
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.message,
-        ) from exc
-
-
-@router.get(
-    "/{analysis_id}/scene-calibration/preset",
-    response_model=SceneCalibrationPresetResponse,
-)
-def get_analysis_scene_calibration_presets(
-    analysis_id: str,
-) -> SceneCalibrationPresetResponse:
-    try:
-        return load_orientation_presets_for_analysis(analysis_id)
-    except VideoAnalysisServiceError as exc:
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.message,
-        ) from exc
-
-
-@router.post(
-    "/{analysis_id}/scene-calibration/preset",
-    response_model=SceneCalibrationResult,
-)
-def use_analysis_scene_calibration_preset(
-    analysis_id: str,
-    request: SceneCalibrationPresetRequest,
-) -> SceneCalibrationResult:
-    try:
-        return apply_scene_calibration_preset(analysis_id, request)
-    except VideoAnalysisServiceError as exc:
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.message,
-        ) from exc
-
-
-@router.post(
-    "/{analysis_id}/scene-calibration/orientation/clear",
-    response_model=SceneCalibrationResult,
-)
-def clear_analysis_scene_calibration_orientation(
-    analysis_id: str,
-    request: SceneCalibrationActionRequest,
-) -> SceneCalibrationResult:
-    try:
-        return clear_scene_calibration_orientation(analysis_id, request)
-    except VideoAnalysisServiceError as exc:
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.message,
-        ) from exc
-
-
-@router.post(
-    "/{analysis_id}/scene-calibration/accept",
-    response_model=SceneCalibrationResult,
-)
-def accept_analysis_scene_calibration(
-    analysis_id: str,
-    request: SceneCalibrationActionRequest,
-) -> SceneCalibrationResult:
-    try:
-        return accept_scene_calibration(analysis_id, request)
-    except VideoAnalysisServiceError as exc:
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.message,
-        ) from exc
-
-
-@router.post(
-    "/{analysis_id}/scene-calibration/reject",
-    response_model=SceneCalibrationResult,
-)
-def reject_analysis_scene_calibration(
-    analysis_id: str,
-    request: SceneCalibrationActionRequest,
-) -> SceneCalibrationResult:
-    try:
-        return reject_scene_calibration(analysis_id, request)
-    except VideoAnalysisServiceError as exc:
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.message,
-        ) from exc
-
-
-@router.post(
-    "/{analysis_id}/scene-calibration/use-visual-only",
-    response_model=SceneCalibrationResult,
-)
-def use_analysis_visual_calibration_only(
-    analysis_id: str,
-    request: SceneCalibrationActionRequest,
-) -> SceneCalibrationResult:
-    try:
-        return use_visual_overlay_only(analysis_id, request)
+        return load_replay_payload(analysis_id)
     except VideoAnalysisServiceError as exc:
         raise HTTPException(
             status_code=exc.status_code,
@@ -666,8 +321,6 @@ def start_analysis_ball_detection(
             analysis_id,
         )
         return VideoBallDetectionStartResponse.model_validate(job)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except BallDetectorModelMissing as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except VideoAnalysisServiceError as exc:
@@ -740,9 +393,6 @@ def get_analysis_ball_detection(
 def start_analysis_ball_tracking(
     analysis_id: str,
     background_tasks: BackgroundTasks,
-    request: VideoBallTrackingStartRequest = Body(
-        default=VideoBallTrackingStartRequest()
-    ),
 ) -> VideoBallTrackingStartResponse:
     job = None
     try:
@@ -761,7 +411,6 @@ def start_analysis_ball_tracking(
             run_video_ball_tracking_job,
             analysis_id,
             job["job_id"],
-            include_delivery_analysis=request.include_delivery_analysis,
         )
         logger.info(
             "Queued Moving Ball Tracker job %s for %s",
@@ -811,205 +460,6 @@ def get_analysis_ball_tracking(
     try:
         return load_video_ball_tracking_result(analysis_id)
     except (VideoAnalysisServiceError, VideoBallTrackingError) as exc:
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.message,
-        ) from exc
-
-
-@router.post(
-    "/{analysis_id}/calibration/v2/initialise",
-    response_model=CalibrationV2InitialiseResponse,
-)
-def initialise_analysis_calibration_v2(
-    analysis_id: str,
-) -> CalibrationV2InitialiseResponse:
-    try:
-        return initialise_video_calibration_v2(analysis_id)
-    except VideoAnalysisServiceError as exc:
-        logger.warning(
-            "Calibration v2 initialisation rejected for %s: %s",
-            analysis_id,
-            exc.message,
-        )
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.message,
-        ) from exc
-
-
-@router.put(
-    "/{analysis_id}/calibration/v2/confirm",
-    response_model=CalibrationV2Result,
-)
-def confirm_analysis_calibration_v2(
-    analysis_id: str,
-    request: CalibrationV2ConfirmRequest,
-) -> CalibrationV2Result:
-    try:
-        result = confirm_video_calibration_v2(analysis_id, request)
-        logger.info(
-            "Saved Calibration v2 for %s with status %s",
-            analysis_id,
-            result.status,
-        )
-        return result
-    except VideoAnalysisServiceError as exc:
-        logger.warning(
-            "Calibration v2 confirmation rejected for %s: %s",
-            analysis_id,
-            exc.message,
-        )
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.message,
-        ) from exc
-
-
-@router.get(
-    "/{analysis_id}/calibration/v2",
-    response_model=CalibrationV2Result,
-)
-def get_analysis_calibration_v2(
-    analysis_id: str,
-) -> CalibrationV2Result:
-    try:
-        return load_video_calibration_v2(analysis_id)
-    except VideoAnalysisServiceError as exc:
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.message,
-        ) from exc
-
-
-@router.post(
-    "/{analysis_id}/calibration/v2/camera-pose/initialise",
-    response_model=WicketCameraPoseInitialiseResponse,
-)
-def initialise_analysis_camera_pose(
-    analysis_id: str,
-) -> WicketCameraPoseInitialiseResponse:
-    try:
-        return initialise_wicket_camera_pose(analysis_id)
-    except VideoAnalysisServiceError as exc:
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.message,
-        ) from exc
-
-
-@router.put(
-    "/{analysis_id}/calibration/v2/camera-pose/solve",
-    response_model=WicketCameraPoseResult,
-)
-def solve_analysis_camera_pose(
-    analysis_id: str,
-    request: WicketCameraPoseSolveRequest,
-) -> WicketCameraPoseResult:
-    try:
-        result = solve_wicket_camera_pose(analysis_id, request)
-        logger.info(
-            "Saved wicket-based camera pose for %s with status %s",
-            analysis_id,
-            result.status,
-        )
-        return result
-    except VideoAnalysisServiceError as exc:
-        logger.warning(
-            "Camera-pose solve rejected for %s: %s",
-            analysis_id,
-            exc.message,
-        )
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.message,
-        ) from exc
-
-
-@router.get(
-    "/{analysis_id}/calibration/v2/camera-pose",
-    response_model=WicketCameraPoseResult,
-)
-def get_analysis_camera_pose(
-    analysis_id: str,
-) -> WicketCameraPoseResult:
-    try:
-        return load_wicket_camera_pose(analysis_id)
-    except VideoAnalysisServiceError as exc:
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.message,
-        ) from exc
-
-
-@router.post(
-    "/{analysis_id}/calibration/detect",
-    response_model=VideoCalibrationDetectionResponse,
-)
-def detect_analysis_calibration(
-    analysis_id: str,
-    refresh_early_reference: bool = False,
-    frame_zero_only: bool = False,
-    body: Annotated[
-        VideoCalibrationDetectionRequest | None, Body()
-    ] = None,
-) -> VideoCalibrationDetectionResponse:
-    try:
-        return detect_video_calibration(
-            analysis_id,
-            refresh_early_reference=refresh_early_reference,
-            frame_zero_only=frame_zero_only,
-            striker_guide=None if body is None else body.striker_guide,
-            non_striker_guide=(
-                None if body is None else body.non_striker_guide
-            ),
-        )
-    except VideoAnalysisServiceError as exc:
-        logger.warning(
-            "Video calibration detection rejected for %s: %s",
-            analysis_id,
-            exc.message,
-        )
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.message,
-        ) from exc
-
-
-@router.put(
-    "/{analysis_id}/calibration/confirm",
-    response_model=ConfirmedVideoCalibrationResponse,
-)
-def confirm_analysis_calibration(
-    analysis_id: str,
-    request: VideoCalibrationConfirmationRequest,
-) -> ConfirmedVideoCalibrationResponse:
-    try:
-        record = confirm_video_calibration(analysis_id, request)
-        logger.info("Confirmed scene calibration for %s", analysis_id)
-        return record
-    except VideoAnalysisServiceError as exc:
-        logger.warning(
-            "Video calibration confirmation rejected for %s: %s",
-            analysis_id,
-            exc.message,
-        )
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.message,
-        ) from exc
-
-
-@router.get(
-    "/{analysis_id}/calibration",
-    response_model=ConfirmedVideoCalibrationResponse,
-)
-def get_analysis_calibration(
-    analysis_id: str,
-) -> ConfirmedVideoCalibrationResponse:
-    try:
-        return load_video_calibration(analysis_id)
-    except VideoAnalysisServiceError as exc:
         raise HTTPException(
             status_code=exc.status_code,
             detail=exc.message,

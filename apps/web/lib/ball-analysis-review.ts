@@ -16,11 +16,11 @@ export type BallReviewDisplayToggles = {
 
 export const DEFAULT_BALL_REVIEW_TOGGLES: BallReviewDisplayToggles = {
   primaryTrack: true,
-  acceptedCandidates: false,
-  rejectedCandidates: false,
+  acceptedCandidates: true,
+  rejectedCandidates: true,
   detectionBoxes: false,
   reconstructedPoints: true,
-  completeTrail: false
+  completeTrail: true
 };
 
 export type BallReviewCandidate = VideoBallDetectionCandidate & {
@@ -113,45 +113,4 @@ export function buildReviewCandidates(
       track_compatibility: components?.prediction_proximity ?? null
     }];
   });
-}
-
-export function rejectionReasonCounts(candidates: BallReviewCandidate[]) {
-  const counts = new Map<string, number>();
-  for (const candidate of candidates) {
-    if (candidate.selected) continue;
-    counts.set(candidate.rejection_label, (counts.get(candidate.rejection_label) ?? 0) + 1);
-  }
-  return counts;
-}
-
-export function activeFrameCandidates(
-  candidates: BallReviewCandidate[],
-  frameIndex: number
-) {
-  return candidates.filter((candidate) => candidate.frame_index === frameIndex);
-}
-
-export function activeFramePrimaryPoint(
-  track: VideoBallTrackingPoint[],
-  frameIndex: number
-) {
-  return track.find((point) => point.frame_index === frameIndex) ?? null;
-}
-
-export function isReconstructedPoint(point: VideoBallTrackingPoint) {
-  const provenance = point.provenance.toUpperCase();
-  return provenance.includes("RECOVERED")
-    || provenance.includes("RECONSTRUCTED")
-    || provenance.includes("PROJECTED")
-    || point.source === "predicted"
-    || point.source === "recovered";
-}
-
-export function trackProvenanceLabel(point: VideoBallTrackingPoint) {
-  const provenance = point.provenance.toUpperCase();
-  if (provenance === "OBSERVED") return "observed";
-  if (provenance.includes("RECOVERED")) return "reconstructed";
-  if (provenance.includes("RECONSTRUCTED")) return "reconstructed";
-  if (provenance.includes("PROJECTED")) return "projected";
-  return point.source;
 }

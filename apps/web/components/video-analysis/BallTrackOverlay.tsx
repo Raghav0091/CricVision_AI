@@ -144,11 +144,11 @@ export const BallTrackOverlay = memo(function BallTrackOverlay({
 }: BallTrackOverlayProps) {
   const display = toggles ?? {
     primaryTrack: true,
-    acceptedCandidates: false,
-    rejectedCandidates: false,
+    acceptedCandidates: true,
+    rejectedCandidates: true,
     detectionBoxes: false,
     reconstructedPoints: true,
-    completeTrail: false,
+    completeTrail: true,
   };
   const trailEnabled = showCompleteTrail || display.completeTrail;
 

@@ -23,8 +23,8 @@ jobs:
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
 
-      - name: Compile Backends
-        run: python -m compileall -q Backends
+      - name: Compile API
+        run: python -m compileall -q services packages
 
       - name: Run pytest
         run: python -m pytest -q
