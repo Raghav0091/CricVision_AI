@@ -1,1 +1,0 @@
-"""CricVision Pro analysis worker."""
