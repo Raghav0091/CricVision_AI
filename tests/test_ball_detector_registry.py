@@ -21,15 +21,16 @@ def test_start_request_defaults_to_automatic() -> None:
     assert request.ball_detector_model_key == AUTOMATIC_MODEL_KEY
 
 
-def test_start_request_keeps_unknown_key_for_safe_registry_fallback() -> None:
+def test_start_request_rejects_unknown_key() -> None:
+    import pytest
+
     request = VideoBallDetectionStartRequest(
         ball_detector_model_key="not-approved"
     )
 
     assert request.ball_detector_model_key == "not-approved"
-    assert resolve_ball_detector_model(request.ball_detector_model_key).model_key == (
-        AUTOMATIC_MODEL_KEY
-    )
+    with pytest.raises(ValueError, match="Unknown ball detector key"):
+        resolve_ball_detector_model(request.ball_detector_model_key)
 
 
 def test_explicit_model_keys_resolve_to_distinct_approved_paths() -> None:

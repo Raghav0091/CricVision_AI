@@ -59,11 +59,15 @@ def detect_video_calibration(
     analysis_id: str,
     *,
     refresh_early_reference: bool = False,
+    frame_zero_only: bool = False,
     striker_guide: NormalizedBox | None = None,
     non_striker_guide: NormalizedBox | None = None,
 ) -> VideoCalibrationDetectionResponse:
     analysis = load_video_analysis(analysis_id)
-    if refresh_early_reference:
+    if frame_zero_only:
+        _use_frame_zero_reference(analysis_id, analysis)
+        analysis = load_video_analysis(analysis_id)
+    elif refresh_early_reference:
         _try_refresh_early_reference(analysis_id, analysis)
         analysis = load_video_analysis(analysis_id)
 
@@ -83,6 +87,40 @@ def detect_video_calibration(
                 analysis_id, analysis, guides=guides
             )
     return response
+
+
+def _use_frame_zero_reference(analysis_id: str, analysis: Any) -> None:
+    if int(analysis.reference_frame_index) == 0:
+        return
+    import cv2
+
+    video_path = VIDEO_ANALYSIS_ROOT / analysis_id / "raw" / analysis.stored_filename
+    capture = cv2.VideoCapture(str(video_path))
+    try:
+        if not capture.isOpened():
+            raise VideoAnalysisServiceError(
+                "Could not open the video while decoding Frame 0.", status_code=500
+            )
+        ok, frame = capture.read()
+    finally:
+        capture.release()
+    if not ok or frame is None:
+        raise VideoAnalysisServiceError(
+            "Frame 0 could not be decoded for scene calibration.", status_code=422
+        )
+    replace_reference_frame(
+        analysis_id,
+        frame_index=0,
+        frame=frame,
+        selection={
+            "strategy": "video_analysis_frame_zero",
+            "window_scanned": 1,
+            "window_limit": 1,
+            "selected_index": 0,
+            "score": round(float(_reference_frame_quality(frame)[1]), 3),
+            "reason": "frame_0_required_by_video_analysis",
+        },
+    )
 
 
 def _detect_on_current_reference(
@@ -332,21 +370,23 @@ def confirm_video_calibration(
     _save_calibration_overlay(image, confirmed, overlay_path)
     # ponytail: scene_overlay.mp4 is a separate display artefact; never feed
     # composited frames into ball detection / YOLO.
-    scene_overlay_status: str = "failed"
+    scene_overlay_status: str = "skipped"
     scene_overlay_url_value: str | None = None
-    try:
-        _render_scene_overlay_video(
-            analysis_id,
-            analysis,
-            confirmed,
-            scene_overlay_path,
-        )
-        scene_overlay_status = "ready"
-        scene_overlay_url_value = scene_overlay_url
-    except Exception:
-        scene_overlay_path.unlink(missing_ok=True)
+    if request.render_scene_overlay:
         scene_overlay_status = "failed"
-        scene_overlay_url_value = None
+        try:
+            _render_scene_overlay_video(
+                analysis_id,
+                analysis,
+                confirmed,
+                scene_overlay_path,
+            )
+            scene_overlay_status = "ready"
+            scene_overlay_url_value = scene_overlay_url
+        except Exception:
+            scene_overlay_path.unlink(missing_ok=True)
+            scene_overlay_status = "failed"
+            scene_overlay_url_value = None
 
     confirmed = confirmed.model_copy(
         update={

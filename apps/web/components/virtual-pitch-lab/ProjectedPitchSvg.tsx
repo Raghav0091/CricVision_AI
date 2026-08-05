@@ -1,4 +1,4 @@
-import type { ProjectedPitchGeometry } from "@/lib/api";
+import type { PitchProjectionGeometry } from "@/lib/api";
 
 
 function lineStyle(category: string) {
@@ -14,7 +14,7 @@ export function ProjectedPitchSvg({
   opacity = 1,
   className = ""
 }: {
-  projection: ProjectedPitchGeometry;
+  projection: PitchProjectionGeometry;
   opacity?: number;
   className?: string;
 }) {

@@ -86,10 +86,10 @@ def resolve_ball_detector_model(
     model = BALL_DETECTOR_MODELS.get(normalized)
     fallback_reason = None
     if model is None:
-        fallback_reason = (
-            f"Unknown detector key '{normalized}' was replaced with automatic selection."
+        known = ", ".join(sorted(BALL_DETECTOR_MODELS))
+        raise ValueError(
+            f"Unknown ball detector key '{normalized}'. Expected one of: {known}."
         )
-        model = BALL_DETECTOR_MODELS[AUTOMATIC_MODEL_KEY]
 
     path = next((candidate for candidate in model.paths if candidate.is_file()), None)
     if path is None:

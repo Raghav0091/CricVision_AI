@@ -58,6 +58,7 @@ class VideoBallDetectionJobStore:
                 "updated_at": now,
                 "model_path_used": None,
                 "error_message": None,
+                "failure_code": None,
                 "result": None,
                 "message": "Every-frame ball detection queued.",
             }

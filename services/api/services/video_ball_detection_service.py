@@ -887,6 +887,11 @@ def _mark_job_failed(
         success=False,
         status=status,
         error_message=message,
+        failure_code=(
+            "BALL_DETECTOR_UNAVAILABLE"
+            if status == "ball_detector_missing"
+            else "BALL_DETECTION_FAILED"
+        ),
         message=message,
     )
     try:

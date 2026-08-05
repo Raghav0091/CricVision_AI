@@ -1335,6 +1335,9 @@ def solve_pose_candidate(
         update={
             "focal_length_x_px": focal,
             "focal_length_y_px": focal,
+            "horizontal_fov_degrees": math.degrees(
+                2.0 * math.atan(frame.shape[1] / (2.0 * focal))
+            ),
             "focal_bound_reached": bool(
                 refinement.parameters_reaching_bounds
             ),

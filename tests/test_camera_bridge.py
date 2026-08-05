@@ -6,17 +6,50 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
+from services.api.schemas.camera_bridge import (
+    ConfirmedWicketCameraFitRequest,
+    ConfirmedWicketPixelBox,
+)
 from services.api.main import app
 from services.api.schemas.real_pitch_registration import (
     CameraIntrinsicsCandidate,
     CameraPoseCandidate,
 )
-from services.api.schemas.wicket_observation import SetupFrameCandidate
+from services.api.schemas.wicket_observation import PixelBox, SetupFrameCandidate
 from services.api.services import camera_bridge_service as bridge
+from services.api.services import preset_auto_registration as registration
+from services.api.services.preset_auto_registration import (
+    _confirmed_wicket_box_evidence,
+    _confirmed_wicket_fit_validation,
+)
 from services.api.services.video_analysis_service import VideoAnalysisServiceError
 
 
 ANALYSIS_ID = "analysis_20260728_120858_762989"
+
+
+def _confirmed_box(
+    *,
+    role: str,
+    x_min: float,
+    y_min: float,
+    width: float,
+    height: float,
+    detector_confidence: float | None = None,
+) -> ConfirmedWicketPixelBox:
+    return ConfirmedWicketPixelBox(
+        x_min=x_min,
+        y_min=y_min,
+        x_max=x_min + width,
+        y_max=y_min + height,
+        width=width,
+        height=height,
+        frame_width=720,
+        frame_height=1280,
+        role=role,
+        source="DETECTOR_ADJUSTED",
+        detector_confidence=detector_confidence,
+    )
 
 
 def _frame() -> SetupFrameCandidate:
@@ -296,3 +329,198 @@ def test_distortion_policy_is_explicit() -> None:
     assert unsupported.exact_pinhole_rendering_supported is False
     assert undistorted.mode == "PREUNDISTORTED_FRAME"
     assert undistorted.exact_pinhole_rendering_supported is True
+
+
+def test_confirmed_wicket_projection_validation_accepts_matching_camera() -> None:
+    near = PixelBox(x=300, y=700, width=80, height=220)
+    far = PixelBox(x=340, y=400, width=24, height=55)
+    near_evidence = _confirmed_wicket_box_evidence(
+        _confirmed_box(role="NEAR_WICKET", x_min=300, y_min=700, width=80, height=220)
+    )
+    far_evidence = _confirmed_wicket_box_evidence(
+        _confirmed_box(role="FAR_WICKET", x_min=340, y_min=400, width=24, height=55)
+    )
+
+    result = _confirmed_wicket_fit_validation(
+        width=720,
+        height=1280,
+        observed_near=near,
+        observed_far=far,
+        near_evidence=near_evidence,
+        far_evidence=far_evidence,
+        projected_near=near,
+        projected_far=far,
+    )
+
+    assert result.status == "FIT_READY"
+    assert result.near_wicket.centre_error_px == 0
+    assert result.near_wicket.base_error_px == 0
+    assert result.far_wicket.box_iou == 1
+    assert result.fit_score == 1
+
+
+def test_confirmed_wicket_projection_validation_rejects_giant_near_wicket() -> None:
+    near_evidence = _confirmed_wicket_box_evidence(
+        _confirmed_box(role="NEAR_WICKET", x_min=300, y_min=700, width=80, height=220)
+    )
+    far_evidence = _confirmed_wicket_box_evidence(
+        _confirmed_box(role="FAR_WICKET", x_min=340, y_min=400, width=24, height=55)
+    )
+    result = _confirmed_wicket_fit_validation(
+        width=720,
+        height=1280,
+        observed_near=PixelBox(x=300, y=700, width=80, height=220),
+        observed_far=PixelBox(x=340, y=400, width=24, height=55),
+        near_evidence=near_evidence,
+        far_evidence=far_evidence,
+        projected_near=PixelBox(x=240, y=620, width=220, height=400),
+        projected_far=PixelBox(x=340, y=400, width=24, height=55),
+    )
+
+    assert result.status == "FIT_FAILED"
+    assert "NEAR_WICKET_DRAMATICALLY_OVERSIZED" in result.reasons
+
+
+def test_confirmed_wicket_projection_validation_marks_low_far_iou_approximate() -> None:
+    near_evidence = _confirmed_wicket_box_evidence(
+        _confirmed_box(role="NEAR_WICKET", x_min=300, y_min=700, width=80, height=220)
+    )
+    far_evidence = _confirmed_wicket_box_evidence(
+        _confirmed_box(role="FAR_WICKET", x_min=340, y_min=400, width=24, height=55)
+    )
+    # ponytail: shifted projected far box keeps centre/base reasonable but IoU ~0.54.
+    result = _confirmed_wicket_fit_validation(
+        width=720,
+        height=1280,
+        observed_near=PixelBox(x=300, y=700, width=80, height=220),
+        observed_far=PixelBox(x=340, y=400, width=24, height=55),
+        near_evidence=near_evidence,
+        far_evidence=far_evidence,
+        projected_near=PixelBox(x=300, y=700, width=80, height=220),
+        projected_far=PixelBox(x=347, y=400, width=24, height=55),
+    )
+
+    assert result.status != "FIT_FAILED"
+    assert result.far_wicket.box_iou is not None
+    assert result.far_wicket.box_iou < 0.55
+
+
+def test_confirmed_wicket_projection_validation_keeps_large_width_error_approximate() -> None:
+    near_evidence = _confirmed_wicket_box_evidence(
+        _confirmed_box(role="NEAR_WICKET", x_min=300, y_min=700, width=80, height=220)
+    )
+    far_evidence = _confirmed_wicket_box_evidence(
+        _confirmed_box(role="FAR_WICKET", x_min=340, y_min=400, width=24, height=55)
+    )
+    result = _confirmed_wicket_fit_validation(
+        width=720,
+        height=1280,
+        observed_near=PixelBox(x=300, y=700, width=80, height=220),
+        observed_far=PixelBox(x=340, y=400, width=24, height=55),
+        near_evidence=near_evidence,
+        far_evidence=far_evidence,
+        projected_near=PixelBox(x=310, y=700, width=60, height=220),
+        projected_far=PixelBox(x=345, y=400, width=14, height=55),
+    )
+
+    assert result.status == "FIT_APPROXIMATE"
+    assert "NEAR_WICKET_CENTRE_ERROR_EXCESSIVE" not in result.reasons
+    assert "FAR_WICKET_CENTRE_ERROR_EXCESSIVE" not in result.reasons
+    assert result.reasons == ["PROJECTED_WICKETS_REQUIRE_VISUAL_REVIEW"]
+
+
+def test_confirmed_native_box_contract_preserves_and_derives_evidence() -> None:
+    near = _confirmed_box(
+        role="NEAR_WICKET",
+        x_min=345,
+        y_min=684,
+        width=74,
+        height=213,
+        detector_confidence=0.83,
+    )
+    far = _confirmed_box(
+        role="FAR_WICKET",
+        x_min=394,
+        y_min=443,
+        width=22,
+        height=48,
+        detector_confidence=0.71,
+    )
+
+    request = ConfirmedWicketCameraFitRequest(
+        near_wicket=near,
+        far_wicket=far,
+    )
+    evidence = _confirmed_wicket_box_evidence(request.near_wicket)
+
+    assert request.preset_id == "STANDARD_REAR_WICKET_NET_V1"
+    assert evidence.bounds.x_max == 419
+    assert evidence.bottom_left.model_dump() == {"x": 345.0, "y": 897.0}
+    assert evidence.bottom_right.model_dump() == {"x": 419.0, "y": 897.0}
+    assert evidence.bottom_centre.model_dump() == {"x": 382.0, "y": 897.0}
+    assert evidence.top_centre.model_dump() == {"x": 382.0, "y": 684.0}
+    assert evidence.box_centre.model_dump() == {"x": 382.0, "y": 790.5}
+    assert evidence.detector_confidence == 0.83
+
+
+def test_confirmed_native_box_contract_rejects_inconsistent_dimensions() -> None:
+    with pytest.raises(ValueError, match="width must match"):
+        ConfirmedWicketPixelBox(
+            x_min=100,
+            y_min=200,
+            x_max=150,
+            y_max=300,
+            width=49,
+            height=100,
+            frame_width=720,
+            frame_height=1280,
+            role="NEAR_WICKET",
+            source="MANUAL",
+        )
+
+
+def test_confirmed_wicket_fit_uses_standard_fitter_and_freezes_one_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(registration, "VIDEO_ANALYSIS_ROOT", tmp_path)
+    monkeypatch.setattr(
+        registration,
+        "load_video_analysis",
+        lambda analysis_id: SimpleNamespace(width=720, height=1280),
+    )
+    request = ConfirmedWicketCameraFitRequest(
+        near_wicket=_confirmed_box(
+            role="NEAR_WICKET",
+            x_min=345,
+            y_min=684,
+            width=74,
+            height=213,
+            detector_confidence=0.83,
+        ),
+        far_wicket=_confirmed_box(
+            role="FAR_WICKET",
+            x_min=394,
+            y_min=443,
+            width=22,
+            height=48,
+            detector_confidence=0.71,
+        ),
+    )
+
+    response = registration.fit_confirmed_wicket_camera("analysis_test", request)
+    frozen_path = (
+        tmp_path
+        / "analysis_test"
+        / "calibration"
+        / registration.CONFIRMED_WICKET_CAMERA_FILENAME
+    )
+
+    assert response.camera is not None
+    assert response.camera.source_version == "preset_auto_registration_v1"
+    assert response.fit_status in {"FIT_READY", "FIT_APPROXIMATE"}
+    assert response.fit_validation is not None
+    assert response.fit_validation.near_wicket.base_error_px is not None
+    assert response.fit_validation.far_wicket.projected_bounds is not None
+    assert frozen_path.is_file()
+    assert len(list(frozen_path.parent.glob("confirmed_wicket_camera_fit_v1*"))) == 1

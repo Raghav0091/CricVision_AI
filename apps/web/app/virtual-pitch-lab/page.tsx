@@ -14,24 +14,34 @@ import {
 
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
+import { AssistedSceneCalibrationPanel } from "@/components/video-analysis/AssistedSceneCalibrationPanel";
 import type {
   ActiveCameraDiagnostics,
   VirtualPitchSceneProps,
   VirtualPitchVisualOptions
 } from "@/components/virtual-pitch";
 import {
+  AutoRegistrationPanel,
   CameraDiagnosticsPanel,
   OverlayStage,
+  WicketLandmarkEvidencePanel,
   type CameraBridgePayload,
   type CameraSourceMode,
   type OverlayComparisonMode
 } from "@/components/virtual-pitch-lab";
 import {
+  autoRegistrationCameraBridge,
+  clearPresetAutoRegistration,
   getAnalysisCameraBridge,
+  getCameraSetupPresets,
+  getPresetAutoRegistration,
   getSyntheticCameraBridge,
   getVirtualPitchSpecification,
+  runPresetAutoRegistration,
+  type CameraSetupPreset,
   type NormalizedCameraBridgeResponse,
-  type ProjectedPitchGeometry
+  type PitchProjectionGeometry,
+  type PresetAutoRegistrationResult,
 } from "@/lib/api";
 import {
   adaptVirtualPitchResponse,
@@ -83,6 +93,7 @@ const PRESETS: Array<{ id: CameraPresetId; label: string }> = [
 ];
 
 const SOURCE_OPTIONS: Array<{ id: CameraSourceMode; label: string }> = [
+  { id: "auto-registration", label: "One-click Auto Registration" },
   { id: "development", label: "Development Preset" },
   { id: "synthetic-opencv", label: "Synthetic OpenCV Camera" },
   { id: "real-analysis", label: "Real Analysis Camera" }
@@ -102,7 +113,7 @@ const DEFAULT_VISUAL_OPTIONS: VisualOptions = {
 };
 
 
-function comparisonsFromProjection(projection?: ProjectedPitchGeometry | null) {
+function comparisonsFromProjection(projection?: PitchProjectionGeometry | null) {
   return (projection?.projected_landmarks ?? []).map((landmark) => ({
     semantic_id: landmark.semantic_id,
     world_point: landmark.world_point,
@@ -184,7 +195,7 @@ export default function VirtualPitchLabPage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [webglAvailable, setWebglAvailable] = useState<boolean | null>(null);
-  const [sourceMode, setSourceMode] = useState<CameraSourceMode>("development");
+  const [sourceMode, setSourceMode] = useState<CameraSourceMode>("auto-registration");
   const [layout, setLayout] = useState<PreviewLayout>("landscape");
   const [preset, setPreset] = useState<CameraPresetId>("setup");
   const [cameraAdjustments, setCameraAdjustments] = useState<CameraAdjustments>({});
@@ -193,6 +204,13 @@ export default function VirtualPitchLabPage() {
   const [syntheticCameraName, setSyntheticCameraName] = useState("");
   const [syntheticPayload, setSyntheticPayload] = useState<NormalizedCameraBridgeResponse | null>(null);
   const [analysisId, setAnalysisId] = useState(STRONGEST_ANALYSIS_ID);
+  const [setupPresets, setSetupPresets] = useState<CameraSetupPreset[]>([]);
+  const [setupPresetId, setSetupPresetId] = useState("");
+  const [autoResult, setAutoResult] = useState<PresetAutoRegistrationResult | null>(null);
+  const [autoBusy, setAutoBusy] = useState(false);
+  const [autoError, setAutoError] = useState<string | null>(null);
+  const [presetsLoading, setPresetsLoading] = useState(true);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [bridgePayload, setBridgePayload] = useState<CameraBridgePayload | null>(null);
   const [cameraLoading, setCameraLoading] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
@@ -210,7 +228,10 @@ export default function VirtualPitchLabPage() {
   const aspectRatio = layout === "portrait" ? 9 / 16 : 16 / 9;
   const cameraPreset = useMemo(() => model ? calculateCameraPreset(preset, model, aspectRatio, cameraAdjustments) : null, [aspectRatio, cameraAdjustments, model, preset]);
   const displayedCamera = useMemo(() => model ? resolveCameraAdjustments(model, aspectRatio, cameraAdjustments, preset) : null, [aspectRatio, cameraAdjustments, model, preset]);
-  const activePayload = sourceMode === "synthetic-opencv" && syntheticPayload
+  const automaticPayload = useMemo(() => autoRegistrationCameraBridge(autoResult), [autoResult]);
+  const activePayload = sourceMode === "auto-registration" && automaticPayload
+    ? { ...automaticPayload, comparisons: comparisonsFromProjection(automaticPayload.projection), diagnostics: null } satisfies CameraBridgePayload
+    : sourceMode === "synthetic-opencv" && syntheticPayload
     ? { ...syntheticPayload, comparisons: comparisonsFromProjection(syntheticPayload.projection), diagnostics: null } satisfies CameraBridgePayload
     : sourceMode === "real-analysis" ? bridgePayload : null;
   const threeBridge = useMemo(() => {
@@ -278,6 +299,19 @@ export default function VirtualPitchLabPage() {
   useEffect(() => setWebglAvailable(supportsWebGL()), []);
   useEffect(() => {
     let active = true;
+    setPresetsLoading(true);
+    getCameraSetupPresets()
+      .then((presets) => {
+        if (!active) return;
+        setSetupPresets(presets);
+        setSetupPresetId((current) => current || presets[0]?.preset_id || "");
+      })
+      .catch((error: unknown) => active && setAutoError(error instanceof Error ? error.message : "Camera setup presets are unavailable."))
+      .finally(() => active && setPresetsLoading(false));
+    return () => { active = false; };
+  }, []);
+  useEffect(() => {
+    let active = true;
     setLoading(true);
     getVirtualPitchSpecification()
       .then((response) => {
@@ -315,9 +349,61 @@ export default function VirtualPitchLabPage() {
     }
   }
 
+  async function runAutomaticRegistration() {
+    const id = analysisId.trim();
+    if (!id || !setupPresetId) return;
+    setAutoBusy(true);
+    setAutoError(null);
+    try {
+      const result = await runPresetAutoRegistration(id, {
+        preset_id: setupPresetId,
+        reuse_existing_observations: true,
+        force_redetect: false,
+        development_diagnostics: true
+      });
+      setAutoResult(result);
+      if (result.status === "AUTO_REGISTRATION_READY" || result.status === "VISUAL_OVERLAY_READY") {
+        setAdvancedOpen(false);
+      } else if (result.manual_assistance_available) {
+        setAdvancedOpen(true);
+      }
+    } catch (error) {
+      setAutoError(error instanceof Error ? error.message : "Automatic registration failed.");
+    } finally {
+      setAutoBusy(false);
+    }
+  }
+
+  async function clearAutomaticRegistration() {
+    const id = analysisId.trim();
+    if (!id) return;
+    setAutoBusy(true);
+    setAutoError(null);
+    try {
+      await clearPresetAutoRegistration(id);
+      setAutoResult(null);
+    } catch (error) {
+      setAutoError(error instanceof Error ? error.message : "Automatic registration result could not be cleared.");
+    } finally {
+      setAutoBusy(false);
+    }
+  }
+
   useEffect(() => {
     if (sourceMode === "real-analysis") void loadRealCamera();
     // Loading is intentionally tied to source selection; subsequent IDs use the explicit button.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceMode]);
+
+  useEffect(() => {
+    if (sourceMode !== "auto-registration" || !analysisId.trim()) return;
+    let active = true;
+    setAutoError(null);
+    void getPresetAutoRegistration(analysisId.trim())
+      .then((result) => active && setAutoResult(result))
+      .catch((error: unknown) => active && setAutoError(error instanceof Error ? error.message : "Saved automatic registration could not be loaded."));
+    return () => { active = false; };
+    // Existing results are restored on mode entry; editing the ID does not issue requests per keystroke.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceMode]);
 
@@ -334,7 +420,7 @@ export default function VirtualPitchLabPage() {
     <RendererBoundary>
       <VirtualPitchCanvas
         model={model}
-        mode={(calibrated ? (sourceMode === "real-analysis" ? "real-frame-overlay" : "camera-validation") : "development") as VirtualPitchSceneProps["mode"]}
+        mode={(calibrated ? (sourceMode === "real-analysis" || sourceMode === "auto-registration" ? "real-frame-overlay" : "camera-validation") : "development") as VirtualPitchSceneProps["mode"]}
         camera={cameraPreset}
         calibratedCamera={threeBridge ?? undefined}
         visualOptions={rendererOptions}
@@ -354,15 +440,38 @@ export default function VirtualPitchLabPage() {
         <p className="text-sm font-bold text-white/70">{model?.modelVersion ?? "Loading Virtual Pitch V1..."}</p>
       </header>
 
-      <div className="mt-5 flex overflow-x-auto rounded border border-white/10 bg-white/[0.03] p-1">
-        {SOURCE_OPTIONS.map((source) => (
-          <button key={source.id} type="button" aria-pressed={sourceMode === source.id} className={`min-w-fit flex-1 px-3 py-2 text-xs font-bold transition ${sourceMode === source.id ? "bg-white/12 text-white" : "text-white/45 hover:text-white"}`} onClick={() => setSourceMode(source.id)}>{source.label}</button>
-        ))}
+      <div className="mt-5 flex gap-2 border-b border-white/10 pb-4">
+        <button type="button" aria-pressed={sourceMode === "auto-registration"} className={`px-3 py-2 text-xs font-bold ${sourceMode === "auto-registration" ? "bg-white/12 text-white" : "text-white/45 hover:text-white"}`} onClick={() => { setSourceMode("auto-registration"); setAdvancedOpen(false); }}>One-click Auto Registration</button>
+        <button type="button" aria-expanded={advancedOpen} className={`px-3 py-2 text-xs font-bold ${sourceMode !== "auto-registration" || advancedOpen ? "text-white" : "text-white/45 hover:text-white"}`} onClick={() => { if (advancedOpen && sourceMode !== "auto-registration") setSourceMode("auto-registration"); setAdvancedOpen((open) => !open); }}>Advanced Calibration {advancedOpen ? "-" : "+"}</button>
       </div>
+
+      {advancedOpen && <div className="mt-3 flex overflow-x-auto rounded border border-white/10 bg-white/[0.03] p-1">{SOURCE_OPTIONS.filter((source) => source.id !== "auto-registration").map((source) => <button key={source.id} type="button" aria-pressed={sourceMode === source.id} className={`min-w-fit flex-1 px-3 py-2 text-xs font-bold transition ${sourceMode === source.id ? "bg-white/12 text-white" : "text-white/45 hover:text-white"}`} onClick={() => setSourceMode(source.id)}>{source.label}</button>)}</div>}
 
       <div className="mt-5 grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_21rem]">
         <main className="min-w-0 space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
+          {sourceMode === "auto-registration" && <AutoRegistrationPanel
+            analysisId={analysisId}
+            presetId={setupPresetId}
+            presets={setupPresets}
+            result={autoResult}
+            busy={autoBusy}
+            loadingPresets={presetsLoading}
+            error={autoError}
+            onAnalysisIdChange={(value) => { setAnalysisId(value); setAutoResult(null); }}
+            onPresetIdChange={(value) => { setSetupPresetId(value); setAutoResult(null); }}
+            onRun={() => void runAutomaticRegistration()}
+            onClear={() => void clearAutomaticRegistration()}
+            onOpenAdvanced={() => setAdvancedOpen(true)}
+          />}
+
+          {sourceMode === "auto-registration" && <WicketLandmarkEvidencePanel
+            analysisId={analysisId}
+            presetId={setupPresetId}
+            onAnalysisIdChange={(value) => { setAnalysisId(value); setAutoResult(null); }}
+            onImprovedRegistration={setAutoResult}
+          />}
+
+          {sourceMode !== "auto-registration" && <div className="flex flex-wrap items-center justify-between gap-3">
             {sourceMode === "development" ? (
               <>
                 <div className="flex rounded border border-white/10 bg-white/[0.03] p-1">
@@ -380,7 +489,7 @@ export default function VirtualPitchLabPage() {
                 <option value="three">Three.js only</option><option value="svg">OpenCV SVG only</option><option value="both">Both overlays</option><option value="side-by-side">Side by side</option>
               </select>
             )}
-          </div>
+          </div>}
 
           <div className={`overflow-hidden rounded border border-white/10 bg-black shadow-glow ${sourceMode === "development" ? (layout === "portrait" ? "mx-auto aspect-[9/16] w-full max-w-[32rem]" : "aspect-video") : "h-[min(68dvh,48rem)] min-h-[22rem]"}`}>
             {loading || cameraLoading ? <ViewportMessage title="Loading camera stage" detail="Preparing canonical geometry and camera evidence..." />
@@ -391,7 +500,7 @@ export default function VirtualPitchLabPage() {
                 <OverlayStage
                   imageWidth={nativeWidth}
                   imageHeight={nativeHeight}
-                  frameUrl={sourceMode === "real-analysis" ? activePayload.camera.setup_frame_url : null}
+                  frameUrl={sourceMode === "real-analysis" || sourceMode === "auto-registration" ? activePayload.camera.setup_frame_url : null}
                   threeCanvas={canvas}
                   projection={activePayload.projection}
                   comparisons={comparisons}
@@ -403,7 +512,7 @@ export default function VirtualPitchLabPage() {
                   showLabels={showLabels}
                   onCanvasCountChange={handleCanvasCountChange}
                 />
-              ) : <ViewportMessage title="No calibrated camera" detail="Select a synthetic camera or load a real analysis camera candidate." />}
+              ) : <ViewportMessage title={sourceMode === "auto-registration" ? "No automatic alignment yet" : "No calibrated camera"} detail={sourceMode === "auto-registration" ? "Choose a setup preset, then run Auto Detect and Align." : "Select a synthetic camera or load a real analysis camera candidate."} />}
           </div>
 
           {calibrated && (
@@ -417,7 +526,7 @@ export default function VirtualPitchLabPage() {
         </main>
 
         <aside className="min-w-0 space-y-4">
-          <Card className="shadow-none">
+          {sourceMode !== "auto-registration" && <Card className="shadow-none">
             <div className="flex items-center justify-between gap-3"><p className="text-xs font-bold uppercase tracking-[0.14em] text-white/40">Camera</p><span className="text-[10px] font-bold uppercase text-[#ffe761]">{calibrated ? "Calibrated" : "Development"}</span></div>
             {displayedCamera && <div className="mt-5 space-y-5">
               <RangeControl disabled={calibrated} label="Height" value={displayedCamera.heightM} min={0.2} max={8} step={0.1} suffix=" m" onChange={(value) => setCameraAdjustments((current) => ({ ...current, heightM: value }))} />
@@ -426,7 +535,7 @@ export default function VirtualPitchLabPage() {
               <Toggle disabled={calibrated} label="Orbit controls" checked={!calibrated && visualOptions.enableOrbitControls} onChange={(value) => updateVisual("enableOrbitControls", value)} />
               {!calibrated && <Button className="w-full text-xs" variant="secondary" onClick={() => setCameraAdjustments({})}>Reset camera</Button>}
             </div>}
-          </Card>
+          </Card>}
 
           <Card className="shadow-none">
             <p className="text-xs font-bold uppercase tracking-[0.14em] text-white/40">Visual and debug</p>
@@ -450,6 +559,8 @@ export default function VirtualPitchLabPage() {
           {calibrated && showCameraDiagnostics && <Card className="shadow-none"><p className="mb-4 text-xs font-bold uppercase tracking-[0.14em] text-white/40">Bridge diagnostics</p><CameraDiagnosticsPanel camera={activePayload?.camera ?? null} diagnostics={diagnostics} activeCamera={activeCameraDiagnostics} requestedCamera={sourceMode} activeCanvasCount={activeCanvasCount} /></Card>}
         </aside>
       </div>
+
+      {sourceMode === "auto-registration" && advancedOpen && analysisId.trim() && <section className="mt-5 border border-white/10 bg-white/[0.02] p-4 sm:p-5"><div className="mb-4"><p className="text-xs font-black uppercase text-[#ffe761]">Advanced Calibration</p><p className="mt-1 text-sm text-white/45">Manual anchors remain separate from the automatic result and are changed only by your actions here.</p></div><AssistedSceneCalibrationPanel key={analysisId.trim()} analysisId={analysisId.trim()} /></section>}
     </div>
   );
 }

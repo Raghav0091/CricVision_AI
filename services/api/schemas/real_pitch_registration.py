@@ -43,6 +43,7 @@ class RegistrationCorrespondence(RegistrationModel):
         "TOP_LINE",
         "BASE_LINE",
         "OUTER_AXIS",
+        "STUMP_AXIS",
         "WICKET_ENVELOPE",
         "WICKET_CENTRE",
         "CREASE_POINT",
@@ -61,6 +62,8 @@ class RegistrationCorrespondence(RegistrationModel):
     virtual_line_end: WorldPoint3D | None = None
     confidence: float = Field(ge=0, le=1)
     uncertainty_px: float = Field(ge=0)
+    angular_uncertainty_deg: float | None = Field(default=None, ge=0)
+    correlation_family: str | None = None
     registration_weight: float = Field(ge=0)
     source_frames: list[int] = Field(default_factory=list)
     status: Literal["USED", "SOFT_ONLY", "REJECTED", "UNAVAILABLE"]
