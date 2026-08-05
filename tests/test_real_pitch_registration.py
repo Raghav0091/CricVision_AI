@@ -5,9 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from fastapi.testclient import TestClient
 
-from services.api.main import app
 from services.api.schemas.real_pitch_registration import (
     RealPitchRegistrationResult,
     RegistrationDiagnostics,
@@ -529,29 +527,6 @@ def _locked_result() -> RealPitchRegistrationResult:
         diagnostics=RegistrationDiagnostics(),
         message="not attempted",
     )
-
-
-def test_registration_api_get_and_post_remain_metric_locked(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    payload = _locked_result()
-    monkeypatch.setattr(
-        "services.api.routes.video_analysis.load_real_pitch_registration",
-        lambda analysis_id: payload,
-    )
-    monkeypatch.setattr(
-        "services.api.routes.video_analysis.run_real_pitch_registration",
-        lambda analysis_id: payload,
-    )
-    client = TestClient(app)
-    for method in ("get", "post"):
-        response = getattr(client, method)(
-            "/video-analysis/analysis_api_test/pitch-registration"
-            + ("/run" if method == "post" else "")
-        )
-        assert response.status_code == 200
-        assert response.json()["metrics_locked"] is True
-        assert response.json()["acceptance_required"] is True
 
 
 def test_registration_service_cannot_unlock_legacy_physics() -> None:

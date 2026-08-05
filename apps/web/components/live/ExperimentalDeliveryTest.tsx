@@ -459,15 +459,12 @@ export function ExperimentalDeliveryTest({ onSelectCalibration }: { onSelectCali
             </div>
 
             {recordingError && <p className="mt-4 rounded-lg border border-signal/30 bg-signal/10 p-3 text-xs leading-5 text-[#ffaaa6]">{recordingError}</p>}
-            {failedUploads > 0 && <p className="mt-3 text-xs text-[#ffaaa6]">{failedUploads} delivery upload{failedUploads === 1 ? "" : "s"} failed. Open Session Results for details.</p>}
+            {failedUploads > 0 && <p className="mt-3 text-xs text-[#ffaaa6]">{failedUploads} delivery upload{failedUploads === 1 ? "" : "s"} failed.</p>}
 
             {overComplete && sessionId && (
               <div className="mt-5 rounded-xl border border-lime/20 bg-lime/[0.05] p-4">
                 <p className="font-black text-lime">Over Complete</p>
-                <p className="mt-2 text-sm leading-6 text-white/60">Six delivery clips have been saved. Ball-detection results are available in Session Results as processing finishes.</p>
-                <Link href={`/sessions/results?session_id=${encodeURIComponent(sessionId)}`} className="mt-4 inline-flex rounded-xl bg-lime px-4 py-3 text-sm font-black text-ink transition hover:brightness-105">
-                  View Session Results
-                </Link>
+                <p className="mt-2 text-sm leading-6 text-white/60">Six delivery clips were saved. Ball-detection jobs were submitted for each clip.</p>
               </div>
             )}
 

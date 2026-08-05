@@ -79,9 +79,8 @@ export function VirtualPitchCanvas(props: VirtualPitchSceneProps) {
     return <RendererFallback message="WebGL is unavailable. Enable hardware acceleration to view the 3D pitch." />;
   }
 
-  const calibratedMode = props.mode === "camera-validation" || props.mode === "real-frame-overlay";
-
-  if (calibratedMode && !props.calibratedCamera) {
+  const requiresCalibratedCamera = props.mode === "camera-validation" || props.mode === "real-frame-overlay";
+  if (requiresCalibratedCamera && !props.calibratedCamera) {
     return <RendererFallback message="A calibrated camera is required for this renderer mode." />;
   }
 
@@ -90,13 +89,17 @@ export function VirtualPitchCanvas(props: VirtualPitchSceneProps) {
 
 
 function ReadyVirtualPitchCanvas(props: VirtualPitchSceneProps) {
-  const calibratedMode = props.mode === "camera-validation" || props.mode === "real-frame-overlay";
+  const usesCalibratedCamera = (
+    props.mode === "camera-validation"
+    || props.mode === "real-frame-overlay"
+    || (props.mode === "interactive-replay" && Boolean(props.calibratedCamera))
+  );
   const bridge = useMemo<ThreeCameraBridge | null>(() => {
-    if (!calibratedMode || !props.calibratedCamera) return null;
+    if (!usesCalibratedCamera || !props.calibratedCamera) return null;
     return "projectionMatrix" in props.calibratedCamera
       ? props.calibratedCamera
       : buildThreeCameraFromOpenCv(props.calibratedCamera as CameraBridgeInput);
-  }, [calibratedMode, props.calibratedCamera]);
+  }, [usesCalibratedCamera, props.calibratedCamera]);
   const ownedCamera = useOwnedPitchCamera(props.camera, bridge);
   const [readyCameraUuid, setReadyCameraUuid] = useState<string | null>(null);
   const cameraReady = readyCameraUuid === ownedCamera.camera.uuid;
@@ -105,12 +108,14 @@ function ReadyVirtualPitchCanvas(props: VirtualPitchSceneProps) {
     ? 1
     : Math.max(1, Math.min(2, requestedCap));
   const transparent = props.mode === "real-frame-overlay";
+  const replayMode = props.mode === "interactive-replay";
   const overlayOpacity = transparent
     ? Math.max(0, Math.min(1, props.visualOptions.overlayOpacity ?? 1))
     : 1;
   const handleReadyChange = useCallback((cameraUuid: string, ready: boolean) => {
     setReadyCameraUuid(ready ? cameraUuid : null);
   }, []);
+  const frameloop = props.frameloop ?? "demand";
 
   return (
     <RendererErrorBoundary>
@@ -121,13 +126,19 @@ function ReadyVirtualPitchCanvas(props: VirtualPitchSceneProps) {
           dpr={[1, dprCap]}
           fallback={<RendererFallback message="WebGL is unavailable. Enable hardware acceleration to view the 3D pitch." />}
           flat
-          frameloop="demand"
+          frameloop={frameloop}
           gl={{
-            alpha: true,
+            alpha: !replayMode,
             antialias: !props.visualOptions.lowPerformance,
             powerPreference: props.visualOptions.lowPerformance ? "low-power" : "high-performance"
           }}
-          onCreated={({ gl }) => gl.setClearColor(0x000000, 0)}
+          onCreated={({ gl, invalidate }) => {
+            gl.setClearColor(0x000000, replayMode ? 1 : 0);
+            if (props.exportWidth && props.exportHeight) {
+              gl.setSize(props.exportWidth, props.exportHeight, false);
+            }
+            props.onCanvasReady?.(gl.domElement, invalidate);
+          }}
           shadows={false}
           style={{
             background: transparent ? "transparent" : undefined,
@@ -142,7 +153,7 @@ function ReadyVirtualPitchCanvas(props: VirtualPitchSceneProps) {
             onCameraReadyChange={handleReadyChange}
           />
         </Canvas>
-        {!cameraReady && calibratedMode ? (
+        {!cameraReady && usesCalibratedCamera ? (
           <div className="pointer-events-none absolute inset-0 grid place-items-center bg-black/70 text-sm font-semibold text-white/70">
             Preparing calibrated camera...
           </div>

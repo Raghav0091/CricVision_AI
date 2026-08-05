@@ -139,6 +139,8 @@ def run_video_ball_detection_job(
 
 def load_video_ball_detection_result(
     analysis_id: str,
+    *,
+    include_frames: bool = False,
 ) -> VideoBallDetectionResultResponse:
     load_video_analysis(analysis_id)
     output_dir = _detection_output_dir(analysis_id)
@@ -193,6 +195,7 @@ def load_video_ball_detection_result(
         analysis_id=analysis_id,
         summary=summary,
         frame_candidate_counts=frame_candidate_counts,
+        frames=document.frames if include_frames else None,
         message="Every-frame ball detection completed.",
     )
 

@@ -162,24 +162,6 @@ def _load_model(model_path: str):
     return YOLO(model_path)
 
 
-def detect_stump_candidates(image: Image.Image) -> dict[str, Any]:
-    """Run the shared cached stump model once over a complete reference frame."""
-    result = detect_wickets_robust(image, enable_roi=False)
-    return {
-        "success": result["success"],
-        "status": result["status"],
-        "message": result["message"],
-        "candidates": [
-            {
-                "confidence": item["confidence"],
-                "class_name": item["class_name"],
-                "bbox": item["bbox"],
-            }
-            for item in result.get("candidates") or []
-        ],
-    }
-
-
 # ponytail: sensible rear-camera defaults — far upper/central, near lower/central larger.
 DEFAULT_STRIKER_GUIDE = {"x": 0.34, "y": 0.16, "width": 0.32, "height": 0.36}
 DEFAULT_NON_STRIKER_GUIDE = {"x": 0.22, "y": 0.48, "width": 0.56, "height": 0.48}

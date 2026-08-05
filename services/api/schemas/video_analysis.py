@@ -879,6 +879,7 @@ class VideoBallDetectionResultResponse(BaseModel):
     analysis_id: str
     summary: VideoBallDetectionSummary
     frame_candidate_counts: list[int]
+    frames: list[FrameDetectionRecord] | None = None
     message: str
 
 
@@ -1019,6 +1020,9 @@ class VideoBallTrackingDocument(BaseModel):
 
 class VideoBallTrackingSummary(BaseModel):
     analysis_id: str
+    tracking_job_id: str | None = None
+    source_track_id: str | None = None
+    track_source_consistent: bool | None = None
     status: Literal["ready", "no_reliable_track"]
     total_video_frames: int = Field(gt=0)
     raw_candidate_count: int = Field(ge=0)
@@ -1049,6 +1053,8 @@ class VideoBallTrackingSummary(BaseModel):
     bounce_confidence: float = Field(default=0.0, ge=0, le=1)
     tracking_video_url: str
     delivery_replay_url: str | None = None
+    replay_payload_url: str | None = None
+    finalized_track_url: str | None = None
     physics_result_url: str | None = None
     physics_engine_version: Literal["v1"] | None = None
     physics_status: Literal[
@@ -1071,6 +1077,12 @@ class VideoBallTrackingResultResponse(BaseModel):
     analysis_id: str
     summary: VideoBallTrackingSummary
     primary_track: list[TrackingPoint]
+    render_track: list[TrackingPoint] = Field(default_factory=list)
+    raw_primary_track: list[TrackingPoint] = Field(default_factory=list)
+    candidate_diagnostics: list[TrackingCandidateDiagnostic] = Field(
+        default_factory=list
+    )
     bounce: PrimaryBounceResult | None = None
     physics: DeliveryPhysicsResult | None = None
+    track_source_consistency_errors: list[str] = Field(default_factory=list)
     message: str

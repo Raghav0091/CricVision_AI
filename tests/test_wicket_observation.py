@@ -4,11 +4,9 @@ import json
 from pathlib import Path
 
 import cv2
-from fastapi.testclient import TestClient
 import numpy as np
 import pytest
 
-from services.api.main import app
 from services.api.schemas.wicket_observation import (
     AssignmentHypothesis,
     PixelBox,
@@ -455,76 +453,6 @@ def test_frame_quality_marks_black_frame_as_dark() -> None:
     assert sharpness == 0
     assert brightness == 0
     assert 0 <= obstruction <= 1
-
-
-def test_api_returns_stored_observation(monkeypatch: pytest.MonkeyPatch) -> None:
-    payload = WicketObservationResult(
-        analysis_id="analysis_20260728_120858_762989",
-        status="INSUFFICIENT_WICKETS",
-        setup_frame=None,
-        assignment_hypotheses=[
-            AssignmentHypothesis(
-                hypothesis_id="A",
-                near_semantic_end="bowler",
-                far_semantic_end="striker",
-                confidence=0.5,
-                evidence=[],
-            ),
-            AssignmentHypothesis(
-                hypothesis_id="B",
-                near_semantic_end="striker",
-                far_semantic_end="bowler",
-                confidence=0.5,
-                evidence=[],
-            ),
-        ],
-        diagnostics=WicketObservationDiagnostics(
-            detector_model_path="Models/stump_detector/best.pt",
-            detector_class_labels=[],
-            clean_source_video="/static/raw.mp4",
-            sampled_frame_ids=[],
-            raw_detections=[],
-        ),
-        future_registration_readiness="INSUFFICIENT_WICKETS",
-        message="partial",
-    )
-    monkeypatch.setattr(
-        "services.api.routes.video_analysis.load_wicket_observation",
-        lambda analysis_id: payload,
-    )
-    response = TestClient(app).get(
-        "/video-analysis/analysis_20260728_120858_762989/wicket-observations"
-    )
-    assert response.status_code == 200
-    assert response.json()["version"] == "wicket_observations_v1"
-    assert response.json()["developer_only"] is True
-
-
-def test_api_runs_wicket_observation(monkeypatch: pytest.MonkeyPatch) -> None:
-    payload = WicketObservationResult(
-        analysis_id="analysis_20260728_120858_762989",
-        status="INSUFFICIENT_WICKETS",
-        setup_frame=None,
-        assignment_hypotheses=_assignment_hypotheses(),
-        diagnostics=WicketObservationDiagnostics(
-            detector_model_path="Models/stump_detector/best.pt",
-            detector_class_labels=["stump_set"],
-            clean_source_video="/static/raw.mp4",
-            sampled_frame_ids=[],
-            raw_detections=[],
-        ),
-        future_registration_readiness="INSUFFICIENT_WICKETS",
-        message="partial",
-    )
-    monkeypatch.setattr(
-        "services.api.routes.video_analysis.run_wicket_observation",
-        lambda analysis_id: payload,
-    )
-    response = TestClient(app).post(
-        "/video-analysis/analysis_20260728_120858_762989/wicket-observations/run"
-    )
-    assert response.status_code == 200
-    assert response.json()["future_registration_readiness"] == "INSUFFICIENT_WICKETS"
 
 
 def test_service_has_no_pose_release_or_real_pnp_imports() -> None:

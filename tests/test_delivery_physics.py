@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from packages.cricket_vision.calibration.cricket_pitch_geometry import (
+    CALIBRATION_V2_WORLD_ORDER,
     PITCH_LENGTH_M,
     PITCH_WIDTH_M,
 )
@@ -64,6 +65,7 @@ def synthetic_calibration() -> CameraCalibration:
     return CameraCalibration(
         mode="METRIC_3D",
         confidence="HIGH",
+        world_coordinate_system=CALIBRATION_V2_WORLD_ORDER,
         image_width=1280,
         image_height=720,
         camera_matrix=camera_matrix.tolist(),

@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from .routes import analysis, calibration, deliveries, health, sessions, video_analysis
+from .routes import analysis, calibration, health, sessions, video_analysis
 
 
 def _development_cors_origins() -> list[str]:
@@ -27,7 +27,6 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(calibration.router)
 app.include_router(sessions.router)
-app.include_router(deliveries.router)
 app.include_router(analysis.router)
 app.include_router(video_analysis.router)
 

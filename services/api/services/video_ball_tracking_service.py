@@ -38,7 +38,15 @@ from .ball_detection_clip import transcode_browser_mp4
 from .delivery_physics_service import (
     analyse_delivery_physics,
     failed_physics_result,
+    refine_metric_calibration_with_track,
 )
+from .finalized_delivery_track import (
+    FINALIZED_TRACK_FILENAME,
+    FinalizedDeliveryTrack,
+    build_finalized_delivery_track,
+    cache_bust_url,
+)
+from .replay_payload_service import build_and_save_replay_payload
 from .video_analysis_service import (
     VIDEO_ANALYSIS_ROOT,
     VideoAnalysisServiceError,
@@ -64,6 +72,7 @@ TRACKING_SUMMARY_FILENAME = "tracking_summary.json"
 TRACKING_VIDEO_FILENAME = "tracking_debug.mp4"
 DELIVERY_REPLAY_FILENAME = "delivery_replay.mp4"
 PHYSICS_RESULT_FILENAME = "physics_result.json"
+REPLAY_PAYLOAD_FILENAME = "replay_payload.json"
 
 _PROVENANCE_TO_SOURCE: dict[TrackingProvenance, Literal["observed", "predicted", "recovered"]] = {
     "OBSERVED": "observed",
@@ -121,6 +130,35 @@ def validate_video_ball_tracking_input(analysis_id: str) -> None:
         )
 
 
+def invalidate_tracking_after_calibration_change(analysis_id: str) -> None:
+    """Drop tracking outputs that predate a newly accepted calibration."""
+    output_dir = _tracking_output_dir(analysis_id)
+    if not output_dir.is_dir():
+        return
+    _clear_previous_tracking_outputs(output_dir)
+    metadata_path = (
+        VIDEO_ANALYSIS_ROOT
+        / analysis_id
+        / "reports"
+        / "analysis_metadata.json"
+    )
+    if not metadata_path.is_file():
+        return
+    try:
+        _update_analysis_metadata(
+            analysis_id,
+            tracking_status=None,
+            tracking_job_id=None,
+            tracking_started_at=None,
+            tracking_completed_at=None,
+            tracking_summary_url=None,
+            tracking_video_url=None,
+            updated_at=_iso(utc_now()),
+        )
+    except VideoBallTrackingError:
+        pass
+
+
 def mark_video_ball_tracking_queued(analysis_id: str, job_id: str) -> None:
     now = utc_now()
     _update_analysis_metadata(
@@ -137,7 +175,7 @@ def mark_video_ball_tracking_queued(analysis_id: str, job_id: str) -> None:
 
 def run_video_ball_tracking_job(analysis_id: str, job_id: str) -> None:
     try:
-        summary, primary_track = _process_video_ball_tracking(
+        summary, primary_track, _finalized_track = _process_video_ball_tracking(
             analysis_id,
             job_id,
         )
@@ -171,7 +209,7 @@ def run_video_ball_tracking_job(analysis_id: str, job_id: str) -> None:
             tracking_video_url=summary.tracking_video_url,
             updated_at=_iso(utc_now()),
         )
-        _ = primary_track
+        _ = primary_track, _finalized_track
     except (VideoBallTrackingError, VideoAnalysisServiceError) as exc:
         message = getattr(exc, "message", str(exc))
         _mark_job_failed(analysis_id, job_id, message)
@@ -225,14 +263,32 @@ def load_video_ball_tracking_result(
             "Saved tracking results are incomplete.",
             status_code=404,
         )
+    finalized_path = output_dir / FINALIZED_TRACK_FILENAME
+    render_track = document.primary_track
+    consistency_errors: list[str] = []
+    if finalized_path.is_file():
+        try:
+            finalized_track = FinalizedDeliveryTrack.model_validate(
+                json.loads(finalized_path.read_text(encoding="utf-8"))
+            )
+            render_track = finalized_track.render_track or document.primary_track
+            consistency_errors = list(
+                finalized_track.source_consistency.errors
+            )
+        except (OSError, json.JSONDecodeError, ValueError):
+            render_track = document.primary_track
     return VideoBallTrackingResultResponse(
         success=summary.status == "ready",
         status=summary.status,
         analysis_id=analysis_id,
         summary=summary,
         primary_track=document.primary_track,
+        render_track=render_track,
+        raw_primary_track=document.raw_primary_track,
+        candidate_diagnostics=document.candidate_diagnostics,
         bounce=document.bounce,
         physics=document.physics,
+        track_source_consistency_errors=consistency_errors,
         message=summary.message,
     )
 
@@ -240,7 +296,7 @@ def load_video_ball_tracking_result(
 def _process_video_ball_tracking(
     analysis_id: str,
     job_id: str,
-) -> tuple[VideoBallTrackingSummary, list[TrackingPoint]]:
+) -> tuple[VideoBallTrackingSummary, list[TrackingPoint], FinalizedDeliveryTrack]:
     analysis = load_video_analysis(analysis_id)
     validate_video_ball_tracking_input(analysis_id)
     started_at = utc_now()
@@ -336,6 +392,8 @@ def _process_video_ball_tracking(
             primary_track,
             bounce.bounce_frame,
         )
+    if reliable and primary_track:
+        primary_track = _terminate_tracking_points(primary_track, fps=analysis.fps)
 
     _update_job(
         job_id,
@@ -364,6 +422,28 @@ def _process_video_ball_tracking(
                 f"{type(exc).__name__}."
             ),
         )
+    if (
+        reliable
+        and primary_track
+        and physics.geometry_validation is not None
+        and physics.geometry_validation.validity != "VALID_METRIC_3D"
+    ):
+        try:
+            refined = refine_metric_calibration_with_track(
+                analysis_id=analysis_id,
+                primary_track=primary_track,
+                detections=detection_document,
+                tracker_bounce=bounce,
+                fps=analysis.fps,
+                width=analysis.width,
+                height=analysis.height,
+                total_frames=analysis.frame_count,
+                current_physics=physics,
+            )
+        except Exception:
+            refined = None
+        if refined is not None:
+            physics = refined
     physics_relative_url = (
         f"/static/video-analysis/{analysis_id}/tracking/"
         f"{PHYSICS_RESULT_FILENAME}"
@@ -371,11 +451,18 @@ def _process_video_ball_tracking(
     physics = physics.model_copy(
         update={"physics_result_url": physics_relative_url}
     )
-    physics_replay_track = _physics_replay_points(
-        physics,
-        analysis.width,
-        analysis.height,
+    completed_at = utc_now()
+    finalized_track = build_finalized_delivery_track(
+        analysis_id=analysis_id,
+        tracking_job_id=job_id,
+        generated_at=completed_at,
+        primary_track=primary_track if reliable else [],
+        physics=physics,
+        fps=analysis.fps,
+        width=analysis.width,
+        height=analysis.height,
     )
+    render_track = finalized_track.render_track
     physics_bounce = _physics_replay_bounce(
         physics,
         analysis.width,
@@ -395,7 +482,7 @@ def _process_video_ball_tracking(
         fps=analysis.fps,
         width=analysis.width,
         height=analysis.height,
-        primary_track=primary_track,
+        primary_track=render_track,
         candidates=candidates,
         track_confidence=track_confidence,
         bounce=bounce if reliable else None,
@@ -414,7 +501,7 @@ def _process_video_ball_tracking(
         )
 
     delivery_replay_url: str | None = None
-    if reliable and primary_track:
+    if reliable and render_track:
         replay_path = _render_delivery_replay(
             analysis_id=analysis_id,
             stored_filename=analysis.stored_filename,
@@ -422,7 +509,7 @@ def _process_video_ball_tracking(
             fps=analysis.fps,
             width=analysis.width,
             height=analysis.height,
-            primary_track=physics_replay_track or primary_track,
+            primary_track=render_track,
             bounce=physics_bounce or bounce,
             job_id=job_id,
         )
@@ -446,7 +533,6 @@ def _process_video_ball_tracking(
         92,
         "Saving tracking results...",
     )
-    completed_at = utc_now()
     status = "ready" if reliable else "no_reliable_track"
     message = (
         "Complete Delivery Tracking v2 completed."
@@ -491,12 +577,12 @@ def _process_video_ball_tracking(
     ]
     physics_points = [
         point
-        for point in physics_replay_track
+        for point in render_track
         if point.provenance == "PHYSICS_RECONSTRUCTED"
     ]
     projected_points = [
         point
-        for point in physics_replay_track
+        for point in render_track
         if point.provenance == "PROJECTED"
     ]
     observation_gaps = _observation_gaps(primary_tracklet)
@@ -512,8 +598,28 @@ def _process_video_ball_tracking(
         if primary_track
         else 0.0
     )
+    tracking_video_url = cache_bust_url(
+        f"{relative_base}/{TRACKING_VIDEO_FILENAME}",
+        tracking_job_id=job_id,
+    )
+    if delivery_replay_url is not None:
+        delivery_replay_url = cache_bust_url(
+            delivery_replay_url,
+            tracking_job_id=job_id,
+        )
+    replay_payload_url = cache_bust_url(
+        f"{relative_base}/{REPLAY_PAYLOAD_FILENAME}",
+        tracking_job_id=job_id,
+    )
+    finalized_track_url = cache_bust_url(
+        f"{relative_base}/{FINALIZED_TRACK_FILENAME}",
+        tracking_job_id=job_id,
+    )
     summary = VideoBallTrackingSummary(
         analysis_id=analysis_id,
+        tracking_job_id=job_id,
+        source_track_id=finalized_track.track_id,
+        track_source_consistent=finalized_track.source_consistency.consistent,
         status=status,
         total_video_frames=analysis.frame_count,
         raw_candidate_count=len(candidates),
@@ -551,14 +657,28 @@ def _process_video_ball_tracking(
         bounce_detected=bounce.bounce_detected,
         bounce_frame=bounce.bounce_frame,
         bounce_confidence=bounce.confidence,
-        tracking_video_url=f"{relative_base}/{TRACKING_VIDEO_FILENAME}",
+        tracking_video_url=tracking_video_url,
         delivery_replay_url=delivery_replay_url,
-        physics_result_url=physics_relative_url,
+        replay_payload_url=replay_payload_url,
+        finalized_track_url=finalized_track_url,
+        physics_result_url=cache_bust_url(
+            physics_relative_url,
+            tracking_job_id=job_id,
+        ),
         physics_engine_version="v1",
         physics_status=physics.status,
-        tracking_json_url=f"{relative_base}/{TRACKING_RESULT_FILENAME}",
-        tracking_csv_url=f"{relative_base}/{TRACKING_CSV_FILENAME}",
-        tracking_summary_url=f"{relative_base}/{TRACKING_SUMMARY_FILENAME}",
+        tracking_json_url=cache_bust_url(
+            f"{relative_base}/{TRACKING_RESULT_FILENAME}",
+            tracking_job_id=job_id,
+        ),
+        tracking_csv_url=cache_bust_url(
+            f"{relative_base}/{TRACKING_CSV_FILENAME}",
+            tracking_job_id=job_id,
+        ),
+        tracking_summary_url=cache_bust_url(
+            f"{relative_base}/{TRACKING_SUMMARY_FILENAME}",
+            tracking_job_id=job_id,
+        ),
         processing_duration_seconds=round(
             time.perf_counter() - started_clock,
             3,
@@ -578,7 +698,21 @@ def _process_video_ball_tracking(
         output_dir / TRACKING_SUMMARY_FILENAME,
         summary.model_dump(mode="json"),
     )
-    return summary, primary_track
+    _write_json(
+        output_dir / FINALIZED_TRACK_FILENAME,
+        finalized_track.model_dump(mode="json"),
+    )
+    build_and_save_replay_payload(
+        analysis_id,
+        physics=physics,
+        primary_track=primary_track,
+        finalized_track=finalized_track,
+        tracking_status=status,
+        fps=analysis.fps,
+        width=analysis.width,
+        height=analysis.height,
+    )
+    return summary, primary_track, finalized_track
 
 
 def _load_detection_document(
@@ -1157,6 +1291,56 @@ def _is_reliable_track(tracklet: Tracklet) -> bool:
     )
 
 
+def _terminate_tracking_points(
+    points: list[TrackingPoint],
+    *,
+    fps: float,
+) -> list[TrackingPoint]:
+    """Trim tail when a late false detection breaks coherent delivery motion."""
+    if len(points) < 4:
+        return points
+    steps = [
+        math.hypot(points[index].x - points[index - 1].x, points[index].y - points[index - 1].y)
+        for index in range(1, len(points))
+    ]
+    median_step = statistics.median(steps) if steps else 0.0
+    jump_limit = max(80.0, median_step * 4.0)
+    cut = len(points)
+    for index in range(len(points) - 1, 0, -1):
+        step = steps[index - 1]
+        if step <= jump_limit:
+            break
+        previous = points[index - 1]
+        current = points[index]
+        if current.provenance != "OBSERVED":
+            continue
+        if previous.provenance == "OBSERVED" and step > jump_limit:
+            cut = index
+            break
+    trimmed = points[:cut]
+    if len(trimmed) >= MINIMUM_OBSERVED_POINTS:
+        _assign_point_velocities(trimmed, fps)
+        return trimmed
+    return points
+
+
+def _bridge_gap_allowed(
+    start: RawTrackingCandidate,
+    end: RawTrackingCandidate,
+    *,
+    frame_delta: int,
+) -> bool:
+    """Gap recovery cannot bridge unrelated detections."""
+    if frame_delta - 1 <= PREFERRED_GAP:
+        return True
+    span_step = _distance(start, end) / max(1, frame_delta)
+    if span_step > 0.12:
+        return False
+    if start.confidence < 0.35 or end.confidence < 0.35:
+        return False
+    return frame_delta - 1 <= MAX_RECOVERABLE_GAP
+
+
 def _build_tracking_points(
     tracklet: Tracklet,
     fps: float,
@@ -1191,10 +1375,10 @@ def _build_tracking_points(
         if frame_delta <= 1:
             continue
         # Short gaps only; longer fills need stronger bilateral support.
-        allow_gap = frame_delta - 1 <= PREFERRED_GAP or (
-            frame_delta - 1 <= MAX_RECOVERABLE_GAP
-            and observation.confidence >= 0.35
-            and following.confidence >= 0.35
+        allow_gap = _bridge_gap_allowed(
+            observation,
+            following,
+            frame_delta=frame_delta,
         )
         if not allow_gap:
             continue
@@ -2411,6 +2595,8 @@ def _clear_previous_tracking_outputs(output_dir: Path) -> None:
         TRACKING_SUMMARY_FILENAME,
         TRACKING_VIDEO_FILENAME,
         DELIVERY_REPLAY_FILENAME,
+        REPLAY_PAYLOAD_FILENAME,
+        FINALIZED_TRACK_FILENAME,
         "tracking_debug_intermediate.avi",
         "tracking_debug_encoded.mp4",
         "delivery_replay_intermediate.avi",

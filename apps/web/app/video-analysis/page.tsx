@@ -1,31 +1,26 @@
 "use client";
 
+import Link from "next/link";
 import { type ChangeEvent, useEffect, useRef, useState } from "react";
 
 import { BallDetectionPanel } from "@/components/video-analysis/BallDetectionPanel";
 import { BallTrackingPanel } from "@/components/video-analysis/BallTrackingPanel";
-import { AssistedSceneCalibrationPanel } from "@/components/video-analysis/AssistedSceneCalibrationPanel";
+import { WicketBoxCalibrationPanel } from "@/components/video-analysis/WicketBoxCalibrationPanel";
 import { MEDIA_FIT_CLASS } from "@/components/video-analysis/AnalysisMediaStage";
-import { RealPitchRegistrationPanel } from "@/components/video-analysis/RealPitchRegistrationPanel";
-import { SceneCalibrationPanel } from "@/components/video-analysis/SceneCalibrationPanel";
-import { VirtualPitchOverlay } from "@/components/video-analysis/VirtualPitchOverlay";
-import { WicketObservationPanel } from "@/components/video-analysis/WicketObservationPanel";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import {
   getVideoAnalysis,
-  getVideoAnalysisCalibration,
-  getSceneCalibration,
   getVideoBallDetectionResult,
   getVideoBallTrackingResult,
+  getWicketBoxCalibration,
   prepareVideoAnalysis,
-  type ConfirmedVideoCalibrationResponse,
-  type SceneCalibrationResult,
   type VideoAnalysisPreparedResponse,
   type VideoBallDetectionResultResponse,
   type VideoBallTrackingResultResponse
 } from "@/lib/api";
+import type { CalibrationResult } from "@/lib/wicketCalibration/types";
 
 
 type WorkspaceState = "idle" | "file_selected" | "uploading" | "prepared" | "failed";
@@ -73,10 +68,12 @@ type StepState = "complete" | "current" | "future" | "failed";
 
 function WorkflowStepper({
   steps,
-  onSelect
+  onSelect,
+  onReplaySelect
 }: {
-  steps: Array<{ key: string; label: string; state: StepState; stage?: ActiveStage }>;
+  steps: Array<{ key: string; label: string; state: StepState; stage?: ActiveStage; href?: string }>;
   onSelect?: (stage: ActiveStage) => void;
+  onReplaySelect?: () => void;
 }) {
   return (
     <nav aria-label="Analysis workflow" className="overflow-x-auto">
@@ -97,6 +94,7 @@ function WorkflowStepper({
             ) || (
               step.key === "calibration" && steps.some((s) => s.key === "upload" && s.state === "complete")
             ));
+          const replayClickable = step.key === "replay" && (step.state === "complete" || step.state === "current") && Boolean(onReplaySelect || step.href);
           const content = (
             <>
               <span className="tabular-nums opacity-70">{index + 1}</span>
@@ -119,6 +117,23 @@ function WorkflowStepper({
                   className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-bold uppercase tracking-[0.08em] sm:px-3 ${styles[step.state]}`}
                   aria-current={step.state === "current" ? "step" : undefined}
                   onClick={() => onSelect?.(step.stage!)}
+                >
+                  {content}
+                </button>
+              ) : replayClickable && step.href ? (
+                <Link
+                  href={step.href}
+                  className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-bold uppercase tracking-[0.08em] sm:px-3 ${styles[step.state]}`}
+                  aria-current={step.state === "current" ? "step" : undefined}
+                >
+                  {content}
+                </Link>
+              ) : replayClickable ? (
+                <button
+                  type="button"
+                  className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-bold uppercase tracking-[0.08em] sm:px-3 ${styles[step.state]}`}
+                  aria-current={step.state === "current" ? "step" : undefined}
+                  onClick={() => onReplaySelect?.()}
                 >
                   {content}
                 </button>
@@ -168,11 +183,8 @@ export default function VideoAnalysisPage() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<VideoAnalysisPreparedResponse | null>(null);
-  const [confirmedCalibration, setConfirmedCalibration] = useState<
-    ConfirmedVideoCalibrationResponse | null
-  >(null);
-  const [sceneCalibration, setSceneCalibration] = useState<
-    SceneCalibrationResult | null
+  const [wicketBoxCalibration, setWicketBoxCalibration] = useState<
+    CalibrationResult | null
   >(null);
   const [ballDetectionResult, setBallDetectionResult] = useState<
     VideoBallDetectionResultResponse | null
@@ -200,8 +212,7 @@ export default function VideoAnalysisPage() {
     setPreviewUrl(objectUrl);
     setSelectedFile(file);
     setAnalysis(null);
-    setConfirmedCalibration(null);
-    setSceneCalibration(null);
+    setWicketBoxCalibration(null);
     setBallDetectionResult(null);
     setBallTrackingResult(null);
     setActiveStage("upload");
@@ -227,8 +238,7 @@ export default function VideoAnalysisPage() {
     releasePreview();
     setSelectedFile(null);
     setAnalysis(null);
-    setConfirmedCalibration(null);
-    setSceneCalibration(null);
+    setWicketBoxCalibration(null);
     setBallDetectionResult(null);
     setBallTrackingResult(null);
     setError(null);
@@ -255,8 +265,7 @@ export default function VideoAnalysisPage() {
     try {
       const prepared = await prepareVideoAnalysis(selectedFile);
       setAnalysis(prepared);
-      setConfirmedCalibration(null);
-      setSceneCalibration(null);
+      setWicketBoxCalibration(null);
       setBallDetectionResult(null);
       setBallTrackingResult(null);
       setWorkspaceState("prepared");
@@ -280,22 +289,21 @@ export default function VideoAnalysisPage() {
     setWorkspaceState("uploading");
     void Promise.all([
       getVideoAnalysis(analysisId),
-      getVideoAnalysisCalibration(analysisId),
-      getSceneCalibration(analysisId),
+      getWicketBoxCalibration(analysisId),
       getVideoBallDetectionResult(analysisId),
       getVideoBallTrackingResult(analysisId)
     ])
       .then(([
         restored,
-        calibration,
-        assistedCalibration,
+        wicketCalibration,
         detectionResult,
         trackingResult
       ]) => {
         if (cancelled) return;
         setAnalysis(restored);
-        setConfirmedCalibration(calibration);
-        setSceneCalibration(assistedCalibration);
+        setWicketBoxCalibration(
+          wicketCalibration?.status === "NOT_STARTED" ? null : wicketCalibration
+        );
         setBallDetectionResult(detectionResult);
         setBallTrackingResult(trackingResult);
         setWorkspaceState("prepared");
@@ -331,18 +339,7 @@ export default function VideoAnalysisPage() {
   }, []);
 
   const uploadComplete = workspaceState === "prepared" && analysis !== null;
-  const calibrationComplete = Boolean(
-    confirmedCalibration
-    || (
-      sceneCalibration
-      && ![
-        "NOT_STARTED",
-        "DETECTING_WICKETS",
-        "OBSERVING_WICKETS",
-        "GENERATING_POSE"
-      ].includes(sceneCalibration.stage)
-    )
-  );
+  const calibrationComplete = wicketBoxCalibration?.status === "ACCEPTED";
   const calibrationActive = uploadComplete && activeStage === "calibration";
   const ballDetectionActive = (
     uploadComplete
@@ -354,7 +351,9 @@ export default function VideoAnalysisPage() {
     && activeStage === "ball_tracking"
     && ballDetectionResult !== null
   );
-  const replayReady = Boolean(ballTrackingResult?.summary?.delivery_replay_url);
+  const virtualReplayReady = Boolean(ballTrackingResult && analysis);
+  const replayReady = virtualReplayReady
+    || Boolean(ballTrackingResult?.summary?.delivery_replay_url);
 
   const workspaceTone: "neutral" | "good" | "warn" =
     workspaceState === "failed"
@@ -376,7 +375,7 @@ export default function VideoAnalysisPage() {
             ? "Ready"
             : "Ready";
 
-  const workflowSteps: Array<{ key: string; label: string; state: StepState; stage?: ActiveStage }> = [
+  const workflowSteps: Array<{ key: string; label: string; state: StepState; stage?: ActiveStage; href?: string }> = [
     {
       key: "upload",
       label: "Upload",
@@ -430,7 +429,10 @@ export default function VideoAnalysisPage() {
       label: "Replay",
       state: replayReady
         ? "complete"
-        : "future"
+        : "future",
+      href: virtualReplayReady && analysis
+        ? `/video-analysis/${encodeURIComponent(analysis.analysis_id)}/replay`
+        : undefined
     }
   ];
 
@@ -613,83 +615,17 @@ export default function VideoAnalysisPage() {
             </div>
           </details>
 
-          {calibrationActive && (
-            <Card>
-              <AssistedSceneCalibrationPanel
-                analysisId={analysis.analysis_id}
-                initialResult={sceneCalibration}
-                onResult={setSceneCalibration}
+          {calibrationActive && analysis && (
+            <>
+              <WicketBoxCalibrationPanel
+                analysis={analysis}
+                onAccepted={(calibration) => {
+                  setWicketBoxCalibration(calibration);
+                  setBallTrackingResult(null);
+                }}
                 onContinue={() => setActiveStage("ball_detection")}
               />
-            </Card>
-          )}
-
-          {sceneCalibration && sceneCalibration.stage !== "NOT_STARTED" && (
-            <details className="rounded-xl border border-white/10 bg-panel/60 px-4 py-3">
-              <summary className="cursor-pointer text-sm font-bold text-white/60">
-                Developer Diagnostics
-              </summary>
-              <div className="mt-4 space-y-4">
-                <details className="border border-white/10 p-3">
-                  <summary className="cursor-pointer text-sm font-bold text-white/55">
-                    Legacy Scene Calibration
-                  </summary>
-                  <div className="mt-3">
-                    <SceneCalibrationPanel
-              key={analysis.analysis_id}
-              analysis={analysis}
-              initialCalibration={confirmedCalibration}
-              onDirty={() => setConfirmedCalibration(null)}
-              onReferenceFrameUpdated={(referenceFrameIndex, referenceFrameUrl) => {
-                setAnalysis((current) => current ? {
-                  ...current,
-                  reference_frame_index: referenceFrameIndex,
-                  reference_frame_url: referenceFrameUrl
-                } : current);
-              }}
-              onCalibrated={(calibration) => {
-                setConfirmedCalibration(calibration);
-                setAnalysis((current) => current ? {
-                  ...current,
-                  status: "calibrated",
-                  calibration_status: "confirmed",
-                  calibration_url: calibration.calibration_url,
-                  calibration_overlay_url: calibration.calibration_overlay_url,
-                  visual_calibration_mode: calibration.mode ?? "automatic_visual",
-                  visual_calibration_quality: calibration.quality ?? null,
-                  reference_frame_index: calibration.reference_frame_index,
-                  updated_at: calibration.updated_at
-                } : current);
-              }}
-            />
-                  </div>
-                </details>
-                <details className="border border-white/10 p-3">
-                  <summary className="cursor-pointer text-sm font-bold text-white/55">
-                    Wicket Observations V1
-                  </summary>
-                  <div className="mt-3">
-                    <WicketObservationPanel analysisId={analysis.analysis_id} />
-                  </div>
-                </details>
-                <details className="border border-white/10 p-3">
-                  <summary className="cursor-pointer text-sm font-bold text-white/55">
-                    Real Camera Pose Candidates
-                  </summary>
-                  <div className="mt-3">
-                    <RealPitchRegistrationPanel analysisId={analysis.analysis_id} />
-                  </div>
-                </details>
-                <details className="border border-white/10 p-3">
-                  <summary className="cursor-pointer text-sm font-bold text-white/55">
-                    Synthetic Virtual Pitch
-                  </summary>
-                  <div className="mt-3">
-                    <VirtualPitchOverlay />
-                  </div>
-                </details>
-              </div>
-            </details>
+            </>
           )}
 
           {ballDetectionActive && (

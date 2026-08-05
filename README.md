@@ -36,17 +36,11 @@ another backend.
 
 ## Project structure
 
-| Path | Role | Maturity |
-|---|---|---|
-| `main.py` | Historical Streamlit entry point | Legacy |
-| `Backends/` | Historical Streamlit implementation | Legacy |
-| `apps/web/` | Normal Next.js frontend | Current |
-| `services/api/` | Normal FastAPI backend | Current |
-| `services/worker/` | Background processing boundary | Future scaffold, unconnected |
-| `packages/cricket_vision/` | Framework-independent shared CV contracts/geometry | Future scaffold |
-| `Models/` | Local model weights | Active assets |
-| `scripts/` | Diagnostics, replay, smoke, and performance tools | Active development |
-| `tests/` | Lightweight regression tests for current code | Active development |
-| `docs/` | Current architecture, specifications, audits, and roadmap | Documentation |
-
-See `docs/CLEANUP_AUDIT.md` for the import evidence behind this structure and `docs/ARCHITECTURE_V2.md` for the migration direction.
+| Path | Role |
+|---|---|
+| `apps/web/` | Next.js frontend (video analysis, virtual pitch replay) |
+| `services/api/` | FastAPI backend |
+| `packages/cricket_vision/` | Shared pitch geometry and CV contracts |
+| `Models/` | Local model weights (ball detector, stump detector) |
+| `outputs/` | Generated analysis artifacts (gitignored) |
+| `tests/` | Regression tests for API and video analysis |

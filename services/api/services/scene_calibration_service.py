@@ -1962,6 +1962,12 @@ def _rerun_physics_if_available(analysis_id: str) -> str | None:
         updated_tracking = tracking.model_copy(update={"physics": physics})
         _write_json(tracking_path, updated_tracking)
         _write_json(tracking_dir / PHYSICS_RESULT_FILENAME, physics)
+        from .replay_payload_service import (
+            assemble_replay_payload,
+            save_replay_payload,
+        )
+
+        save_replay_payload(analysis_id, assemble_replay_payload(analysis_id))
         return None
     except Exception as exc:
         return (

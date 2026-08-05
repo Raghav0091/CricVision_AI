@@ -6,6 +6,7 @@ import type {
 
 import type { CalibratedThreeCameraConfiguration } from "./calibratedCameraTypes";
 import type { ActiveCameraDiagnostics } from "./VirtualPitchCameraController";
+import type { ReactNode } from "react";
 
 
 export type VirtualPitchRendererMode =
@@ -45,4 +46,9 @@ export interface VirtualPitchSceneProps {
   visualOptions: VirtualPitchVisualOptions;
   mode?: VirtualPitchRendererMode;
   onCameraDiagnostics?: (diagnostics: ActiveCameraDiagnostics) => void;
+  frameloop?: "always" | "demand";
+  exportWidth?: number;
+  exportHeight?: number;
+  onCanvasReady?: (canvas: HTMLCanvasElement, invalidate: () => void) => void;
+  replayContent?: ReactNode;
 }
