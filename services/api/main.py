@@ -5,7 +5,15 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from .routes import analysis, calibration, health, sessions, video_analysis
+from .routes import (
+    analysis,
+    calibration,
+    device_calibration,
+    health,
+    quick_test,
+    sessions,
+    video_analysis,
+)
 
 
 def _development_cors_origins() -> list[str]:
@@ -29,6 +37,8 @@ app.include_router(calibration.router)
 app.include_router(sessions.router)
 app.include_router(analysis.router)
 app.include_router(video_analysis.router)
+app.include_router(quick_test.router)
+app.include_router(device_calibration.router)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 app.mount(

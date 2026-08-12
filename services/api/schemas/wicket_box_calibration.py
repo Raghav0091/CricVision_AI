@@ -8,6 +8,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .video_analysis import CricketPitchGeometry
+
 
 WicketBoxRole = Literal["NEAR", "FAR"]
 WicketBoxValidationStatus = Literal[
@@ -122,6 +124,13 @@ class CalibrationResult(WicketBoxModel):
     status: WicketBoxCalibrationStatus
     analysis_id: str = Field(min_length=1)
     accepted_at: datetime | None = None
+    # Persisted so a re-solve from stored landmarks reaches for the same lens
+    # profile the accepted pose was solved with.
+    device_id: str | None = Field(default=None, max_length=128)
+    # The pitch the accepted pose was solved against. Tracking, physics and
+    # replay must read this rather than assuming regulation, or a pose solved
+    # on a short rig gets measured against 20.12 m.
+    pitch_geometry: CricketPitchGeometry | None = None
     calibration_frame_index: int = Field(ge=0)
     source_image_width: int = Field(gt=0)
     source_image_height: int = Field(gt=0)
@@ -174,6 +183,12 @@ class WicketBoxCalibrationRegisterRequest(WicketBoxModel):
     near_wicket_box: WicketBox
     far_wicket_box: WicketBox
     stump_landmarks: list[StumpLandmark] = Field(default_factory=list)
+    # Identifies a solved lens profile, which removes focal length from the PnP
+    # unknowns. Absent means fall back to the bounded focal sweep.
+    device_id: str | None = Field(default=None, max_length=128)
+    # The pitch the operator declares they are actually standing on. Absent
+    # means regulation, so a full-size net keeps solving exactly as before.
+    pitch_geometry: CricketPitchGeometry | None = None
 
     @model_validator(mode="after")
     def validate_roles_and_ids(self) -> "WicketBoxCalibrationRegisterRequest":

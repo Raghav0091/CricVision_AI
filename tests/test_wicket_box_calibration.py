@@ -43,6 +43,7 @@ from services.api.schemas.wicket_box_calibration import (
 )
 from services.api.schemas.real_pitch_registration import RegistrationDiagnostics
 from services.api.schemas.real_pitch_registration import RealPitchRegistrationResult
+from services.api.schemas.video_analysis import CricketPitchGeometry
 from tests.test_real_pitch_registration import _solve, _synthetic_observation
 
 
@@ -106,6 +107,7 @@ def _register_request(
     near: WicketBox | None = None,
     far: WicketBox | None = None,
     landmarks: list[StumpLandmark] | None = None,
+    pitch_geometry: CricketPitchGeometry | None = None,
 ) -> WicketBoxCalibrationRegisterRequest:
     return WicketBoxCalibrationRegisterRequest(
         analysis_id=ANALYSIS_ID,
@@ -115,6 +117,7 @@ def _register_request(
         near_wicket_box=near or _wicket_box("NEAR", y=520.0, height=140.0, width=120.0),
         far_wicket_box=far or _wicket_box("FAR", y=120.0, height=70.0, width=50.0),
         stump_landmarks=landmarks or [],
+        pitch_geometry=pitch_geometry,
     )
 
 
@@ -651,3 +654,154 @@ class TestStabilityAndAutomaticWorkflow:
         payload = json.loads(debug_path.read_text(encoding="utf-8"))
         assert len(payload["endpoints"]) == 12
         assert payload["stability"]["perturbation"]["perturbation_count"] > 0
+
+
+SHORT_PITCH_GEOMETRY = CricketPitchGeometry(
+    pitch_length_m=4.0,
+    popping_crease_distance_m=1.0,
+)
+
+
+class TestDeclaredPitchGeometry:
+    def test_declared_geometry_persists_to_accepted_snapshot(
+        self,
+        isolated_wicket_box: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A declared 4 m pitch must survive accept and reload unchanged."""
+        observation = _observation_from_landmarks(
+            analysis_id=ANALYSIS_ID,
+            frame_index=4,
+            fps=30.0,
+            near_box=_register_request().near_wicket_box,
+            far_box=_register_request().far_wicket_box,
+            landmarks=_synthetic_landmarks(),
+        )
+        registration = _registration(observation)
+        monkeypatch.setattr(
+            "services.api.services.wicket_box_calibration_service._register_from_observation",
+            lambda *args, **kwargs: (
+                registration,
+                [],
+                False,
+                _empty_registration_summary(),
+            ),
+        )
+        monkeypatch.setattr(
+            "services.api.services.wicket_box_calibration_service._registration_rejection_reasons",
+            lambda candidate, registration: [],
+        )
+        monkeypatch.setattr(
+            "services.api.services.wicket_box_calibration_service._acceptance_rejection_reasons",
+            lambda calibration: [],
+        )
+
+        registered = register_wicket_box_calibration(
+            ANALYSIS_ID,
+            _register_request(
+                landmarks=_synthetic_landmarks(),
+                pitch_geometry=SHORT_PITCH_GEOMETRY,
+            ),
+        )
+        assert registered.calibration is not None
+        assert registered.calibration.pitch_geometry is not None
+        assert registered.calibration.pitch_geometry.pitch_length_m == 4.0
+
+        accepted = accept_wicket_box_calibration(
+            ANALYSIS_ID,
+            WicketBoxCalibrationAcceptRequest(
+                analysis_id=ANALYSIS_ID,
+                accept_registered_calibration=True,
+            ),
+        )
+        assert accepted.success is True
+        assert accepted.calibration is not None
+        assert accepted.calibration.pitch_geometry.pitch_length_m == 4.0
+
+        # Survives the round trip through the frozen snapshot on disk.
+        snapshot = load_active_accepted_wicket_box_calibration(ANALYSIS_ID)
+        assert snapshot is not None
+        assert snapshot["pitch_geometry"]["pitch_length_m"] == 4.0
+        assert load_wicket_box_calibration(ANALYSIS_ID).pitch_geometry.pitch_length_m == 4.0
+
+    def test_absent_geometry_stays_regulation(
+        self,
+        isolated_wicket_box: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Omitting the field must keep every existing full-size flow unchanged."""
+        observation = _observation_from_landmarks(
+            analysis_id=ANALYSIS_ID,
+            frame_index=4,
+            fps=30.0,
+            near_box=_register_request().near_wicket_box,
+            far_box=_register_request().far_wicket_box,
+            landmarks=_synthetic_landmarks(),
+        )
+        registration = _registration(observation)
+        monkeypatch.setattr(
+            "services.api.services.wicket_box_calibration_service._register_from_observation",
+            lambda *args, **kwargs: (
+                registration,
+                [],
+                False,
+                _empty_registration_summary(),
+            ),
+        )
+        monkeypatch.setattr(
+            "services.api.services.wicket_box_calibration_service._registration_rejection_reasons",
+            lambda candidate, registration: [],
+        )
+
+        registered = register_wicket_box_calibration(
+            ANALYSIS_ID,
+            _register_request(landmarks=_synthetic_landmarks()),
+        )
+
+        assert registered.calibration is not None
+        assert registered.calibration.pitch_geometry is None
+
+    def test_declared_geometry_reaches_the_solver(
+        self,
+        isolated_wicket_box: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The register request's geometry must arrive at the registration call."""
+        seen: dict[str, object] = {}
+
+        def _capture(*args, **kwargs):
+            seen["dimensions"] = kwargs.get("dimensions")
+            observation = _observation_from_landmarks(
+                analysis_id=ANALYSIS_ID,
+                frame_index=4,
+                fps=30.0,
+                near_box=_register_request().near_wicket_box,
+                far_box=_register_request().far_wicket_box,
+                landmarks=_synthetic_landmarks(),
+            )
+            return (
+                _registration(observation),
+                [],
+                False,
+                _empty_registration_summary(),
+            )
+
+        monkeypatch.setattr(
+            "services.api.services.wicket_box_calibration_service._register_from_observation",
+            _capture,
+        )
+        monkeypatch.setattr(
+            "services.api.services.wicket_box_calibration_service._registration_rejection_reasons",
+            lambda candidate, registration: [],
+        )
+
+        register_wicket_box_calibration(
+            ANALYSIS_ID,
+            _register_request(
+                landmarks=_synthetic_landmarks(),
+                pitch_geometry=SHORT_PITCH_GEOMETRY,
+            ),
+        )
+
+        assert seen["dimensions"] == SHORT_PITCH_GEOMETRY.to_dimensions()
+        assert seen["dimensions"].pitch_length_m == 4.0

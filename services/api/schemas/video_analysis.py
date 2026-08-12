@@ -11,6 +11,7 @@ from packages.cricket_vision.calibration.cricket_pitch_geometry import (
     STUMP_DIAMETER_MAX_M,
     STUMP_HEIGHT_M,
     WICKET_WIDTH_M,
+    CricketPitchDimensions,
 )
 
 from .delivery_physics import DeliveryPhysicsResult
@@ -317,6 +318,21 @@ class CricketPitchGeometry(StrictGeometryModel):
             "middle": 0.0,
             "right": outer_centre,
         }
+
+    def to_dimensions(self) -> CricketPitchDimensions:
+        """Adapt the wire model onto the geometry dataclass the solver takes.
+
+        Crease lengths are not declarable over the wire, so they keep their
+        regulation defaults.
+        """
+        return CricketPitchDimensions(
+            pitch_length_m=self.pitch_length_m,
+            wicket_width_m=self.wicket_width_m,
+            wicket_height_m=self.wicket_height_m,
+            stump_diameter_m=self.stump_diameter_m,
+            pitch_width_m=self.pitch_width_m,
+            popping_crease_distance_m=self.popping_crease_distance_m,
+        )
 
 
 class CalibrationCoordinateSystem(BaseModel):
@@ -810,9 +826,17 @@ class FrameDetectionRecord(BaseModel):
     detections: list[BallCandidate] = Field(default_factory=list)
 
 
+# video_ball_detection_service.IMAGE_SIZE moved 960 -> 1280 to match the
+# ball_only_* detectors' native training resolution, but these literals were
+# left behind, so every detection run raised a ValidationError. Both values are
+# allowed: 1280 is what runs now, 960 is what 136 stored detection documents
+# already carry, and narrowing to 1280 alone would make those unloadable.
+BallDetectionImageSize = Literal[960, 1280]
+
+
 class VideoBallDetectionSettings(BaseModel):
     frame_stride: Literal[1]
-    imgsz: Literal[960]
+    imgsz: BallDetectionImageSize
     confidence_threshold: Literal[0.15]
     max_det: Literal[20]
 
@@ -848,7 +872,7 @@ class VideoBallDetectionSummary(BaseModel):
     model_warning: str | None = None
     model_class_names: list[str]
     device_used: str
-    imgsz: Literal[960]
+    imgsz: BallDetectionImageSize
     confidence_threshold: Literal[0.15]
     frame_stride: Literal[1]
     max_det: Literal[20]

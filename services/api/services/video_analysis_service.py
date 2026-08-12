@@ -63,6 +63,10 @@ def prepare_video(
         stored_filename = f"original_video{suffix}"
         raw_path = analysis_dir / "raw" / stored_filename
         file_size_bytes = _save_upload(upload, raw_path)
+        # Browser-recorded clips arrive as streaming WebM, which cv2 cannot
+        # index. Normalise before anything reads the file.
+        raw_path, stored_filename = _ensure_readable_video(raw_path, stored_filename)
+        file_size_bytes = raw_path.stat().st_size
         reference_path = analysis_dir / "calibration" / "reference_frame.jpg"
         video_metadata = _read_video_metadata(raw_path, reference_path)
         playback_filename = "playback.mp4"
@@ -181,6 +185,56 @@ def _save_upload(upload: BinaryIO, destination: Path) -> int:
         destination.unlink(missing_ok=True)
         _fail("The uploaded video is empty.")
     return total_bytes
+
+
+def _ensure_readable_video(
+    raw_path: Path,
+    stored_filename: str,
+) -> tuple[Path, str]:
+    """Normalise containers OpenCV cannot index into a plain MP4.
+
+    MediaRecorder writes WebM as a live stream, so the header carries no cue or
+    duration data and cv2 reports a frame count of 0 even though the file plays
+    fine in a browser. Every downstream stage reads raw/, so the fix has to
+    replace the raw file rather than only the playback copy — otherwise
+    detection and tracking index a different file from the metadata.
+
+    WebM is normalised even when cv2 can index it, because MediaRecorder also
+    writes a variable frame rate: recorded clips have come through at 32.6,
+    39.1 and 49.5 fps, and every speed in the pipeline is distance over time
+    derived from a single nominal fps. Re-encoding to MP4 emits a constant rate
+    (ffmpeg duplicates or drops to hit it), which makes frame_index * (1/fps) a
+    truthful timestamp again.
+
+    Ordinary MP4 and MOV uploads that pass the probe keep their original bytes.
+    """
+    capture = cv2.VideoCapture(str(raw_path))
+    try:
+        readable = capture.isOpened() and int(capture.get(cv2.CAP_PROP_FRAME_COUNT)) > 0
+    finally:
+        capture.release()
+    # .webm is only ever produced by browser capture in this app, and always
+    # with a variable frame rate — so it is normalised regardless of the probe.
+    variable_rate_container = raw_path.suffix.lower() in {".webm", ".mkv"}
+    if readable and not variable_rate_container:
+        return raw_path, stored_filename
+
+    normalized_name = "original_video.mp4"
+    normalized_path = raw_path.with_name(normalized_name)
+    if normalized_path == raw_path:
+        # Already an .mp4 and still unreadable — transcoding it onto itself
+        # would destroy the upload, so let the metadata read report the failure.
+        return raw_path, stored_filename
+    try:
+        transcode_browser_mp4(raw_path, normalized_path, timeout_seconds=600)
+    except Exception as exc:
+        normalized_path.unlink(missing_ok=True)
+        raise VideoAnalysisServiceError(
+            f"The uploaded video could not be normalised for analysis: {type(exc).__name__}.",
+            status_code=400,
+        ) from exc
+    raw_path.unlink(missing_ok=True)
+    return normalized_path, normalized_name
 
 
 def _read_video_metadata(video_path: Path, reference_path: Path) -> dict[str, object]:

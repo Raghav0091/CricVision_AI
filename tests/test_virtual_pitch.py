@@ -16,11 +16,15 @@ from packages.cricket_vision.calibration.cricket_pitch_geometry import (
     STUMP_DIAMETER_MIN_M,
     STUMP_HEIGHT_M,
     WICKET_WIDTH_M,
+    CricketPitchDimensions,
     calibration_to_canonical_world,
     canonical_to_calibration_world,
 )
 from services.api.main import app
 from services.api.schemas.virtual_pitch import PixelPoint2D
+from services.api.services.video_analysis_service import (
+    VideoAnalysisServiceError,
+)
 from services.api.services.virtual_pitch_service import (
     build_synthetic_camera,
     build_synthetic_preview,
@@ -169,6 +173,169 @@ def test_landmark_and_primitive_ids_are_stable_and_unique() -> None:
         for item in specification.landmarks
         if "stump" in item.semantic_id and "center" not in item.semantic_id
     )
+
+
+def test_specification_defaults_to_regulation() -> None:
+    """Regression guard for every caller that builds without an argument.
+
+    The builder now reads a ``CricketPitchDimensions`` instead of the module
+    constants, so this derives the expected geometry from the constants to
+    catch any drift between the two.
+    """
+    specification = build_virtual_pitch_specification()
+    dimensions = specification.dimensions
+
+    assert dimensions.pitch_length_m == PITCH_LENGTH_M == 20.12
+    assert specification == build_virtual_pitch_specification(
+        CricketPitchDimensions()
+    )
+
+    outer_stump_x = (WICKET_WIDTH_M - STUMP_DIAMETER_MAX_M) / 2
+    half_pitch = PITCH_WIDTH_M / 2
+    half_bowling_crease = BOWLING_CREASE_LENGTH_M / 2
+    expected: dict[str, tuple[float, float, float]] = {}
+    for end, y, direction in (
+        ("bowler", 0.0, 1.0),
+        ("striker", PITCH_LENGTH_M, -1.0),
+    ):
+        popping_y = y + direction * POPPING_CREASE_OFFSET_M
+        expected[f"{end}_wicket_center_base"] = (0.0, y, 0.0)
+        for side, x in (
+            ("left", -outer_stump_x),
+            ("middle", 0.0),
+            ("right", outer_stump_x),
+        ):
+            expected[f"{end}_{side}_stump_base"] = (x, y, 0.0)
+            expected[f"{end}_{side}_stump_top"] = (x, y, STUMP_HEIGHT_M)
+        expected[f"{end}_left_pitch_corner"] = (-half_pitch, y, 0.0)
+        expected[f"{end}_right_pitch_corner"] = (half_pitch, y, 0.0)
+        expected[f"{end}_bowling_crease_left_endpoint"] = (
+            -half_bowling_crease,
+            y,
+            0.0,
+        )
+        expected[f"{end}_bowling_crease_right_endpoint"] = (
+            half_bowling_crease,
+            y,
+            0.0,
+        )
+        expected[f"{end}_popping_crease_left_endpoint"] = (
+            -RETURN_CREASE_OFFSET_M,
+            popping_y,
+            0.0,
+        )
+        expected[f"{end}_popping_crease_right_endpoint"] = (
+            RETURN_CREASE_OFFSET_M,
+            popping_y,
+            0.0,
+        )
+        expected[f"{end}_left_return_bowling_intersection"] = (
+            -RETURN_CREASE_OFFSET_M,
+            y,
+            0.0,
+        )
+        expected[f"{end}_right_return_bowling_intersection"] = (
+            RETURN_CREASE_OFFSET_M,
+            y,
+            0.0,
+        )
+        expected[f"{end}_left_return_popping_intersection"] = (
+            -RETURN_CREASE_OFFSET_M,
+            popping_y,
+            0.0,
+        )
+        expected[f"{end}_right_return_popping_intersection"] = (
+            RETURN_CREASE_OFFSET_M,
+            popping_y,
+            0.0,
+        )
+        expected[f"pitch_centerline_{end}_endpoint"] = (0.0, y, 0.0)
+
+    landmarks = landmark_map()
+    assert set(expected).issubset(set(landmarks))
+    for semantic_id, (x, y, z) in expected.items():
+        point = landmarks[semantic_id].point
+        assert (point.x, point.y, point.z) == (x, y, z), semantic_id
+
+
+def test_specification_honours_declared_length() -> None:
+    specification = build_virtual_pitch_specification(
+        CricketPitchDimensions(pitch_length_m=4.0, popping_crease_distance_m=1.0)
+    )
+    landmarks = {
+        item.semantic_id: item.point for item in specification.landmarks
+    }
+
+    assert specification.dimensions.pitch_length_m == 4.0
+    assert landmarks["striker_wicket_center_base"].y == 4.0
+    assert landmarks["striker_middle_stump_base"].y == 4.0
+    assert landmarks["bowler_middle_stump_base"].y == 0.0
+    # The striker popping crease is measured back from the striker wicket.
+    assert landmarks["striker_popping_crease_left_endpoint"].y == 3.0
+    assert landmarks["bowler_popping_crease_left_endpoint"].y == 1.0
+    assert all(
+        item.centre.y in {0.0, 4.0} for item in specification.stumps
+    )
+
+
+def test_specification_honours_declared_wicket_size() -> None:
+    specification = build_virtual_pitch_specification(
+        CricketPitchDimensions(
+            pitch_length_m=4.0,
+            wicket_width_m=0.12,
+            wicket_height_m=0.4,
+            stump_diameter_m=0.02,
+            popping_crease_distance_m=1.0,
+        )
+    )
+    landmarks = {
+        item.semantic_id: item.point for item in specification.landmarks
+    }
+
+    assert specification.dimensions.stump_height_m == 0.4
+    assert landmarks["striker_middle_stump_top"].z == 0.4
+    assert landmarks["bowler_right_stump_base"].x == (0.12 - 0.02) / 2
+    # min must never exceed max once a thinner stump is declared.
+    assert specification.dimensions.stump_diameter_min_m == 0.02
+    assert specification.dimensions.stump_diameter_max_m == 0.02
+
+
+@pytest.mark.parametrize(
+    "dimensions",
+    [
+        CricketPitchDimensions(pitch_length_m=0.0),
+        CricketPitchDimensions(pitch_length_m=-4.0),
+        # A popping crease at or beyond half the pitch length is degenerate.
+        CricketPitchDimensions(
+            pitch_length_m=2.0, popping_crease_distance_m=1.22
+        ),
+        CricketPitchDimensions(wicket_width_m=0.0),
+        CricketPitchDimensions(stump_diameter_m=0.2),
+    ],
+)
+def test_invalid_dimensions_rejected(
+    dimensions: CricketPitchDimensions,
+) -> None:
+    with pytest.raises(VideoAnalysisServiceError) as excinfo:
+        build_virtual_pitch_specification(dimensions)
+
+    assert excinfo.value.status_code == 422
+
+
+def test_cache_keyed_on_dimensions() -> None:
+    """A cache that ignored the argument would silently return regulation."""
+    short = build_virtual_pitch_specification(
+        CricketPitchDimensions(pitch_length_m=4.0, popping_crease_distance_m=1.0)
+    )
+    regulation = build_virtual_pitch_specification()
+    short_again = build_virtual_pitch_specification(
+        CricketPitchDimensions(pitch_length_m=4.0, popping_crease_distance_m=1.0)
+    )
+
+    assert short.dimensions.pitch_length_m == 4.0
+    assert regulation.dimensions.pitch_length_m == PITCH_LENGTH_M
+    assert short_again.dimensions.pitch_length_m == 4.0
+    assert short != regulation
 
 
 def test_schema_round_trip_and_json_are_deterministic() -> None:

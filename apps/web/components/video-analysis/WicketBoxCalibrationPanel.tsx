@@ -23,6 +23,7 @@ import {
   videoNativeToDisplay,
   type CalibrationViewTransform
 } from "@/lib/calibrationCoordinates";
+import { getDeviceId } from "@/lib/deviceIdentity";
 import {
   clampNativePoint,
   defaultWicketBoxes,
@@ -43,6 +44,7 @@ import {
 } from "@/lib/wicketCalibration/pointerInteraction";
 import type {
   CalibrationResult,
+  CricketPitchGeometry,
   StumpIdentity,
   StumpLandmark,
   WicketBox,
@@ -191,6 +193,11 @@ export function WicketBoxCalibrationPanel({
   onAccepted?: (calibration: CalibrationResult) => void;
   onContinue?: () => void;
 }) {
+  // Uploaded footage is always a real pitch, so this stays null — the solver
+  // reads null as regulation 22 yards. Deliberately not restored from the
+  // /live rig settings: a 1.5m indoor rig leaking into a net video would
+  // silently scale every speed by more than 13x.
+  const pitchGeometry: CricketPitchGeometry | null = null;
   const stageRef = useRef<HTMLDivElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const operationRef = useRef<PointerOperation | null>(null);
@@ -357,7 +364,13 @@ export function WicketBoxCalibrationPanel({
       source_image_height: analysis.height,
       near_wicket_box: nearBox,
       far_wicket_box: farBox,
-      stump_landmarks: extraLandmarks
+      stump_landmarks: extraLandmarks,
+      // Only honoured when a profile exists for this browser at a matching
+      // aspect ratio; footage from another camera falls back to the sweep. The
+      // lens badge shows which of the two actually happened.
+      device_id: getDeviceId(),
+      // Null means regulation, which is what full-size footage sends.
+      pitch_geometry: pitchGeometry
     };
   }
 
@@ -1030,6 +1043,12 @@ export function WicketBoxCalibrationPanel({
           ))}
         </ul>
       ) : null}
+
+      {/* Uploaded footage is real cricket, so regulation geometry always
+          applies. The custom-rig fields belong on /live, where an improvised
+          indoor rig is the whole point; here they were only ever a way to get
+          the pitch wrong. `pitchGeometry` stays null, which the solver reads
+          as 22 yards. */}
 
       <div
         className="flex flex-wrap gap-2"

@@ -12,7 +12,10 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from packages.cricket_vision.calibration.cricket_pitch_geometry import CRICVISION_PITCH_V1
+from packages.cricket_vision.calibration.cricket_pitch_geometry import (
+    CRICVISION_PITCH_V1,
+    CricketPitchDimensions,
+)
 
 from ..schemas.real_pitch_registration import (
     CameraIntrinsicsCandidate,
@@ -40,6 +43,7 @@ from ..schemas.wicket_box_calibration import (
     validate_wicket_box_pair,
 )
 from ..schemas.delivery_physics import CameraCalibration
+from ..schemas.device_calibration import DeviceLensProfile
 from ..schemas.wicket_observation import (
     AssignmentHypothesis,
     PixelBox,
@@ -52,6 +56,7 @@ from ..schemas.wicket_observation import (
     WicketObservationResult,
     WicketRegionObservation,
 )
+from .device_calibration_service import load_device_profile_for_frame
 from .frame_timing import resolve_frame_timestamp
 from .real_pitch_registration_service import (
     AMBIGUITY_SCORE_GAP,
@@ -86,6 +91,14 @@ MIN_BOX_WIDTH_PX = 24.0
 MIN_BOX_HEIGHT_PX = 32.0
 MAX_ACCEPTANCE_RMSE_PX = 8.0
 MAX_WICKET_RMSE_PX = 12.0
+# Both constants above are flat pixel counts tuned against 720x1280 phone
+# clips. A 4K frame is over five times wider, and its stump features are
+# correspondingly larger, so the same physical accuracy shows up as a much
+# bigger pixel number — 25.9px at 3840 wide is 0.67% of the frame, against
+# 1.67% for 12px at 720 wide. Judging both by one pixel count rejects better
+# calibrations at higher resolution than it accepts at lower.
+RMSE_GATE_FRACTION_OF_WIDTH = 0.012
+REFERENCE_FRAME_WIDTH_PX = 720.0
 ORIENTATION_AMBIGUITY_GAP = AMBIGUITY_SCORE_GAP
 MANDATORY_PHYSICAL_CHECKS = frozenset(
     {
@@ -206,6 +219,8 @@ def register_wicket_box_calibration(
             calibration_frame_index=request.calibration_frame_index,
             source_image_width=request.source_image_width,
             source_image_height=request.source_image_height,
+            device_id=request.device_id,
+            pitch_geometry=request.pitch_geometry,
             near_wicket_box=request.near_wicket_box,
             far_wicket_box=request.far_wicket_box,
             stump_landmarks=landmarks,
@@ -239,6 +254,12 @@ def register_wicket_box_calibration(
         observation,
         frame,
         assignment_hypothesis=assignment_hypothesis,
+        device_id=request.device_id,
+        dimensions=(
+            request.pitch_geometry.to_dimensions()
+            if request.pitch_geometry is not None
+            else None
+        ),
     )
     calibration = _calibration_from_registration(
         analysis_id=analysis_id,
@@ -362,6 +383,9 @@ def accept_wicket_box_calibration(
             near_wicket_box=stored.near_wicket_box,
             far_wicket_box=stored.far_wicket_box,
             stump_landmarks=stored.stump_landmarks,
+            # Re-solving for a forced orientation must stay on the same pitch
+            # the operator declared, or the retry falls back to regulation.
+            pitch_geometry=stored.pitch_geometry,
         )
         registered = register_wicket_box_calibration(
             analysis_id,
@@ -429,6 +453,54 @@ _ACCEPTED_SNAPSHOT_REQUIRED_FIELDS = (
     "rotation_matrix",
     "translation_vector",
 )
+
+
+def _describe_registration_failure(
+    candidates: list[CameraPoseCandidate],
+) -> str:
+    """Say which gate rejected the best attempt, not just that all failed.
+
+    Every candidate already records its reprojection error, its failure reasons
+    and which plausibility checks it failed. Collapsing all of that into
+    "Registration failed for all pose candidates" leaves the operator guessing
+    between a mis-declared pitch, mis-placed stump points and a bad lens — which
+    need completely different fixes.
+    """
+    if not candidates:
+        return (
+            "Registration failed: no pose candidates were attempted. The stump "
+            "points did not reach the solver."
+        )
+
+    scored = [item for item in candidates if item.reprojection_rmse_px is not None]
+    best = (
+        min(scored, key=lambda item: item.reprojection_rmse_px or float("inf"))
+        if scored
+        else max(candidates, key=lambda item: item.score)
+    )
+
+    parts: list[str] = [f"Registration failed for all {len(candidates)} pose candidates."]
+    if best.reprojection_rmse_px is not None:
+        parts.append(f"Best attempt was {best.reprojection_rmse_px:.1f}px off.")
+
+    failed_checks = [
+        check.check_id
+        for check in best.plausibility_checks
+        if not check.passed
+    ]
+    if failed_checks:
+        parts.append(f"Failed: {', '.join(failed_checks)}.")
+    elif best.reprojection_rmse_px is not None and best.reprojection_rmse_px > 12:
+        # All physical checks pass and only the error gate rejects it — the
+        # signature of a declared pitch that does not match the real one.
+        parts.append(
+            "All physical checks passed, so the placed points are probably fine "
+            "but the declared pitch size does not match the real rig."
+        )
+    if best.failure_reasons:
+        parts.append(" ".join(best.failure_reasons[:2]))
+
+    return " ".join(parts)
 
 
 def load_active_accepted_wicket_box_calibration(
@@ -542,6 +614,50 @@ def _intrinsics_from_focal(
     )
 
 
+def _intrinsics_from_device_profile(
+    profile: DeviceLensProfile,
+) -> CameraIntrinsicsCandidate:
+    """The one candidate worth trying when the lens has actually been measured.
+
+    Focal bounds are held to +/-2% of the measured value: refinement is free to
+    absorb a little cropping or stabilisation, but not to re-open the focal
+    length that the checkerboard already settled.
+    """
+    focal = profile.focal_length_x_px
+    fov = math.degrees(
+        2.0 * math.atan(profile.image_width / (2.0 * focal))
+    )
+    return CameraIntrinsicsCandidate(
+        candidate_id="device_lens",
+        focal_length_x_px=focal,
+        focal_length_y_px=profile.focal_length_y_px,
+        principal_point_x_px=profile.principal_point_x_px,
+        principal_point_y_px=profile.principal_point_y_px,
+        distortion_coefficients=list(profile.distortion_coefficients),
+        source="device_calibration",
+        confidence="HIGH",
+        horizontal_fov_degrees=fov,
+        lower_focal_bound_px=focal * 0.98,
+        upper_focal_bound_px=focal * 1.02,
+        distortion_assumption=(
+            "Measured distortion from this device's checkerboard calibration "
+            f"(RMS {profile.quality.rms_reprojection_px:.2f} px, "
+            f"{profile.quality.views_used} views)."
+        ),
+    )
+
+
+def _intrinsics_candidates_for_frame(
+    device_id: str | None,
+    width: int,
+    height: int,
+) -> list[CameraIntrinsicsCandidate]:
+    profile = load_device_profile_for_frame(device_id, width, height)
+    if profile is None:
+        return build_intrinsics_candidates(width, height)
+    return [_intrinsics_from_device_profile(profile)]
+
+
 def _anchor_candidate_for_accepted(
     stored: CalibrationResult,
     candidates: list[CameraPoseCandidate],
@@ -562,6 +678,15 @@ def _anchor_candidate_for_accepted(
         pool,
         key=lambda candidate: abs(candidate.intrinsics.focal_length_x_px - fx),
     )
+
+
+def _stored_pitch_dimensions(
+    stored: CalibrationResult,
+) -> CricketPitchDimensions | None:
+    """Re-solve against the pitch the stored pose was originally solved on."""
+    if stored.pitch_geometry is None:
+        return None
+    return stored.pitch_geometry.to_dimensions()
 
 
 def list_dense_focal_calibration_candidates(
@@ -599,10 +724,12 @@ def list_dense_focal_calibration_candidates(
         far_box=stored.far_wicket_box,
         landmarks=stored.stump_landmarks,
     )
+    dimensions = _stored_pitch_dimensions(stored)
     correspondences = build_registration_correspondences(
         observation,
         assignment_hypothesis=assignment_hypothesis,
         lateral_mapping=lateral_mapping,
+        dimensions=dimensions,
     )
     candidates: list[CameraPoseCandidate] = []
     for focal_px in np.linspace(lower, upper, steps):
@@ -621,6 +748,7 @@ def list_dense_focal_calibration_candidates(
             frame,
             observation,
             minimum_pointlike_anchors=MIN_ASSISTED_POINTLIKE_ANCHORS,
+            dimensions=dimensions,
         )
         if not candidate.solver_success:
             continue
@@ -630,6 +758,7 @@ def list_dense_focal_calibration_candidates(
             width,
             height,
             minimum_pointlike_anchors=MIN_ASSISTED_POINTLIKE_ANCHORS,
+            dimensions=dimensions,
         )
         candidate = candidate.model_copy(update={"uncertainty": uncertainty})
         if _mandatory_physical_validation_passed(candidate)[0]:
@@ -665,6 +794,8 @@ def list_track_refineable_calibration_candidates(
         observation,
         frame,
         assignment_hypothesis=None,
+        device_id=stored.device_id,
+        dimensions=_stored_pitch_dimensions(stored),
     )
     candidates = [
         candidate
@@ -1250,6 +1381,20 @@ def _write_landmark_debug_report(
     return DEBUG_REPORT_FILENAME
 
 
+def _rmse_gate_px(candidate: CameraPoseCandidate, base_px: float) -> float:
+    """Scale a pixel gate to the frame it is judging.
+
+    Frame width is taken from the principal point, which is seeded at the image
+    centre, so no signature change is needed. The flat constant stays as a floor
+    so nothing that passed at 720x1280 starts failing.
+    """
+    estimated_width = float(candidate.intrinsics.principal_point_x_px) * 2.0
+    if estimated_width <= 0:
+        return base_px
+    scaled = estimated_width * RMSE_GATE_FRACTION_OF_WIDTH
+    return max(base_px, scaled)
+
+
 def _mandatory_physical_validation_passed(
     candidate: CameraPoseCandidate,
 ) -> tuple[bool, list[str]]:
@@ -1264,10 +1409,14 @@ def _mandatory_physical_validation_passed(
             reasons.append(check.reason)
     if candidate.reprojection_rmse_px is None:
         reasons.append("Registration reprojection error is unavailable.")
-    elif candidate.reprojection_rmse_px > MAX_WICKET_RMSE_PX:
-        reasons.append(
-            f"Per-wicket reprojection error too high ({candidate.reprojection_rmse_px:.2f}px)."
-        )
+    else:
+        gate = _rmse_gate_px(candidate, MAX_WICKET_RMSE_PX)
+        if candidate.reprojection_rmse_px > gate:
+            reasons.append(
+                "Per-wicket reprojection error too high "
+                f"({candidate.reprojection_rmse_px:.2f}px against a {gate:.1f}px limit "
+                "for this frame size)."
+            )
     stability_reason = _stability_failure_reason(candidate)
     if stability_reason is not None:
         reasons.append(stability_reason)
@@ -1407,9 +1556,12 @@ def _register_from_observation(
     frame: np.ndarray,
     *,
     assignment_hypothesis: AssignmentChoice | None,
+    device_id: str | None = None,
+    dimensions: CricketPitchDimensions | None = None,
 ) -> tuple[RealPitchRegistrationResult, list[str], bool]:
     assert observation.setup_frame is not None
-    intrinsics_candidates = build_intrinsics_candidates(
+    intrinsics_candidates = _intrinsics_candidates_for_frame(
+        device_id,
         frame.shape[1],
         frame.shape[0],
     )
@@ -1429,6 +1581,7 @@ def _register_from_observation(
                 observation,
                 assignment_hypothesis=assignment,
                 lateral_mapping=lateral_mapping,
+                dimensions=dimensions,
             )
             for intrinsics in intrinsics_candidates:
                 candidate_id = (
@@ -1445,6 +1598,7 @@ def _register_from_observation(
                     frame,
                     observation,
                     minimum_pointlike_anchors=MIN_ASSISTED_POINTLIKE_ANCHORS,
+                    dimensions=dimensions,
                 )
                 candidates.append(candidate)
 
@@ -1460,6 +1614,7 @@ def _register_from_observation(
             frame.shape[1],
             frame.shape[0],
             minimum_pointlike_anchors=MIN_ASSISTED_POINTLIKE_ANCHORS,
+            dimensions=dimensions,
         )
         enriched.append(candidate.model_copy(update={"uncertainty": uncertainty}))
     candidates = enriched
@@ -1533,6 +1688,7 @@ def _register_from_observation(
                 observation,
                 assignment_hypothesis=selected.assignment_hypothesis,
                 lateral_mapping=selected.lateral_mapping,
+                dimensions=dimensions,
             )
             if selected is not None
             else []
@@ -1545,7 +1701,7 @@ def _register_from_observation(
         message=(
             "Registration complete."
             if selected is not None
-            else "Registration failed for all pose candidates."
+            else _describe_registration_failure(candidates)
         ),
     )
     registration_summary = _registration_summary_from_candidates(
@@ -1580,11 +1736,22 @@ def _calibration_from_registration(
     distortion = [0.0, 0.0, 0.0, 0.0, 0.0]
     if selected is not None:
         rmse = selected.reprojection_rmse_px
-        camera_matrix = _camera_matrix_from_intrinsics(
-            selected.intrinsics.focal_length_x_px,
-            request.source_image_width,
-            request.source_image_height,
-        )
+        if selected.intrinsics.source == "device_calibration":
+            # A measured lens knows where its optical centre is and how much it
+            # bends straight lines. Re-centring and zeroing that would discard
+            # the reason for calibrating in the first place.
+            camera_matrix = [
+                [selected.intrinsics.focal_length_x_px, 0.0, selected.intrinsics.principal_point_x_px],
+                [0.0, selected.intrinsics.focal_length_y_px, selected.intrinsics.principal_point_y_px],
+                [0.0, 0.0, 1.0],
+            ]
+            distortion = list(selected.intrinsics.distortion_coefficients)
+        else:
+            camera_matrix = _camera_matrix_from_intrinsics(
+                selected.intrinsics.focal_length_x_px,
+                request.source_image_width,
+                request.source_image_height,
+            )
         rotation_matrix = selected.rotation_matrix
         translation_vector = selected.translation_vector
         for residual in selected.reprojection_residuals:
@@ -1617,6 +1784,8 @@ def _calibration_from_registration(
         calibration_frame_index=request.calibration_frame_index,
         source_image_width=request.source_image_width,
         source_image_height=request.source_image_height,
+        device_id=request.device_id,
+        pitch_geometry=request.pitch_geometry,
         near_wicket_box=request.near_wicket_box,
         far_wicket_box=request.far_wicket_box,
         stump_landmarks=landmarks,
@@ -1650,7 +1819,7 @@ def _registration_rejection_reasons(
         reasons.append("Recovered focal length is implausible for this frame.")
     if "near_far_projected_size_order" in failed:
         reasons.append("FAR wicket projects larger/closer than NEAR wicket.")
-    if candidate.reprojection_rmse_px > MAX_WICKET_RMSE_PX:
+    if candidate.reprojection_rmse_px > _rmse_gate_px(candidate, MAX_WICKET_RMSE_PX):
         reasons.append(
             f"Per-wicket reprojection error too high ({candidate.reprojection_rmse_px:.2f}px)."
         )
@@ -1662,11 +1831,16 @@ def _registration_rejection_reasons(
 
 def _acceptance_rejection_reasons(calibration: CalibrationResult) -> list[str]:
     reasons: list[str] = []
+    # Accepting is stricter than registering, and scales with the frame for the
+    # same reason: a fixed pixel budget punishes higher-resolution capture.
+    width = float(calibration.source_image_width or 0)
+    gate = max(MAX_ACCEPTANCE_RMSE_PX, width * RMSE_GATE_FRACTION_OF_WIDTH * 0.8)
     if calibration.reprojection_rmse_px is None:
         reasons.append("Registration reprojection error is unavailable.")
-    elif calibration.reprojection_rmse_px > MAX_ACCEPTANCE_RMSE_PX:
+    elif calibration.reprojection_rmse_px > gate:
         reasons.append(
-            f"Acceptance reprojection RMSE exceeds limit ({calibration.reprojection_rmse_px:.2f}px)."
+            f"Acceptance reprojection RMSE exceeds limit "
+            f"({calibration.reprojection_rmse_px:.2f}px against {gate:.1f}px)."
         )
     if "orientation_hypothesis_required" in calibration.warnings:
         reasons.append("Orientation hypothesis A/B must be resolved before acceptance.")
@@ -1864,6 +2038,13 @@ def _write_accepted_snapshot(analysis_id: str, result: CalibrationResult) -> Non
         "stump_landmarks": [
             item.model_dump(mode="json") for item in result.stump_landmarks
         ],
+        # The pitch this pose was solved against. Physics and replay read it
+        # back so a short rig is never measured against regulation.
+        "pitch_geometry": (
+            result.pitch_geometry.model_dump(mode="json")
+            if result.pitch_geometry
+            else None
+        ),
         "frozen": True,
     }
     path.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")

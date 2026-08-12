@@ -13,6 +13,14 @@ import numpy as np
 from PIL import Image, ImageDraw
 from scipy.optimize import least_squares
 
+from packages.cricket_vision.calibration.cricket_pitch_geometry import (
+    CricketPitchDimensions,
+)
+
+from ..schemas.device_calibration import (
+    MAX_PLAUSIBLE_DIAGONAL_FOV_DEG,
+    MIN_PLAUSIBLE_DIAGONAL_FOV_DEG,
+)
 from ..schemas.real_pitch_registration import (
     CameraIntrinsicsCandidate,
     CameraPoseCandidate,
@@ -142,35 +150,78 @@ def check_registration_eligibility(
     return Eligibility(not reasons, reasons)
 
 
+def diagonal_fov_degrees(focal_px: float, width: int, height: int) -> float:
+    diagonal = math.hypot(width, height)
+    return math.degrees(2.0 * math.atan(diagonal / (2.0 * focal_px)))
+
+
+def focal_px_for_diagonal_fov(fov_degrees: float, width: int, height: int) -> float:
+    diagonal = math.hypot(width, height)
+    return diagonal / (2.0 * math.tan(math.radians(fov_degrees) / 2.0))
+
+
 def build_intrinsics_candidates(
     image_width: int,
     image_height: int,
 ) -> list[CameraIntrinsicsCandidate]:
-    """Build bounded deterministic zero-distortion focal hypotheses."""
-    lower = image_width * 0.35
-    upper = image_width * 3.5
-    candidates: list[CameraIntrinsicsCandidate] = []
-    for fov in FOCAL_FOV_HYPOTHESES:
-        focal = image_width / (2 * math.tan(math.radians(fov) / 2))
-        candidates.append(
-            CameraIntrinsicsCandidate(
-                candidate_id=f"fov_{int(fov)}",
-                focal_length_x_px=focal,
-                focal_length_y_px=focal,
-                principal_point_x_px=image_width / 2,
-                principal_point_y_px=image_height / 2,
-                distortion_coefficients=[0.0] * 5,
-                source="bounded_image_hypothesis",
-                confidence="LOW",
-                horizontal_fov_degrees=fov,
-                lower_focal_bound_px=lower,
-                upper_focal_bound_px=upper,
-                distortion_assumption=(
-                    "Zero distortion; no trusted clip-specific lens metadata exists."
-                ),
-            )
+    """Build bounded deterministic zero-distortion focal hypotheses.
+
+    Hypotheses implying a lens no phone main camera has are dropped: focal
+    length trades against camera distance, so an implausibly long focal can
+    still reach a low reprojection error while placing the camera metres from
+    where it stood.
+    """
+    # Bounds are what refinement is allowed to explore, so they carry the same
+    # plausibility as the seeds. The old image-width multiples let refinement
+    # walk a 60-degree seed out to a 43-degree telephoto that no phone has, and
+    # a wrong focal buys a wrong camera distance at almost no reprojection cost.
+    lower = focal_px_for_diagonal_fov(
+        MAX_PLAUSIBLE_DIAGONAL_FOV_DEG,
+        image_width,
+        image_height,
+    )
+    upper = focal_px_for_diagonal_fov(
+        MIN_PLAUSIBLE_DIAGONAL_FOV_DEG,
+        image_width,
+        image_height,
+    )
+    candidates = [
+        CameraIntrinsicsCandidate(
+            candidate_id=f"fov_{int(fov)}",
+            focal_length_x_px=focal,
+            focal_length_y_px=focal,
+            principal_point_x_px=image_width / 2,
+            principal_point_y_px=image_height / 2,
+            distortion_coefficients=[0.0] * 5,
+            source="bounded_image_hypothesis",
+            confidence="LOW",
+            horizontal_fov_degrees=fov,
+            lower_focal_bound_px=lower,
+            upper_focal_bound_px=upper,
+            distortion_assumption=(
+                "Zero distortion; no trusted clip-specific lens metadata exists."
+            ),
         )
-    return candidates
+        for fov, focal in (
+            (fov, image_width / (2 * math.tan(math.radians(fov) / 2)))
+            for fov in FOCAL_FOV_HYPOTHESES
+        )
+    ]
+    plausible = [
+        candidate
+        for candidate in candidates
+        if MIN_PLAUSIBLE_DIAGONAL_FOV_DEG
+        <= diagonal_fov_degrees(
+            candidate.focal_length_x_px,
+            image_width,
+            image_height,
+        )
+        <= MAX_PLAUSIBLE_DIAGONAL_FOV_DEG
+    ]
+    # ponytail: an unusual aspect ratio can put every hypothesis outside the
+    # phone-camera band. An implausible guess still beats refusing to solve, so
+    # the unfiltered sweep stands in — its LOW confidence already says so.
+    return plausible or candidates
 
 
 def _mapping_weight(item: WicketLandmarkObservation) -> float:
@@ -179,8 +230,11 @@ def _mapping_weight(item: WicketLandmarkObservation) -> float:
     )
 
 
-def _virtual_points_for_end(end: str) -> dict[str, WorldPoint3D]:
-    specification = build_virtual_pitch_specification()
+def _virtual_points_for_end(
+    end: str,
+    dimensions: CricketPitchDimensions | None = None,
+) -> dict[str, WorldPoint3D]:
+    specification = build_virtual_pitch_specification(dimensions)
     points = {
         item.semantic_id: item.point
         for item in specification.landmarks
@@ -194,8 +248,12 @@ def build_registration_correspondences(
     *,
     assignment_hypothesis: str,
     lateral_mapping: str,
+    dimensions: CricketPitchDimensions | None = None,
 ) -> list[RegistrationCorrespondence]:
     """Map evidence semantics without promoting boxes or lines to exact points."""
+    stump_height = build_virtual_pitch_specification(
+        dimensions
+    ).dimensions.stump_height_m
     assignment = (
         {"near": "bowler", "far": "striker"}
         if assignment_hypothesis == "A"
@@ -209,7 +267,7 @@ def build_registration_correspondences(
         if wicket is None:
             continue
         end = assignment[role]
-        points = _virtual_points_for_end(end)
+        points = _virtual_points_for_end(end, dimensions)
         image_to_world_side = (
             {"left": "left", "right": "right"}
             if lateral_mapping == "image_left_to_world_left"
@@ -358,8 +416,7 @@ def build_registration_correspondences(
                     (
                         0.0,
                         points[f"{end}_wicket_center_base"].y,
-                        build_virtual_pitch_specification().dimensions.stump_height_m
-                        / 2,
+                        stump_height / 2,
                     )
                 ),
                 confidence=centre.confidence if centre else 0.0,
@@ -404,6 +461,7 @@ def apply_assisted_anchor_overrides(
     point_overrides: dict[str, PixelPoint],
     crease_overrides: dict[str, PixelPoint] | None = None,
     manual_override_ids: set[str] | None = None,
+    dimensions: CricketPitchDimensions | None = None,
 ) -> list[RegistrationCorrespondence]:
     """Apply native-pixel user anchors without warping projected geometry."""
     wicket_mapping = {
@@ -473,7 +531,7 @@ def apply_assisted_anchor_overrides(
     )
     landmarks = {
         item.semantic_id: item.point
-        for item in build_virtual_pitch_specification().landmarks
+        for item in build_virtual_pitch_specification(dimensions).landmarks
     }
     for semantic_id, point in sorted(crease_overrides.items()):
         parts = semantic_id.split("_")
@@ -802,8 +860,9 @@ def _projected_wicket_box(
     rotation: np.ndarray,
     translation: np.ndarray,
     camera_matrix: np.ndarray,
+    dimensions: CricketPitchDimensions | None = None,
 ) -> PixelBox | None:
-    specification = build_virtual_pitch_specification()
+    specification = build_virtual_pitch_specification(dimensions)
     stumps = [item for item in specification.stumps if item.end == end]
     points: list[list[float]] = []
     for stump in stumps:
@@ -849,22 +908,26 @@ def _plausibility_checks(
     assignment_hypothesis: str,
     image_width: int,
     image_height: int,
+    dimensions: CricketPitchDimensions | None = None,
 ) -> tuple[list[PlausibilityCheck], np.ndarray, np.ndarray]:
+    pitch_length = build_virtual_pitch_specification(
+        dimensions
+    ).dimensions.pitch_length_m
     camera_matrix = _camera_matrix(intrinsics, focal)
     rotation_matrix, position = _camera_position(rotation, translation)
     world, _, _ = _point_arrays(correspondences)
     _, depths = _project(world, rotation, translation, camera_matrix)
-    pitch_centre = np.asarray([0.0, 10.06, 0.0])
+    pitch_centre = np.asarray([0.0, pitch_length / 2, 0.0])
     forward = rotation_matrix.T @ np.asarray([0.0, 0.0, 1.0])
     to_pitch = pitch_centre - position
     to_pitch /= max(np.linalg.norm(to_pitch), 1e-9)
     near_end = "bowler" if assignment_hypothesis == "A" else "striker"
     far_end = "striker" if near_end == "bowler" else "bowler"
     near_box = _projected_wicket_box(
-        near_end, rotation, translation, camera_matrix
+        near_end, rotation, translation, camera_matrix, dimensions
     )
     far_box = _projected_wicket_box(
-        far_end, rotation, translation, camera_matrix
+        far_end, rotation, translation, camera_matrix, dimensions
     )
     size_order = (
         near_box is not None
@@ -989,6 +1052,7 @@ def _independent_validation(
     camera_matrix: np.ndarray,
     rmse: float,
     checks: Sequence[PlausibilityCheck],
+    dimensions: CricketPitchDimensions | None = None,
 ) -> IndependentValidation:
     envelope_scores: list[float] = []
     for item in correspondences:
@@ -1000,7 +1064,7 @@ def _independent_validation(
             else "striker"
         )
         projected = _projected_wicket_box(
-            end, rotation, translation, camera_matrix
+            end, rotation, translation, camera_matrix, dimensions
         )
         if projected is not None:
             envelope_scores.append(_box_iou(item.observed_bbox, projected))
@@ -1049,6 +1113,7 @@ def _temporal_validation(
     rotation: np.ndarray,
     translation: np.ndarray,
     camera_matrix: np.ndarray,
+    dimensions: CricketPitchDimensions | None = None,
 ) -> TemporalValidation:
     assignment_by_role = {
         item.observed_wicket_role: (
@@ -1063,7 +1128,7 @@ def _temporal_validation(
     evaluated: set[int] = set()
     for role, end in assignment_by_role.items():
         projected = _projected_wicket_box(
-            end, rotation, translation, camera_matrix
+            end, rotation, translation, camera_matrix, dimensions
         )
         if projected is None:
             continue
@@ -1245,6 +1310,7 @@ def solve_pose_candidate(
     observation: WicketObservationResult,
     *,
     minimum_pointlike_anchors: int = MIN_POINTLIKE_ANCHORS,
+    dimensions: CricketPitchDimensions | None = None,
 ) -> CameraPoseCandidate:
     world, image, used = _point_arrays(correspondences)
     if len(used) < minimum_pointlike_anchors:
@@ -1372,6 +1438,7 @@ def solve_pose_candidate(
         assignment,
         frame.shape[1],
         frame.shape[0],
+        dimensions,
     )
     camera = _virtual_camera(
         candidate_id,
@@ -1383,7 +1450,9 @@ def solve_pose_candidate(
         rotation_matrix,
         position,
     )
-    projection = project_virtual_pitch(camera)
+    projection = project_virtual_pitch(
+        camera, build_virtual_pitch_specification(dimensions)
+    )
     independent = _independent_validation(
         projection,
         frame,
@@ -1393,6 +1462,7 @@ def solve_pose_candidate(
         camera_matrix,
         rmse,
         checks,
+        dimensions,
     )
     temporal = _temporal_validation(
         observation,
@@ -1400,6 +1470,7 @@ def solve_pose_candidate(
         rotation,
         translation,
         camera_matrix,
+        dimensions,
     )
     hard_checks = {
         "finite_pose",
@@ -1537,6 +1608,7 @@ def _perturbation_uncertainty(
     height: int,
     *,
     minimum_pointlike_anchors: int = MIN_POINTLIKE_ANCHORS,
+    dimensions: CricketPitchDimensions | None = None,
 ) -> PoseUncertainty:
     world, image, used = _point_arrays(correspondences)
     if (
@@ -1554,14 +1626,16 @@ def _perturbation_uncertainty(
     positions: list[np.ndarray] = []
     rotations: list[np.ndarray] = []
     overlay_points: list[np.ndarray] = []
-    specification = build_virtual_pitch_specification()
+    specification = build_virtual_pitch_specification(dimensions)
+    half_width = specification.dimensions.pitch_width_m / 2
+    pitch_length = specification.dimensions.pitch_length_m
     probe_world = np.asarray(
         [
-            [-specification.dimensions.pitch_width_m / 2, 0.0, 0.0],
-            [specification.dimensions.pitch_width_m / 2, 0.0, 0.0],
-            [-specification.dimensions.pitch_width_m / 2, 20.12, 0.0],
-            [specification.dimensions.pitch_width_m / 2, 20.12, 0.0],
-            [0.0, 10.06, 0.0],
+            [-half_width, 0.0, 0.0],
+            [half_width, 0.0, 0.0],
+            [-half_width, pitch_length, 0.0],
+            [half_width, pitch_length, 0.0],
+            [0.0, pitch_length / 2, 0.0],
         ],
         dtype=np.float64,
     )
@@ -1654,6 +1728,7 @@ def build_pose_stability_diagnostics(
     height: int,
     *,
     minimum_pointlike_anchors: int = MIN_POINTLIKE_ANCHORS,
+    dimensions: CricketPitchDimensions | None = None,
 ) -> dict[str, object]:
     """Return per-candidate pose/stability diagnostics for debug reporting."""
     uncertainty = candidate.uncertainty
@@ -1664,6 +1739,7 @@ def build_pose_stability_diagnostics(
             width,
             height,
             minimum_pointlike_anchors=minimum_pointlike_anchors,
+            dimensions=dimensions,
         )
     temporal = candidate.temporal_validation
     zero_reason = None
@@ -1747,9 +1823,16 @@ def _read_setup_frame(
     return frame, analysis
 
 
-def _real_projection(candidate: CameraPoseCandidate, width: int, height: int):
+def _real_projection(
+    candidate: CameraPoseCandidate,
+    width: int,
+    height: int,
+    dimensions: CricketPitchDimensions | None = None,
+):
     camera = _candidate_camera(candidate, width, height)
-    projected = project_virtual_pitch(camera)
+    projected = project_virtual_pitch(
+        camera, build_virtual_pitch_specification(dimensions)
+    )
     data = projected.model_dump(exclude={"synthetic_only"})
     return RealProjectedPitchGeometry.model_validate(
         {**data, "registered_to_real_setup_frame": True}
@@ -1906,6 +1989,7 @@ def run_real_pitch_registration(
     required_lateral_mapping: str | None = None,
     result_filename: str = RESULT_FILENAME,
     debug_directory: str = DEBUG_DIRECTORY,
+    dimensions: CricketPitchDimensions | None = None,
 ) -> RealPitchRegistrationResult:
     observation = load_wicket_observation(analysis_id)
     eligibility = check_registration_eligibility(observation)
@@ -1934,6 +2018,7 @@ def run_real_pitch_registration(
                 observation,
                 assignment_hypothesis=assignment,
                 lateral_mapping=lateral_mapping,
+                dimensions=dimensions,
             )
             if point_overrides or crease_overrides:
                 correspondences = apply_assisted_anchor_overrides(
@@ -1943,6 +2028,7 @@ def run_real_pitch_registration(
                     point_overrides=point_overrides or {},
                     crease_overrides=crease_overrides,
                     manual_override_ids=manual_override_ids,
+                    dimensions=dimensions,
                 )
             for intrinsics in intrinsics_candidates:
                 candidate_id = (
@@ -1962,6 +2048,7 @@ def run_real_pitch_registration(
                         if manual_override_ids
                         else MIN_POINTLIKE_ANCHORS
                     ),
+                    dimensions=dimensions,
                 )
                 candidates.append(candidate)
                 correspondences_by_candidate[candidate_id] = correspondences
@@ -2033,6 +2120,7 @@ def run_real_pitch_registration(
                         if manual_override_ids
                         else MIN_POINTLIKE_ANCHORS
                     ),
+                    dimensions=dimensions,
                 )
             }
         )
@@ -2060,10 +2148,12 @@ def run_real_pitch_registration(
             ),
         )
         projection = _real_projection(
-            selected, frame.shape[1], frame.shape[0]
+            selected, frame.shape[1], frame.shape[0], dimensions
         )
         competing_projection = (
-            _real_projection(competing, frame.shape[1], frame.shape[0])
+            _real_projection(
+                competing, frame.shape[1], frame.shape[0], dimensions
+            )
             if competing is not None and competing.solver_success
             else None
         )

@@ -6,6 +6,10 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from packages.cricket_vision.calibration.cricket_pitch_geometry import (
+    CricketPitchDimensions,
+)
+
 
 REPLAY_SCHEMA_VERSION = "1.0"
 REPLAY_COORDINATE_SYSTEM = "CRICVISION_PITCH_V1"
@@ -165,6 +169,9 @@ class ReplayPayloadV1(ReplayModel):
     distance_unit: Literal["metre"] = REPLAY_DISTANCE_UNIT
     time_unit: Literal["second"] = REPLAY_TIME_UNIT
     measurement_validity: MeasurementValidity = "INSUFFICIENT_EVIDENCE"
+    # The pitch the pose was solved against, so the replay scene draws the
+    # rig the operator actually used. None means regulation.
+    pitch_geometry: CricketPitchDimensions | None = None
     camera: ReplayCamera
     playback: ReplayPlayback
     trajectory: list[ReplayTrajectorySample] = Field(default_factory=list)

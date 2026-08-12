@@ -245,6 +245,7 @@ def assemble_replay_payload(analysis_id: str) -> ReplayPayloadV1:
     return ReplayPayloadV1(
         analysis_id=analysis_id,
         measurement_validity=measurement_validity,
+        pitch_geometry=physics.calibration.pitch_geometry,
         camera=camera,
         playback=playback,
         trajectory=trajectory,
@@ -311,6 +312,7 @@ def build_and_save_replay_payload(
     payload = ReplayPayloadV1(
         analysis_id=analysis_id,
         measurement_validity=measurement_validity,
+        pitch_geometry=physics.calibration.pitch_geometry,
         camera=camera,
         playback=playback,
         trajectory=trajectory,
@@ -463,10 +465,8 @@ def _resolve_measurement_validity(
         if (
             physics.calibration.mode == "METRIC_3D"
             and _physics_has_world_samples(physics)
-            and (
-                physics.geometry_validation is None
-                or physics.geometry_validation.validity == "VALID_METRIC_3D"
-            )
+            and physics.geometry_validation is not None
+            and physics.geometry_validation.validity == "VALID_METRIC_3D"
         ):
             return "CALIBRATED"
         return "IMAGE_SPACE_ONLY"
@@ -474,10 +474,21 @@ def _resolve_measurement_validity(
         return "INSUFFICIENT_EVIDENCE"
     if physics.calibration.mode == "IMAGE_SPACE_ONLY":
         return "IMAGE_SPACE_ONLY"
-    if physics.geometry_validation is not None:
-        if physics.geometry_validation.validity != "VALID_METRIC_3D":
-            return "IMAGE_SPACE_ONLY"
-    elif not _physics_has_world_samples(physics):
+    # Geometry validation is what proves the world positions are canonical and
+    # inside the pitch. Absence of it is not a pass.
+    #
+    # Every historic payload with geometry_validation=None came from a PARTIAL
+    # physics result, and every one of those published x/y in the legacy
+    # Calibration V2 ordering — longitudinal in the lateral slot. They reached
+    # CALIBRATED, produced 38-43 km/h against 90-138 for validated runs, and
+    # would draw a ball travelling sideways across the 3D pitch. Treating an
+    # unvalidated result as calibrated is what let that through.
+    if (
+        physics.geometry_validation is None
+        or physics.geometry_validation.validity != "VALID_METRIC_3D"
+    ):
+        return "IMAGE_SPACE_ONLY"
+    if not _physics_has_world_samples(physics):
         return "IMAGE_SPACE_ONLY"
     return "CALIBRATED"
 

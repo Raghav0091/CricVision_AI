@@ -8,6 +8,7 @@ from packages.cricket_vision.calibration.cricket_pitch_geometry import (
     CALIBRATION_V2_WORLD_ORDER,
     PITCH_LENGTH_M,
     PITCH_WIDTH_M,
+    CricketPitchDimensions,
 )
 from services.api.schemas.delivery_physics import (
     BouncePhysicsResult,
@@ -23,6 +24,9 @@ from services.api.schemas.video_analysis import (
 )
 from services.api.services.delivery_physics_service import (
     _analyse_non_3d,
+    _overall_stump_to_stump_speed,
+    _pitch_length_m,
+    _world_point_in_pitch,
     _fit_post_bounce,
     _line_and_length,
     _metric_bounce,
@@ -584,3 +588,70 @@ def test_insufficient_evidence_marks_spin_rpm_unavailable() -> None:
     assert result.exact_spin_rpm is None
     assert "not directly observable" in result.exact_spin_rpm_unavailable_reason
     assert result.line_and_length.line == "unavailable"
+
+
+def _declared_pitch_samples(pitch_length_m: float) -> list[TrajectorySample]:
+    """A track spanning exactly the declared pitch at a constant 20 m/s."""
+    speed_mps = 20.0
+    count = 11
+    return [
+        TrajectorySample(
+            frame_index=index,
+            timestamp_seconds=(index * pitch_length_m / (count - 1)) / speed_mps,
+            world_x_m=0.0,
+            world_y_m=index * pitch_length_m / (count - 1),
+            world_z_m=1.0,
+            pixel_x=10.0,
+            pixel_y=10.0,
+            speed_mps=speed_mps,
+            provenance="OBSERVED",
+            confidence=0.9,
+        )
+        for index in range(count)
+    ]
+
+
+def test_physics_uses_declared_geometry() -> None:
+    """Stump-to-stump speed must span the declared wickets, not 20.12 m."""
+    samples = _declared_pitch_samples(4.0)
+
+    declared = _overall_stump_to_stump_speed(samples, 4.0)
+
+    assert declared.status == "MEASURED"
+    assert declared.travelled_distance_m == pytest.approx(4.0, abs=1e-6)
+    assert declared.speed_mps == pytest.approx(20.0, abs=0.05)
+    assert declared.speed_kph == pytest.approx(72.0, abs=0.5)
+    assert declared.end_crossing.world_y_m == pytest.approx(4.0, abs=1e-6)
+
+
+def test_declared_geometry_speed_is_not_computed_against_regulation() -> None:
+    """The regulation plane sits past the rig, so it must not silently report."""
+    samples = _declared_pitch_samples(4.0)
+
+    regulation = _overall_stump_to_stump_speed(samples, PITCH_LENGTH_M)
+
+    assert regulation.status == "UNAVAILABLE"
+    assert regulation.travelled_distance_m is None
+    assert regulation.speed_mps is None
+    assert regulation.speed_kph is None
+
+
+def test_calibration_carries_declared_geometry_to_pitch_bounds() -> None:
+    """Pitch bounds follow the declared pitch rather than the constant."""
+    declared = synthetic_calibration().model_copy(
+        update={
+            "pitch_geometry": CricketPitchDimensions(
+                pitch_length_m=4.0,
+                popping_crease_distance_m=1.0,
+            )
+        }
+    )
+    regulation = synthetic_calibration()
+
+    assert _pitch_length_m(declared) == 4.0
+    assert _pitch_length_m(regulation) == PITCH_LENGTH_M
+
+    # A point 10 m down a 4 m pitch is off the rig, but on a regulation pitch.
+    assert not _world_point_in_pitch(0.0, 10.0, 0.5, pitch_length_m=4.0)
+    assert _world_point_in_pitch(0.0, 10.0, 0.5, pitch_length_m=PITCH_LENGTH_M)
+    assert _world_point_in_pitch(0.0, 3.5, 0.5, pitch_length_m=4.0)

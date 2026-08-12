@@ -18,6 +18,12 @@ STUMP_CLASS_FRAGMENTS = ("stump", "wicket")
 # lower-centre and often touches the bottom. Broader than Live alignment boxes.
 FAR_WICKET_ROI = {"x": 0.18, "y": 0.15, "width": 0.64, "height": 0.50}
 NEAR_WICKET_ROI = {"x": 0.05, "y": 0.45, "width": 0.90, "height": 0.55}
+
+# A real pitch is ~3m wide, far wider than the stump group itself — widen the
+# drawn corridor around each end's centre so it reads as a pitch rather than
+# just the width of three stumps. Length (non_striker <-> striker) is left
+# untouched; only the x-extent at each end changes.
+PITCH_CORRIDOR_WIDEN_FACTOR = 2.6
 ROI_LAYOUTS = {
     "far_roi": FAR_WICKET_ROI,
     "near_roi": NEAR_WICKET_ROI,
@@ -1282,35 +1288,26 @@ def _build_pitch_overlay(
 
     striker_center = center(striker)
     non_striker_center = center(non_striker)
+
+    def widened_edges(box: dict[str, int]) -> tuple[int, int]:
+        mid_x = box["x"] + box["width"] / 2
+        half = box["width"] * PITCH_CORRIDOR_WIDEN_FACTOR / 2
+        left = max(0, round(mid_x - half))
+        right = min(frame_width - 1, round(mid_x + half))
+        return left, right
+
+    non_striker_left, non_striker_right = widened_edges(non_striker)
+    striker_left, striker_right = widened_edges(striker)
     corridor = [
-        {"x": max(0, non_striker["x"]), "y": non_striker_center["y"]},
-        {"x": max(0, striker["x"]), "y": striker_center["y"]},
-        {
-            "x": min(frame_width - 1, striker["x"] + striker["width"]),
-            "y": striker_center["y"],
-        },
-        {
-            "x": min(
-                frame_width - 1,
-                non_striker["x"] + non_striker["width"],
-            ),
-            "y": non_striker_center["y"],
-        },
+        {"x": non_striker_left, "y": non_striker_center["y"]},
+        {"x": striker_left, "y": striker_center["y"]},
+        {"x": striker_right, "y": striker_center["y"]},
+        {"x": non_striker_right, "y": non_striker_center["y"]},
     ]
 
-    def crease(box: dict[str, int]) -> list[dict[str, int]]:
-        extension = round(box["width"] * 0.45)
+    def crease(box: dict[str, int], left: int, right: int) -> list[dict[str, int]]:
         y = min(frame_height - 1, box["y"] + box["height"])
-        return [
-            {"x": max(0, box["x"] - extension), "y": y},
-            {
-                "x": min(
-                    frame_width - 1,
-                    box["x"] + box["width"] + extension,
-                ),
-                "y": y,
-            },
-        ]
+        return [{"x": left, "y": y}, {"x": right, "y": y}]
 
     return {
         "geometry_type": "estimated_from_stump_bboxes",
@@ -1322,8 +1319,8 @@ def _build_pitch_overlay(
         "center_line": [non_striker_center, striker_center],
         "wickets": virtual_stumps,
         "crease_guides": {
-            "striker": crease(striker),
-            "non_striker": crease(non_striker),
+            "striker": crease(striker, striker_left, striker_right),
+            "non_striker": crease(non_striker, non_striker_left, non_striker_right),
         },
     }
 

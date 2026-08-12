@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
@@ -76,101 +75,11 @@ function metric(value: number | null | undefined, suffix: string, digits = 1): s
 }
 
 
-function TopDownPitch({ physics }: { physics: DeliveryPhysicsResult }) {
-  const samples = physics.trajectory_samples.filter(
-    (sample) => sample.world_x_m != null && sample.world_y_m != null
-  );
-  const pitchWidth = physics.pitch_geometry.pitch_width_m;
-  const pitchLength = physics.pitch_geometry.pitch_length_m;
-  const mapX = (x: number) => 30 + ((x + pitchWidth / 2) / pitchWidth) * 240;
-  const mapY = (y: number) => 510 - (y / pitchLength) * 480;
-  const colours = {
-    OBSERVED: "#78e08f",
-    RECONSTRUCTED: "#ffca68",
-    PROJECTED: "#9aa5ad"
-  };
-
-  return (
-    <div className="min-w-0">
-      <p className="text-[11px] font-bold uppercase text-white/45">Top-down pitch</p>
-      <svg
-        aria-label="Top-down physics trajectory"
-        className="mt-2 h-auto w-full max-w-[18rem] bg-[#07100d]"
-        viewBox="0 0 300 540"
-      >
-        <rect x="30" y="30" width="240" height="480" fill="#183f2e" stroke="#9bb79f" strokeWidth="2" />
-        <line x1="150" y1="30" x2="150" y2="510" stroke="#d6e5d9" strokeOpacity="0.45" />
-        <line x1="141" y1="30" x2="159" y2="30" stroke="#fff" strokeWidth="4" />
-        <line x1="141" y1="510" x2="159" y2="510" stroke="#fff" strokeWidth="4" />
-        {samples.slice(1).map((sample, index) => {
-          const previous = samples[index];
-          return (
-            <line
-              key={`${sample.frame_index}-${index}`}
-              x1={mapX(previous.world_x_m as number)}
-              y1={mapY(previous.world_y_m as number)}
-              x2={mapX(sample.world_x_m as number)}
-              y2={mapY(sample.world_y_m as number)}
-              stroke={colours[sample.provenance]}
-              strokeWidth={sample.provenance === "OBSERVED" ? 3 : 2}
-              strokeDasharray={
-                sample.provenance === "PROJECTED"
-                  ? "3 5"
-                  : sample.provenance === "RECONSTRUCTED"
-                    ? "7 4"
-                    : undefined
-              }
-            />
-          );
-        })}
-        {physics.bounce.lateral_offset_m != null
-          && physics.bounce.distance_from_striker_wicket_m != null && (
-            <circle
-              cx={mapX(physics.bounce.lateral_offset_m)}
-              cy={mapY(
-                pitchLength - physics.bounce.distance_from_striker_wicket_m
-              )}
-              fill="#ff8a45"
-              r="6"
-              stroke="#fff"
-              strokeWidth="2"
-            />
-          )}
-      </svg>
-    </div>
-  );
-}
-
-
 function PhysicsAnalytics({ physics }: { physics: DeliveryPhysicsResult }) {
+  // Speed only. Everything else here was solver diagnostics.
   const stats = [
-    ["Calibration", physics.calibration.mode.replaceAll("_", " ")],
-    ["Trajectory confidence", physics.confidence],
-    ["Earliest measured speed", metric(physics.speed.earliest_measured_speed_kmh, " km/h")],
-    ["Average pre-bounce", metric(physics.speed.average_pre_bounce_speed_kmh, " km/h")],
-    ["Speed at bounce", metric(physics.speed.speed_at_bounce_kmh, " km/h")],
-    [
-      "Overall stump-to-stump",
-      physics.overall_stump_to_stump.status === "UNAVAILABLE"
-        ? "Unavailable"
-        : `${physics.overall_stump_to_stump.speed_kph?.toFixed(1) ?? "—"} km/h${
-            physics.overall_stump_to_stump.status === "PARTIALLY_PROJECTED"
-              ? ` (est. ${Math.round((physics.overall_stump_to_stump.projected_fraction ?? 0) * 100)}% projected)`
-              : " (measured)"
-          }`
-    ],
-    ["Pitching distance", metric(physics.bounce.distance_from_striker_wicket_m, " m", 2)],
-    ["Line", physics.line_and_length.line],
-    ["Length", physics.line_and_length.length],
-    ["Pre-bounce movement", metric(physics.pre_bounce_lateral_movement.movement_cm, " cm")],
-    [
-      "Post-bounce turn",
-      physics.post_bounce_movement.status === "MEASURED"
-        ? metric(physics.post_bounce_movement.lateral_turn_cm_at_last_observation, " cm")
-        : "Unavailable"
-    ],
-    ["Exact spin RPM", "Unavailable"],
-    ["Fit error", metric(physics.fit_diagnostics.weighted_reprojection_rmse_px, " px", 2)]
+    ["Speed", metric(physics.speed.earliest_measured_speed_kmh, " km/h")],
+    ["Average pre-bounce", metric(physics.speed.average_pre_bounce_speed_kmh, " km/h")]
   ];
 
   return (
@@ -203,23 +112,14 @@ function PhysicsAnalytics({ physics }: { physics: DeliveryPhysicsResult }) {
               </div>
             ))}
           </div>
-          <div className="mt-3 flex flex-wrap gap-3 text-[11px] text-white/55">
-            <span><i className="mr-1 inline-block h-2 w-3 bg-[#78e08f]" />Observed</span>
-            <span><i className="mr-1 inline-block h-2 w-3 bg-[#ffca68]" />Reconstructed</span>
-            <span><i className="mr-1 inline-block h-2 w-3 bg-[#9aa5ad]" />Projected</span>
-          </div>
-          {(physics.warnings.length > 0 || physics.speed.unavailable_reason) && (
+          {/* The reason a speed is missing is still worth showing — a blank
+              number with no explanation is worse than the diagnostics were. */}
+          {physics.speed.unavailable_reason && (
             <p className="mt-3 text-xs leading-5 text-[#ffdc9a]">
-              {[...physics.warnings, physics.speed.unavailable_reason]
-                .filter(Boolean)
-                .join(" ")}
+              {physics.speed.unavailable_reason}
             </p>
           )}
-          <p className="mt-2 text-[11px] text-white/35">
-            Exact spin RPM and seam angle are not measured from ordinary video.
-          </p>
         </div>
-        <TopDownPitch physics={physics} />
       </div>
     </section>
   );
@@ -292,36 +192,16 @@ function TrackingResult({
       : summary.bounce_detected === false
         ? "No"
         : "Uncertain";
+  // Candidate counts, gap lengths, observation ratios and quality grades were
+  // all solver internals. What a bowler needs from tracking is whether the ball
+  // was followed and where it bounced.
   const stats = [
-    ["Raw candidates", summary.raw_candidate_count.toLocaleString()],
-    ["Observed points", summary.observed_track_points.toLocaleString()],
-    ["Recovered points", summary.recovered_points.toLocaleString()],
-    ["Physics reconstructed", String(summary.physics_reconstructed_points ?? 0)],
-    ["Track frames", frameRange(summary.track_start_frame, summary.track_end_frame)],
-    ["Longest gap", `${summary.longest_gap_frames} frames`],
-    ["Observation ratio", `${((summary.observation_ratio ?? 0) * 100).toFixed(0)}%`],
-    ["Track confidence", summary.track_confidence.toFixed(2)],
-    ["Track quality", summary.track_quality]
+    ["Points tracked", summary.observed_track_points.toLocaleString()],
+    ["Track frames", frameRange(summary.track_start_frame, summary.track_end_frame)]
   ];
   const downloadLinks = [
-    ["Tracking JSON", summary.tracking_json_url],
-    ["Tracking CSV", summary.tracking_csv_url],
-    ["Tracking summary", summary.tracking_summary_url],
-    ["Debug tracking MP4", summary.tracking_video_url],
-    ...(summary.delivery_replay_url
-      ? [["Delivery replay MP4", summary.delivery_replay_url] as const]
-      : []),
-    ...(summary.replay_payload_url
-      ? [["Replay payload JSON", summary.replay_payload_url] as const]
-      : []),
-    ...(summary.finalized_track_url
-      ? [["Finalized track JSON", summary.finalized_track_url] as const]
-      : [])
+    ["Tracking video", summary.tracking_video_url]
   ];
-
-  const virtualReplayHref = summary.tracking_job_id
-    ? `/video-analysis/${encodeURIComponent(analysis.analysis_id)}/replay?tracking_job_id=${encodeURIComponent(summary.tracking_job_id)}`
-    : `/video-analysis/${encodeURIComponent(analysis.analysis_id)}/replay`;
 
   function setReplayRate(rate: number) {
     if (replayRef.current) {
@@ -370,17 +250,9 @@ function TrackingResult({
             <p className="mt-1 text-xs text-white/45">
               Track {frameRange(summary.track_start_frame, summary.track_end_frame)}
               {" · "}
-              {summary.observed_track_points} observed
-              {" · "}
-              {summary.recovered_points} recovered
+              {summary.observed_track_points} points tracked
             </p>
           </div>
-          <Link
-            className="rounded-lg border border-lime/40 bg-lime px-3 py-2 text-xs font-black uppercase tracking-[0.08em] text-[#08100c] hover:bg-[#d7ff87]"
-            href={virtualReplayHref}
-          >
-            Open Virtual Replay
-          </Link>
         </div>
       </div>
 
@@ -513,34 +385,10 @@ function TrackingResult({
               <span className="block text-[10px] text-white/35">Bounce</span>
               <strong className="mt-0.5 block">{bounceLabel}</strong>
             </div>
-            <div className="rounded-lg bg-black/25 p-2.5 text-sm">
-              <span className="block text-[10px] text-white/35">Observed / recovered</span>
-              <strong className="mt-0.5 block">
-                {summary.observed_track_points} / {summary.recovered_points}
-              </strong>
-            </div>
-            <div className="rounded-lg bg-black/25 p-2.5 text-sm">
-              <span className="block text-[10px] text-white/35">Bounce confidence</span>
-              <strong className="mt-0.5 block">
-                {(summary.bounce_confidence ?? bounce?.confidence ?? 0).toFixed(2)}
-              </strong>
-            </div>
-            {result.physics?.overall_stump_to_stump.status !== "UNAVAILABLE" &&
-              result.physics?.overall_stump_to_stump.speed_kph != null && (
-              <div className="rounded-lg bg-black/25 p-2.5 text-sm">
-                <span className="block text-[10px] text-white/35">Overall stump-to-stump speed</span>
-                <strong className="mt-0.5 block">
-                  {result.physics.overall_stump_to_stump.speed_kph.toFixed(1)} km/h
-                  {result.physics.overall_stump_to_stump.status === "PARTIALLY_PROJECTED"
-                    ? ` · est. ${Math.round((result.physics.overall_stump_to_stump.projected_fraction ?? 0) * 100)}% projected`
-                    : " · measured"}
-                </strong>
-              </div>
-            )}
             {result.physics?.speed.earliest_measured_speed_kmh != null && (
-              <div className="rounded-lg bg-black/25 p-2.5 text-sm">
-                <span className="block text-[10px] text-white/35">Earliest measured speed</span>
-                <strong className="mt-0.5 block">
+              <div className="rounded-lg bg-black/25 p-2.5">
+                <span className="block text-[10px] text-white/35">Speed</span>
+                <strong className="mt-0.5 block text-2xl tabular-nums">
                   {result.physics.speed.earliest_measured_speed_kmh.toFixed(1)} km/h
                 </strong>
               </div>

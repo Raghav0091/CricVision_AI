@@ -1,0 +1,7 @@
+{
+  "//": "Next compiles JSX itself, so the app tsconfig leaves it as `preserve`. Running a component test directly through tsx needs a real runtime, so this overrides just that one setting.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "jsx": "react-jsx"
+  }
+}

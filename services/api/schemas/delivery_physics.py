@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from packages.cricket_vision.calibration.cricket_pitch_geometry import (
     PITCH_LENGTH_M,
     PITCH_WIDTH_M,
+    CricketPitchDimensions,
 )
 
 
@@ -82,6 +83,10 @@ class CameraCalibration(PhysicsModel):
     projection_matrix: list[list[float]] | None = None
     image_to_pitch_homography: list[list[float]] | None = None
     pitch_to_image_homography: list[list[float]] | None = None
+    # The pitch this pose was solved against. None means regulation. Physics
+    # bounds and wicket planes must follow it, or a short rig is measured
+    # against 20.12 m.
+    pitch_geometry: CricketPitchDimensions | None = None
     correspondences_used: int = Field(default=0, ge=0)
     reprojection_error_px: float | None = Field(default=None, ge=0)
     calibration_confidence: float = Field(default=0.0, ge=0, le=1)

@@ -38,6 +38,21 @@ export type PixelPoint = {
   y: number;
 };
 
+/**
+ * Mirrors `CricketPitchGeometry` in services/api/schemas/video_analysis.py.
+ *
+ * Omitting it from a request means regulation, so a full-size net keeps
+ * solving exactly as it always has.
+ */
+export type CricketPitchGeometry = {
+  pitch_length_m: number;
+  wicket_width_m: number;
+  wicket_height_m: number;
+  stump_diameter_m: number;
+  pitch_width_m: number;
+  popping_crease_distance_m: number;
+};
+
 export type WicketBox = {
   role: WicketBoxRole;
   x: number;
@@ -114,6 +129,8 @@ export type CalibrationResult = {
   validation_status: WicketBoxValidationStatus;
   warnings: string[];
   registration_summary?: WicketBoxRegistrationSummary | null;
+  /** The pitch this pose was solved against. Absent means regulation. */
+  pitch_geometry?: CricketPitchGeometry | null;
   message: string;
 };
 
@@ -148,6 +165,10 @@ export type WicketBoxCalibrationRegisterRequest = {
   near_wicket_box: WicketBox;
   far_wicket_box: WicketBox;
   stump_landmarks?: StumpLandmark[];
+  /** Names a solved lens profile so PnP stops guessing focal length. */
+  device_id?: string | null;
+  /** The pitch the operator declared. Absent means regulation. */
+  pitch_geometry?: CricketPitchGeometry | null;
 };
 
 export type WicketBoxCalibrationRegisterResponse = {

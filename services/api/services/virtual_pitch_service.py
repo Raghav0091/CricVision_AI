@@ -10,20 +10,15 @@ import cv2
 import numpy as np
 
 from packages.cricket_vision.calibration.cricket_pitch_geometry import (
-    BOWLING_CREASE_LENGTH_M,
     CANONICAL_COORDINATE_SYSTEM,
     CREASE_LINE_WIDTH_M,
     DISPLAY_DECIMAL_PLACES,
-    PITCH_LENGTH_M,
-    PITCH_WIDTH_M,
-    POPPING_CREASE_OFFSET_M,
-    RETURN_CREASE_OFFSET_M,
-    STUMP_DIAMETER_MAX_M,
     STUMP_DIAMETER_MIN_M,
-    STUMP_HEIGHT_M,
     VIRTUAL_PITCH_MODEL_VERSION,
-    WICKET_WIDTH_M,
+    CricketPitchDimensions,
 )
+
+from .video_analysis_service import VideoAnalysisServiceError
 
 from ..schemas.virtual_pitch import (
     BailPrimitive,
@@ -83,19 +78,48 @@ def _landmark(
     )
 
 
-@lru_cache(maxsize=1)
-def build_virtual_pitch_specification() -> VirtualPitchSpecification:
-    """Build the immutable V1 metric model from authoritative constants."""
-    half_pitch = PITCH_WIDTH_M / 2
-    half_wicket = WICKET_WIDTH_M / 2
-    stump_radius = STUMP_DIAMETER_MAX_M / 2
-    outer_stump_x = (WICKET_WIDTH_M - STUMP_DIAMETER_MAX_M) / 2
-    half_bowling_crease = BOWLING_CREASE_LENGTH_M / 2
+REGULATION_PITCH_DIMENSIONS = CricketPitchDimensions()
+
+
+def build_virtual_pitch_specification(
+    dimensions: CricketPitchDimensions | None = None,
+) -> VirtualPitchSpecification:
+    """Build the V1 metric model for a declared pitch, defaulting to regulation.
+
+    ``dimensions`` of ``None`` means regulation geometry, so every historical
+    caller keeps the exact model it has always received.
+    """
+    resolved = REGULATION_PITCH_DIMENSIONS if dimensions is None else dimensions
+    try:
+        resolved.validate()
+    except ValueError as exc:
+        raise VideoAnalysisServiceError(
+            f"Declared pitch geometry is invalid: {exc}",
+            status_code=422,
+        ) from exc
+    return _build_virtual_pitch_specification(resolved)
+
+
+@lru_cache(maxsize=8)
+def _build_virtual_pitch_specification(
+    dimensions: CricketPitchDimensions,
+) -> VirtualPitchSpecification:
+    """Build the immutable metric model for one validated pitch geometry."""
+    pitch_length = dimensions.pitch_length_m
+    stump_height = dimensions.wicket_height_m
+    stump_diameter = dimensions.stump_diameter_m
+    popping_crease_offset = dimensions.popping_crease_distance_m
+    return_crease_offset = dimensions.return_crease_offset_m
+    half_pitch = dimensions.pitch_width_m / 2
+    half_wicket = dimensions.wicket_width_m / 2
+    stump_radius = stump_diameter / 2
+    outer_stump_x = (dimensions.wicket_width_m - stump_diameter) / 2
+    half_bowling_crease = dimensions.bowling_crease_length_m / 2
 
     landmarks: list[VirtualPitchLandmark] = []
     stumps: list[StumpPrimitive] = []
     bails: list[BailPrimitive] = []
-    for end, y in (("bowler", 0.0), ("striker", PITCH_LENGTH_M)):
+    for end, y in (("bowler", 0.0), ("striker", pitch_length)):
         landmarks.append(
             _landmark(
                 f"{end}_wicket_center_base",
@@ -128,7 +152,7 @@ def build_virtual_pitch_specification() -> VirtualPitchSpecification:
                     ),
                     _landmark(
                         top_id,
-                        _point(x, y, STUMP_HEIGHT_M),
+                        _point(x, y, stump_height),
                         category="wicket",
                         end=end,
                         anchor=True,
@@ -142,9 +166,9 @@ def build_virtual_pitch_specification() -> VirtualPitchSpecification:
             stumps.append(
                 StumpPrimitive(
                     primitive_id=f"{end}_{stump_index}_stump",
-                    centre=_point(x, y, STUMP_HEIGHT_M / 2),
+                    centre=_point(x, y, stump_height / 2),
                     radius_m=stump_radius,
-                    height_m=STUMP_HEIGHT_M,
+                    height_m=stump_height,
                     orientation=_point(0.0, 0.0, 1.0),
                     end=end,
                     stump_index=stump_index,
@@ -157,11 +181,11 @@ def build_virtual_pitch_specification() -> VirtualPitchSpecification:
             bails.append(
                 BailPrimitive(
                     primitive_id=f"{end}_{bail_index}_bail",
-                    start=_point(start_x, y, STUMP_HEIGHT_M + stump_radius * 0.45),
+                    start=_point(start_x, y, stump_height + stump_radius * 0.45),
                     end_point=_point(
                         end_x,
                         y,
-                        STUMP_HEIGHT_M + stump_radius * 0.45,
+                        stump_height + stump_radius * 0.45,
                     ),
                     radius_m=stump_radius * 0.45,
                     end=end,
@@ -172,8 +196,8 @@ def build_virtual_pitch_specification() -> VirtualPitchSpecification:
     pitch_corners = {
         "bowler_left_pitch_corner": _point(-half_pitch, 0.0),
         "bowler_right_pitch_corner": _point(half_pitch, 0.0),
-        "striker_left_pitch_corner": _point(-half_pitch, PITCH_LENGTH_M),
-        "striker_right_pitch_corner": _point(half_pitch, PITCH_LENGTH_M),
+        "striker_left_pitch_corner": _point(-half_pitch, pitch_length),
+        "striker_right_pitch_corner": _point(half_pitch, pitch_length),
     }
     for semantic_id, point in pitch_corners.items():
         end = "bowler" if semantic_id.startswith("bowler") else "striker"
@@ -201,7 +225,7 @@ def build_virtual_pitch_specification() -> VirtualPitchSpecification:
             ),
             _landmark(
                 "pitch_centerline_striker_endpoint",
-                _point(0.0, PITCH_LENGTH_M),
+                _point(0.0, pitch_length),
                 category="analytical",
                 end="striker",
                 anchor=False,
@@ -238,7 +262,7 @@ def build_virtual_pitch_specification() -> VirtualPitchSpecification:
     add_line(
         "pitch_left_boundary",
         _point(-half_pitch, 0.0),
-        _point(-half_pitch, PITCH_LENGTH_M),
+        _point(-half_pitch, pitch_length),
         "pitch_boundary",
         "official",
         "both",
@@ -246,7 +270,7 @@ def build_virtual_pitch_specification() -> VirtualPitchSpecification:
     add_line(
         "pitch_right_boundary",
         _point(half_pitch, 0.0),
-        _point(half_pitch, PITCH_LENGTH_M),
+        _point(half_pitch, pitch_length),
         "pitch_boundary",
         "official",
         "both",
@@ -254,7 +278,7 @@ def build_virtual_pitch_specification() -> VirtualPitchSpecification:
     add_line(
         "pitch_centerline",
         _point(0.0, 0.0, 0.002),
-        _point(0.0, PITCH_LENGTH_M, 0.002),
+        _point(0.0, pitch_length, 0.002),
         "centreline",
         "analytical",
         "both",
@@ -263,9 +287,9 @@ def build_virtual_pitch_specification() -> VirtualPitchSpecification:
 
     for end, wicket_y, direction in (
         ("bowler", 0.0, 1.0),
-        ("striker", PITCH_LENGTH_M, -1.0),
+        ("striker", pitch_length, -1.0),
     ):
-        popping_y = wicket_y + direction * POPPING_CREASE_OFFSET_M
+        popping_y = wicket_y + direction * popping_crease_offset
         crease_points = {
             f"{end}_bowling_crease_left_endpoint": _point(
                 -half_bowling_crease,
@@ -276,27 +300,27 @@ def build_virtual_pitch_specification() -> VirtualPitchSpecification:
                 wicket_y,
             ),
             f"{end}_popping_crease_left_endpoint": _point(
-                -RETURN_CREASE_OFFSET_M,
+                -return_crease_offset,
                 popping_y,
             ),
             f"{end}_popping_crease_right_endpoint": _point(
-                RETURN_CREASE_OFFSET_M,
+                return_crease_offset,
                 popping_y,
             ),
             f"{end}_left_return_bowling_intersection": _point(
-                -RETURN_CREASE_OFFSET_M,
+                -return_crease_offset,
                 wicket_y,
             ),
             f"{end}_right_return_bowling_intersection": _point(
-                RETURN_CREASE_OFFSET_M,
+                return_crease_offset,
                 wicket_y,
             ),
             f"{end}_left_return_popping_intersection": _point(
-                -RETURN_CREASE_OFFSET_M,
+                -return_crease_offset,
                 popping_y,
             ),
             f"{end}_right_return_popping_intersection": _point(
-                RETURN_CREASE_OFFSET_M,
+                return_crease_offset,
                 popping_y,
             ),
         }
@@ -321,15 +345,15 @@ def build_virtual_pitch_specification() -> VirtualPitchSpecification:
         )
         add_line(
             f"{end}_popping_crease",
-            _point(-RETURN_CREASE_OFFSET_M, popping_y),
-            _point(RETURN_CREASE_OFFSET_M, popping_y),
+            _point(-return_crease_offset, popping_y),
+            _point(return_crease_offset, popping_y),
             "popping_crease",
             "official",
             end,
         )
         for side, x in (
-            ("left", -RETURN_CREASE_OFFSET_M),
-            ("right", RETURN_CREASE_OFFSET_M),
+            ("left", -return_crease_offset),
+            ("right", return_crease_offset),
         ):
             add_line(
                 f"{end}_{side}_return_crease_registration_span",
@@ -346,8 +370,8 @@ def build_virtual_pitch_specification() -> VirtualPitchSpecification:
             vertices=[
                 _point(-half_pitch, 0.0),
                 _point(half_pitch, 0.0),
-                _point(half_pitch, PITCH_LENGTH_M),
-                _point(-half_pitch, PITCH_LENGTH_M),
+                _point(half_pitch, pitch_length),
+                _point(-half_pitch, pitch_length),
             ],
             polygon_category="pitch_surface",
             geometry_class="official",
@@ -359,8 +383,8 @@ def build_virtual_pitch_specification() -> VirtualPitchSpecification:
             vertices=[
                 _point(-half_wicket, 0.0, 0.003),
                 _point(half_wicket, 0.0, 0.003),
-                _point(half_wicket, PITCH_LENGTH_M, 0.003),
-                _point(-half_wicket, PITCH_LENGTH_M, 0.003),
+                _point(half_wicket, pitch_length, 0.003),
+                _point(-half_wicket, pitch_length, 0.003),
             ],
             polygon_category="lbw_corridor",
             geometry_class="analytical",
@@ -409,15 +433,18 @@ def build_virtual_pitch_specification() -> VirtualPitchSpecification:
             description=CANONICAL_COORDINATE_SYSTEM
         ),
         dimensions=VirtualPitchDimensions(
-            pitch_length_m=PITCH_LENGTH_M,
-            pitch_width_m=PITCH_WIDTH_M,
-            wicket_width_m=WICKET_WIDTH_M,
-            stump_height_m=STUMP_HEIGHT_M,
-            stump_diameter_min_m=STUMP_DIAMETER_MIN_M,
-            stump_diameter_max_m=STUMP_DIAMETER_MAX_M,
-            bowling_crease_length_m=BOWLING_CREASE_LENGTH_M,
-            popping_crease_offset_m=POPPING_CREASE_OFFSET_M,
-            return_crease_offset_m=RETURN_CREASE_OFFSET_M,
+            pitch_length_m=pitch_length,
+            pitch_width_m=dimensions.pitch_width_m,
+            wicket_width_m=dimensions.wicket_width_m,
+            stump_height_m=stump_height,
+            # The dataclass carries a single diameter, which the model treats
+            # as the maximum. Keep the regulation minimum unless the declared
+            # stumps are thinner, so min <= max always holds.
+            stump_diameter_min_m=min(STUMP_DIAMETER_MIN_M, stump_diameter),
+            stump_diameter_max_m=stump_diameter,
+            bowling_crease_length_m=dimensions.bowling_crease_length_m,
+            popping_crease_offset_m=popping_crease_offset,
+            return_crease_offset_m=return_crease_offset,
         ),
         landmarks=landmarks,
         stumps=stumps,

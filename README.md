@@ -44,3 +44,9 @@ another backend.
 | `Models/` | Local model weights (ball detector, stump detector) |
 | `outputs/` | Generated analysis artifacts (gitignored) |
 | `tests/` | Regression tests for API and video analysis |
+
+## Phone live testing (free)
+
+Use your phone camera while the PC runs the AI. See [docs/PHONE_LIVE.md](docs/PHONE_LIVE.md).
+
+Quick start: double-click `scripts\start_phone_tunnel.bat` (turn off Norton VPN first).

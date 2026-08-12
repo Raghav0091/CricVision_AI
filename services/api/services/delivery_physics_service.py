@@ -17,6 +17,7 @@ from packages.cricket_vision.calibration.cricket_pitch_geometry import (
     CRICVISION_PITCH_V1,
     PITCH_LENGTH_M,
     PITCH_WIDTH_M,
+    CricketPitchDimensions,
     calibration_to_canonical_world,
 )
 
@@ -67,6 +68,15 @@ OUTLIER_FLOOR_PX = 8.0
 MIN_IN_PITCH_FRACTION = 0.85
 REPROJECTION_THRESHOLD_FRACTION = 0.02
 REPROJECTION_THRESHOLD_MIN_PX = 25.0
+
+# ICC Law 5: senior men's ball circumference 22.4-22.9cm -> diameter ~7.2cm.
+# Used as a known-size depth cue: apparent pixel size of the ball is an
+# independent, per-frame estimate of camera-relative depth, complementing the
+# position-only reprojection fit below (which is poorly conditioned along the
+# camera's own viewing axis with a single camera).
+CRICKET_BALL_DIAMETER_M = 0.072
+MIN_BALL_DEPTH_M = 0.5
+BALL_SIZE_RESIDUAL_WEIGHT = 0.5
 REPROJECTION_CALIBRATION_RMSE_MULTIPLIER = 2.5
 
 # CricVision coaching categories. These are not official MCC definitions.
@@ -276,6 +286,19 @@ def refine_metric_calibration_with_track(
     return best_physics
 
 
+def _pitch_length_m(calibration: CameraCalibration) -> float:
+    """Declared pitch length, or regulation when nothing was declared."""
+    if calibration.pitch_geometry is None:
+        return PITCH_LENGTH_M
+    return calibration.pitch_geometry.pitch_length_m
+
+
+def _pitch_width_m(calibration: CameraCalibration) -> float:
+    if calibration.pitch_geometry is None:
+        return PITCH_WIDTH_M
+    return calibration.pitch_geometry.pitch_width_m
+
+
 def _physics_calibration_from_accepted_wicket_box(
     analysis_id: str,
     width: int,
@@ -310,7 +333,22 @@ def _physics_calibration_from_accepted_wicket_box(
     )
     distortion = snapshot.get("distortion_coefficients") or [0.0] * 5
     landmarks = snapshot.get("stump_landmarks") or []
+    declared = snapshot.get("pitch_geometry")
     return CameraCalibration(
+        pitch_geometry=(
+            CricketPitchDimensions(
+                pitch_length_m=float(declared["pitch_length_m"]),
+                wicket_width_m=float(declared["wicket_width_m"]),
+                wicket_height_m=float(declared["wicket_height_m"]),
+                stump_diameter_m=float(declared["stump_diameter_m"]),
+                pitch_width_m=float(declared["pitch_width_m"]),
+                popping_crease_distance_m=float(
+                    declared["popping_crease_distance_m"]
+                ),
+            )
+            if declared
+            else None
+        ),
         mode="METRIC_3D",
         confidence=_grade(confidence_score),
         world_coordinate_system=CRICVISION_PITCH_V1,
@@ -329,6 +367,17 @@ def _physics_calibration_from_accepted_wicket_box(
     )
 
 
+def _physics_calibration_from_bat_pose(
+    analysis_id: str,
+) -> CameraCalibration | None:
+    try:
+        from .bat_camera_pose_service import load_bat_camera_pose
+
+        return load_bat_camera_pose(analysis_id)
+    except Exception:
+        return None
+
+
 def load_physics_calibration(
     analysis_id: str,
     width: int,
@@ -342,6 +391,10 @@ def load_physics_calibration(
     )
     if wicket_box is not None:
         return wicket_box
+
+    bat_pose = _physics_calibration_from_bat_pose(analysis_id)
+    if bat_pose is not None:
+        return bat_pose
 
     try:
         from .scene_calibration_service import (
@@ -725,7 +778,9 @@ def _analyse_metric_3d(
         fit_rmse=fit.rmse_px,
     )
     speed = _speed_analytics(samples, bounce, metric_observations)
-    overall_stump = _overall_stump_to_stump_speed(samples)
+    overall_stump = _overall_stump_to_stump_speed(
+        samples, _pitch_length_m(calibration)
+    )
     lateral = _lateral_movement(
         params,
         fit.model_name,
@@ -900,7 +955,7 @@ def _fit_model(
 
     def residual(parameters: np.ndarray, indexes: np.ndarray) -> np.ndarray:
         selected = [observations[index] for index in indexes]
-        projected = _project_observations(
+        projected, depth = _project_and_depth(
             parameters,
             model_name,
             selected,
@@ -913,8 +968,26 @@ def _fit_model(
         pixel_residual = (
             projected - observed_pixels
         ) * weights[indexes, None]
+
+        raw_sizes = [_observed_ball_size_px(item) for item in selected]
+        size_mask = np.asarray(
+            [1.0 if value is not None else 0.0 for value in raw_sizes],
+            dtype=np.float64,
+        )
+        observed_sizes = np.asarray(
+            [value if value is not None else 0.0 for value in raw_sizes],
+            dtype=np.float64,
+        )
+        predicted_sizes = _apparent_ball_diameter_px(depth, calibration)
+        size_residual = (
+            (predicted_sizes - observed_sizes)
+            * size_mask
+            * weights[indexes]
+            * BALL_SIZE_RESIDUAL_WEIGHT
+        )
+
         regularization = _physical_regularization(parameters, model_name)
-        return np.concatenate([pixel_residual.reshape(-1), regularization])
+        return np.concatenate([pixel_residual.reshape(-1), size_residual, regularization])
 
     indexes = np.arange(len(observations), dtype=int)
     result = least_squares(
@@ -1064,19 +1137,67 @@ def _velocity_at(
     )
 
 
-def _project_observations(
+def _camera_space_points(
+    world: np.ndarray,
+    calibration: CameraCalibration,
+) -> np.ndarray:
+    """World points transformed into the camera's own frame (Z = depth along the optical axis)."""
+    calibration_world = _calibration_world_from_physics(world, calibration)
+    rotation_matrix, _ = cv2.Rodrigues(
+        np.asarray(calibration.rotation_vector, dtype=np.float64)
+    )
+    translation = np.asarray(calibration.translation_vector, dtype=np.float64).reshape(3)
+    return calibration_world @ rotation_matrix.T + translation
+
+
+def _apparent_ball_diameter_px(
+    depth_m: np.ndarray,
+    calibration: CameraCalibration,
+) -> np.ndarray:
+    """Predicted apparent ball size in pixels for a given camera-relative depth."""
+    camera_matrix = np.asarray(calibration.camera_matrix, dtype=np.float64)
+    focal_px = (camera_matrix[0, 0] + camera_matrix[1, 1]) / 2.0
+    safe_depth = np.clip(depth_m, MIN_BALL_DEPTH_M, None)
+    return focal_px * CRICKET_BALL_DIAMETER_M / safe_depth
+
+
+def _observed_ball_size_px(observation: ObservedBallPoint) -> float | None:
+    """Observed apparent ball size in pixels from the detector's bounding box, if any."""
+    if not observation.bbox_xyxy:
+        return None
+    x1, y1, x2, y2 = observation.bbox_xyxy
+    width = max(0.0, x2 - x1)
+    height = max(0.0, y2 - y1)
+    if width <= 0 or height <= 0:
+        return None
+    return (width + height) / 2.0
+
+
+def _project_and_depth(
     parameters: Sequence[float],
     model_name: str,
     observations: list[ObservedBallPoint],
     calibration: CameraCalibration,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     origin = observations[0].timestamp_seconds
     elapsed = np.asarray(
         [item.timestamp_seconds - origin for item in observations],
         dtype=np.float64,
     )
     world = _world_at(parameters, model_name, elapsed)
-    return _project_physics_world(world, calibration)
+    projected = _project_physics_world(world, calibration)
+    depth = _camera_space_points(world, calibration)[:, 2]
+    return projected, depth
+
+
+def _project_observations(
+    parameters: Sequence[float],
+    model_name: str,
+    observations: list[ObservedBallPoint],
+    calibration: CameraCalibration,
+) -> np.ndarray:
+    projected, _ = _project_and_depth(parameters, model_name, observations, calibration)
+    return projected
 
 
 def _calibration_world_from_physics(
@@ -1169,8 +1290,8 @@ def _metric_bounce(
     world = _world_at(parameters, model_name, elapsed).reshape(3)
     if (
         world[1] < -0.5
-        or world[1] > PITCH_LENGTH_M + 0.5
-        or abs(world[0]) > PITCH_WIDTH_M / 2 + 0.5
+        or world[1] > _pitch_length_m(calibration) + 0.5
+        or abs(world[0]) > _pitch_width_m(calibration) / 2 + 0.5
     ):
         return _unavailable_bounce()
     origin = observations[0].timestamp_seconds
@@ -1200,7 +1321,7 @@ def _metric_bounce(
         pixel_x=round(float(pixel[0]), 3),
         pixel_y=round(float(pixel[1]), 3),
         distance_from_striker_wicket_m=round(
-            max(0.0, PITCH_LENGTH_M - float(world[1])),
+            max(0.0, _pitch_length_m(calibration) - float(world[1])),
             6,
         ),
         lateral_offset_m=round(float(world[0]), 6),
@@ -1366,7 +1487,7 @@ def _metric_samples(
             velocity = np.asarray(
                 [pv[0], pv[1], pv[2] - GRAVITY_MPS2 * post_elapsed]
             )
-        if world[1] >= PITCH_LENGTH_M:
+        if world[1] >= _pitch_length_m(calibration):
             terminal_reason = "striker_wicket_plane"
         pixel = _project_physics_world(world.reshape(1, 3), calibration)[0]
         if frame > last_observed and last_pixel is not None:
@@ -1776,7 +1897,9 @@ def _ground_or_image_bounce(
             evidence=["tracker_image_space_slope_transition"],
         )
     x, y = world
-    if not (-PITCH_WIDTH_M <= x <= PITCH_WIDTH_M and -1 <= y <= PITCH_LENGTH_M + 1):
+    pitch_length = _pitch_length_m(calibration)
+    pitch_width = _pitch_width_m(calibration)
+    if not (-pitch_width <= x <= pitch_width and -1 <= y <= pitch_length + 1):
         return _unavailable_bounce()
     return BouncePhysicsResult(
         status="DETECTED",
@@ -1789,7 +1912,7 @@ def _ground_or_image_bounce(
         world_y_m=round(y, 6),
         pixel_x=tracker_bounce.bounce_x,
         pixel_y=tracker_bounce.bounce_y,
-        distance_from_striker_wicket_m=round(max(0.0, PITCH_LENGTH_M - y), 6),
+        distance_from_striker_wicket_m=round(max(0.0, pitch_length - y), 6),
         lateral_offset_m=round(x, 6),
         confidence=_grade(tracker_bounce.confidence),
         confidence_score=tracker_bounce.confidence,
@@ -1802,8 +1925,14 @@ def _ground_or_image_bounce(
 
 def _overall_stump_to_stump_speed(
     samples: list[TrajectorySample],
+    pitch_length_m: float = PITCH_LENGTH_M,
 ) -> OverallStumpToStumpSpeed:
-    """Path-average speed between bowler (y=0) and striker (y=PITCH_LENGTH_M) planes."""
+    """Path-average speed between the bowler (y=0) and striker wicket planes.
+
+    The striker plane sits at the declared pitch length, so a short rig
+    measures across its own wickets rather than looking for a 20.12 m
+    crossing that never happens.
+    """
     unavailable = OverallStumpToStumpSpeed(
         status="UNAVAILABLE",
         unavailable_reason="Metric 3D trajectory does not span both wicket planes.",
@@ -1822,7 +1951,9 @@ def _overall_stump_to_stump_speed(
         return unavailable
 
     start = _interpolate_wicket_plane_crossing(metric_samples, plane_y=0.0)
-    end = _interpolate_wicket_plane_crossing(metric_samples, plane_y=PITCH_LENGTH_M)
+    end = _interpolate_wicket_plane_crossing(
+        metric_samples, plane_y=pitch_length_m
+    )
     if start is None or end is None:
         return unavailable.model_copy(
             update={
@@ -2257,11 +2388,18 @@ def _reprojection_threshold_px(calibration: CameraCalibration) -> float:
     return threshold
 
 
-def _world_point_in_pitch(x_m: float, y_m: float, z_m: float) -> bool:
-    half_width = PITCH_WIDTH_M / 2
+def _world_point_in_pitch(
+    x_m: float,
+    y_m: float,
+    z_m: float,
+    *,
+    pitch_length_m: float = PITCH_LENGTH_M,
+    pitch_width_m: float = PITCH_WIDTH_M,
+) -> bool:
+    half_width = pitch_width_m / 2
     return (
         abs(x_m) <= half_width + 0.05
-        and -0.05 <= y_m <= PITCH_LENGTH_M + 0.05
+        and -0.05 <= y_m <= pitch_length_m + 0.05
         and z_m >= -0.05
     )
 
@@ -2282,7 +2420,8 @@ def validate_metric_geometry(
     errors: list[float] = []
     in_pitch = 0
     checked = 0
-    half_width = PITCH_WIDTH_M / 2
+    pitch_length = _pitch_length_m(calibration)
+    half_width = _pitch_width_m(calibration) / 2
 
     for observation in observations:
         sample = sample_by_frame.get(observation.frame_index)
@@ -2312,6 +2451,8 @@ def validate_metric_geometry(
             sample.world_x_m,
             sample.world_y_m,
             sample.world_z_m,
+            pitch_length_m=pitch_length,
+            pitch_width_m=_pitch_width_m(calibration),
         ):
             in_pitch += 1
 
@@ -2340,7 +2481,7 @@ def validate_metric_geometry(
             threshold_px=round(threshold, 6),
             reason=(
                 f"Only {in_pitch}/{checked} trajectory points lie inside pitch "
-                f"bounds (±{half_width:.3f} m lateral, 0–{PITCH_LENGTH_M:.2f} m "
+                f"bounds (±{half_width:.3f} m lateral, 0–{pitch_length:.2f} m "
                 "longitudinal)."
             ),
         )

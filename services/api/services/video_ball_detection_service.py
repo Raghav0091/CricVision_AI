@@ -5,12 +5,16 @@ from __future__ import annotations
 import csv
 from datetime import datetime, timezone
 import json
+import logging
 import math
 from pathlib import Path
 import time
 from typing import Any
 
 import cv2
+
+
+logger = logging.getLogger(__name__)
 
 from ..schemas.video_analysis import (
     BallDetectorResultMetadata,
@@ -49,7 +53,7 @@ from .video_calibration_service import load_video_calibration
 
 
 FRAME_STRIDE = 1
-IMAGE_SIZE = 960
+IMAGE_SIZE = 1280  # matches the ball_only_* detectors' native training resolution
 CONFIDENCE_THRESHOLD = 0.15
 MAX_DETECTIONS = 20
 DETECTIONS_JSON_FILENAME = "detections.json"
@@ -129,11 +133,16 @@ def run_video_ball_detection_job(
     except VideoBallDetectionError as exc:
         _mark_job_failed(analysis_id, job_id, exc.status, exc.message)
     except Exception as exc:
+        logger.exception(
+            "Every-frame ball detection failed for analysis_id=%s job_id=%s",
+            analysis_id,
+            job_id,
+        )
         _mark_job_failed(
             analysis_id,
             job_id,
             "failed",
-            f"Every-frame ball detection failed: {type(exc).__name__}.",
+            f"Every-frame ball detection failed: {type(exc).__name__}: {exc}",
         )
 
 

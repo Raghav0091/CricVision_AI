@@ -1,4 +1,4 @@
-import type { BoxLayout, CalibrationResponse, CapturedFrame } from "./types";
+import type { BatPoseCalibrationResponse, BoxLayout, CalibrationResponse, CapturedFrame } from "./types";
 import type { CameraBridgeInput } from "./virtual-pitch/opencvCameraBridge";
 import type {
   CalibrationResult,
@@ -9,13 +9,39 @@ import type {
   WicketBoxCalibrationRegisterResponse,
 } from "./wicketCalibration/types";
 import type { ReplayPayloadV1 } from "./virtual-pitch-replay/types";
+import type {
+  CheckerboardSpecInput,
+  DeviceCalibrationResponse,
+  DeviceLensProfile,
+} from "./deviceCalibration/types";
 
 
-export const API_BASE_URL = (
-  process.env.NEXT_PUBLIC_API_BASE_URL
-  ?? process.env.NEXT_PUBLIC_API_URL
-  ?? "http://127.0.0.1:8000"
-).replace(/\/$/, "");
+function resolveApiBaseUrl(): string {
+  const configured = process.env.NEXT_PUBLIC_API_BASE_URL ?? process.env.NEXT_PUBLIC_API_URL;
+  if (configured) {
+    return configured.replace(/\/$/, "");
+  }
+  if (typeof window !== "undefined") {
+    const { hostname, origin } = window.location;
+    // ponytail: phone tunnel (trycloudflare) or any remote host uses Next proxy.
+    if (hostname !== "localhost" && hostname !== "127.0.0.1") {
+      return `${origin}/cricvision-api`.replace(/\/$/, "");
+    }
+  }
+  if (process.env.NEXT_PUBLIC_USE_SAME_ORIGIN_API === "true" && typeof window !== "undefined") {
+    return `${window.location.origin}/cricvision-api`.replace(/\/$/, "");
+  }
+  return "http://127.0.0.1:8000";
+}
+
+
+export function getApiBaseUrl(): string {
+  return resolveApiBaseUrl();
+}
+
+
+/** @deprecated Use getApiBaseUrl() so phone tunnel URLs resolve at request time. */
+export const API_BASE_URL = "http://127.0.0.1:8000";
 
 
 export type BallDetectorModelKey = "automatic" | "e2" | "e3" | "e4c";
@@ -56,12 +82,12 @@ export type BallDetectionClipResponse = {
 function withBrowserSafeVideoUrl(result: BallDetectionClipResponse): BallDetectionClipResponse {
   const url = result.processed_video_url;
   if (!url || !url.startsWith("/")) return result;
-  return { ...result, processed_video_url: `${API_BASE_URL}${url}` };
+  return { ...result, processed_video_url: `${getApiBaseUrl()}${url}` };
 }
 
 
 export async function solveCalibration(frame: CapturedFrame, boxLayout: BoxLayout): Promise<CalibrationResponse> {
-  const response = await fetch(`${API_BASE_URL}/calibration/solve`, {
+  const response = await fetch(`${getApiBaseUrl()}/calibration/solve`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -78,6 +104,52 @@ export async function solveCalibration(frame: CapturedFrame, boxLayout: BoxLayou
 }
 
 
+export type ManualBatBoxes = {
+  striker: { x: number; y: number; width: number; height: number };
+  non_striker: { x: number; y: number; width: number; height: number };
+};
+
+export type BatDetectorModelKey = "cricshot10k" | "bat_v2";
+
+export async function runBatPoseCalibration(
+  analysisId: string,
+  frame: CapturedFrame,
+  boxLayout: BoxLayout | null,
+  batHeightM: number,
+  manualBoxes: ManualBatBoxes | null = null,
+  batDetectorModelKey: BatDetectorModelKey = "cricshot10k"
+): Promise<BatPoseCalibrationResponse> {
+  const response = await fetch(`${getApiBaseUrl()}/video-analysis/${encodeURIComponent(analysisId)}/bat-pose-calibration/solve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      frame_data_url: frame.dataUrl,
+      frame_width: frame.width,
+      frame_height: frame.height,
+      box_layout: manualBoxes ? null : boxLayout,
+      bat_height_m: batHeightM,
+      manual_boxes: manualBoxes,
+      bat_detector_model_key: batDetectorModelKey
+    })
+  });
+  if (!response.ok) {
+    throw new Error(`Bat-pose calibration service returned ${response.status}.`);
+  }
+  return response.json() as Promise<BatPoseCalibrationResponse>;
+}
+
+
+export async function getBatPoseCalibration(analysisId: string): Promise<BatPoseCalibrationResponse> {
+  const response = await fetch(`${getApiBaseUrl()}/video-analysis/${encodeURIComponent(analysisId)}/bat-pose-calibration`, {
+    cache: "no-store"
+  });
+  if (!response.ok) {
+    throw new Error(`Bat-pose calibration service returned ${response.status}.`);
+  }
+  return response.json() as Promise<BatPoseCalibrationResponse>;
+}
+
+
 export async function detectBallInDeliveryClip(blob: Blob, deliveryIndex: number, sessionId: string): Promise<BallDetectionClipResponse> {
   const extension = blob.type.includes("mp4") ? "mp4" : "webm";
   const formData = new FormData();
@@ -86,7 +158,7 @@ export async function detectBallInDeliveryClip(blob: Blob, deliveryIndex: number
   formData.append("session_id", sessionId);
   formData.append("source_mode", "experimental_delivery_test");
   formData.append("processing_mode", "quality");
-  const response = await fetch(`${API_BASE_URL}/analysis/ball-detection-clip`, {
+  const response = await fetch(`${getApiBaseUrl()}/analysis/ball-detection-clip`, {
     method: "POST",
     body: formData
   });
@@ -149,12 +221,12 @@ function withBrowserSafeSessionUrls(session: ExperimentalSession): ExperimentalS
 
 function resolveApiUrl(url?: string | null): string | null | undefined {
   if (!url || !url.startsWith("/")) return url;
-  return `${API_BASE_URL}${url}`;
+  return `${getApiBaseUrl()}${url}`;
 }
 
 
 async function sessionRequest(url: string, init?: RequestInit): Promise<ExperimentalSession> {
-  const response = await fetch(`${API_BASE_URL}${url}`, { cache: "no-store", ...init });
+  const response = await fetch(`${getApiBaseUrl()}${url}`, { cache: "no-store", ...init });
   if (!response.ok) throw new Error(`Session service returned ${response.status}.`);
   return withBrowserSafeSessionUrls(await response.json() as ExperimentalSession);
 }
@@ -277,7 +349,7 @@ async function videoAnalysisError(response: Response, fallback: string): Promise
 export async function prepareVideoAnalysis(file: File): Promise<VideoAnalysisPreparedResponse> {
   const formData = new FormData();
   formData.append("video", file);
-  const response = await fetch(`${API_BASE_URL}/video-analysis/prepare`, {
+  const response = await fetch(`${getApiBaseUrl()}/video-analysis/prepare`, {
     method: "POST",
     body: formData
   });
@@ -288,8 +360,22 @@ export async function prepareVideoAnalysis(file: File): Promise<VideoAnalysisPre
 }
 
 
+export async function prepareQuickTestVideo(file: File): Promise<VideoAnalysisPreparedResponse> {
+  const formData = new FormData();
+  formData.append("video", file);
+  const response = await fetch(`${getApiBaseUrl()}/quick-test/prepare`, {
+    method: "POST",
+    body: formData
+  });
+  if (!response.ok) {
+    throw await videoAnalysisError(response, `Quick Test upload returned ${response.status}.`);
+  }
+  return withBrowserSafeAnalysisUrls(await response.json() as VideoAnalysisPreparedResponse);
+}
+
+
 export async function getVideoAnalysis(analysisId: string): Promise<VideoAnalysisPreparedResponse> {
-  const response = await fetch(`${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}`, {
+  const response = await fetch(`${getApiBaseUrl()}/video-analysis/${encodeURIComponent(analysisId)}`, {
     cache: "no-store"
   });
   if (!response.ok) {
@@ -498,7 +584,7 @@ export async function startVideoBallDetection(
   ballDetectorModelKey: BallDetectorModelKey = "automatic"
 ): Promise<VideoBallDetectionStartResponse> {
   const response = await fetch(
-    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/ball-detection/start`,
+    `${getApiBaseUrl()}/video-analysis/${encodeURIComponent(analysisId)}/ball-detection/start`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -514,7 +600,7 @@ export async function startVideoBallDetection(
 
 export async function getBallDetectorModels(): Promise<BallDetectorModelsResponse> {
   const response = await fetch(
-    `${API_BASE_URL}/video-analysis/detector-models`,
+    `${getApiBaseUrl()}/video-analysis/detector-models`,
     { cache: "no-store" }
   );
   if (!response.ok) {
@@ -529,7 +615,7 @@ export async function getVideoBallDetectionJob(
   jobId: string
 ): Promise<VideoBallDetectionJobResponse> {
   const response = await fetch(
-    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/ball-detection/job/${encodeURIComponent(jobId)}`,
+    `${getApiBaseUrl()}/video-analysis/${encodeURIComponent(analysisId)}/ball-detection/job/${encodeURIComponent(jobId)}`,
     { cache: "no-store" }
   );
   if (!response.ok) {
@@ -549,7 +635,7 @@ export async function getVideoBallDetectionResult(
 ): Promise<VideoBallDetectionResultResponse | null> {
   const query = includeFrames ? "?include_frames=true" : "";
   const response = await fetch(
-    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/ball-detection${query}`,
+    `${getApiBaseUrl()}/video-analysis/${encodeURIComponent(analysisId)}/ball-detection${query}`,
     { cache: "no-store" }
   );
   if (response.status === 404) return null;
@@ -1060,7 +1146,7 @@ function withBrowserSafeTrackingResult(
 
 export async function getVirtualPitchSpecification(): Promise<VirtualPitchSpecification> {
   const response = await fetch(
-    `${API_BASE_URL}/video-analysis/virtual-pitch`,
+    `${getApiBaseUrl()}/video-analysis/virtual-pitch`,
     { cache: "force-cache" }
   );
   if (!response.ok) {
@@ -1140,7 +1226,7 @@ function normalizeCameraBridgeResponse(response: CameraBridgeApiResponse): Norma
       extrinsic_convention: "opencv_world_to_camera",
       world_coordinate_system: "cricvision_pitch_v1",
       setup_frame_url: setupFrameUrl
-        ? `${API_BASE_URL}${setupFrameUrl.startsWith("/") ? "" : "/"}${setupFrameUrl}`
+        ? `${getApiBaseUrl()}${setupFrameUrl.startsWith("/") ? "" : "/"}${setupFrameUrl}`
         : null,
       frame_preundistorted: camera.distortion.frame_preundistorted,
       near: camera.near_m,
@@ -1163,13 +1249,13 @@ async function cameraBridgeRequest(url: string): Promise<NormalizedCameraBridgeR
 
 export function getSyntheticCameraBridge(cameraName: string): Promise<NormalizedCameraBridgeResponse> {
   const query = new URLSearchParams({ camera_name: cameraName });
-  return cameraBridgeRequest(`${API_BASE_URL}/video-analysis/virtual-pitch/camera-bridge?${query}`);
+  return cameraBridgeRequest(`${getApiBaseUrl()}/video-analysis/virtual-pitch/camera-bridge?${query}`);
 }
 
 
 export function getAnalysisCameraBridge(analysisId: string): Promise<NormalizedCameraBridgeResponse> {
   return cameraBridgeRequest(
-    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/camera-bridge`
+    `${getApiBaseUrl()}/video-analysis/${encodeURIComponent(analysisId)}/camera-bridge`
   );
 }
 
@@ -1178,7 +1264,7 @@ export async function startVideoBallTracking(
   analysisId: string
 ): Promise<VideoBallTrackingStartResponse> {
   const response = await fetch(
-    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/tracking/start`,
+    `${getApiBaseUrl()}/video-analysis/${encodeURIComponent(analysisId)}/tracking/start`,
     { method: "POST" }
   );
   if (!response.ok) {
@@ -1193,7 +1279,7 @@ export async function getVideoBallTrackingJob(
   jobId: string
 ): Promise<VideoBallTrackingJobResponse> {
   const response = await fetch(
-    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/tracking/job/${encodeURIComponent(jobId)}`,
+    `${getApiBaseUrl()}/video-analysis/${encodeURIComponent(analysisId)}/tracking/job/${encodeURIComponent(jobId)}`,
     { cache: "no-store" }
   );
   if (!response.ok) {
@@ -1211,7 +1297,7 @@ export async function getVideoBallTrackingResult(
   analysisId: string
 ): Promise<VideoBallTrackingResultResponse | null> {
   const response = await fetch(
-    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/tracking`,
+    `${getApiBaseUrl()}/video-analysis/${encodeURIComponent(analysisId)}/tracking`,
     { cache: "no-store" }
   );
   if (response.status === 404) return null;
@@ -1240,7 +1326,7 @@ export async function getWicketBoxCalibration(
   analysisId: string
 ): Promise<CalibrationResult | null> {
   const response = await fetch(
-    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/wicket-box-calibration`
+    `${getApiBaseUrl()}/video-analysis/${encodeURIComponent(analysisId)}/wicket-box-calibration`
   );
   if (response.status === 404) return null;
   if (!response.ok) {
@@ -1258,7 +1344,7 @@ export async function detectWicketBoxCalibration(
   request: WicketBoxCalibrationRegisterRequest
 ): Promise<WicketBoxCalibrationDetectResponse> {
   const response = await fetch(
-    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/wicket-box-calibration/detect`,
+    `${getApiBaseUrl()}/video-analysis/${encodeURIComponent(analysisId)}/wicket-box-calibration/detect`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1284,7 +1370,7 @@ export async function registerWicketBoxCalibration(
     ? `?assignment_hypothesis=${encodeURIComponent(assignmentHypothesis)}`
     : "";
   const response = await fetch(
-    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/wicket-box-calibration/register${query}`,
+    `${getApiBaseUrl()}/video-analysis/${encodeURIComponent(analysisId)}/wicket-box-calibration/register${query}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1310,7 +1396,7 @@ export async function acceptWicketBoxCalibration(
     ? `?assignment_hypothesis=${encodeURIComponent(assignmentHypothesis)}`
     : "";
   const response = await fetch(
-    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/wicket-box-calibration/accept${query}`,
+    `${getApiBaseUrl()}/video-analysis/${encodeURIComponent(analysisId)}/wicket-box-calibration/accept${query}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1331,7 +1417,7 @@ export async function getReplayPayload(
   analysisId: string
 ): Promise<ReplayPayloadV1> {
   const response = await fetch(
-    `${API_BASE_URL}/video-analysis/${encodeURIComponent(analysisId)}/replay-payload`,
+    `${getApiBaseUrl()}/video-analysis/${encodeURIComponent(analysisId)}/replay-payload`,
     { cache: "no-store" }
   );
   if (!response.ok) {
@@ -1341,4 +1427,68 @@ export async function getReplayPayload(
     );
   }
   return response.json() as Promise<ReplayPayloadV1>;
+}
+
+
+export async function solveDeviceCalibration(
+  video: Blob,
+  deviceId: string,
+  deviceLabel: string | null,
+  spec: CheckerboardSpecInput
+): Promise<DeviceCalibrationResponse> {
+  const extension = video.type.includes("mp4") ? "mp4" : "webm";
+  const formData = new FormData();
+  formData.append(
+    "video",
+    new File([video], `calibration.${extension}`, { type: video.type || `video/${extension}` })
+  );
+  formData.append("device_id", deviceId);
+  if (deviceLabel) formData.append("device_label", deviceLabel);
+  formData.append("columns", String(spec.columns));
+  formData.append("rows", String(spec.rows));
+  formData.append("square_size_mm", String(spec.square_size_mm));
+  const response = await fetch(`${getApiBaseUrl()}/device-calibration/solve`, {
+    method: "POST",
+    body: formData
+  });
+  if (!response.ok) {
+    throw await videoAnalysisError(
+      response,
+      `Device calibration returned ${response.status}.`
+    );
+  }
+  return response.json() as Promise<DeviceCalibrationResponse>;
+}
+
+
+/** Null means this device has no profile yet — not an error worth throwing on. */
+export async function getDeviceCalibration(
+  deviceId: string
+): Promise<DeviceLensProfile | null> {
+  const response = await fetch(
+    `${getApiBaseUrl()}/device-calibration/${encodeURIComponent(deviceId)}`,
+    { cache: "no-store" }
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw await videoAnalysisError(
+      response,
+      `Device calibration lookup returned ${response.status}.`
+    );
+  }
+  return response.json() as Promise<DeviceLensProfile>;
+}
+
+
+export async function deleteDeviceCalibration(deviceId: string): Promise<void> {
+  const response = await fetch(
+    `${getApiBaseUrl()}/device-calibration/${encodeURIComponent(deviceId)}`,
+    { method: "DELETE" }
+  );
+  if (!response.ok) {
+    throw await videoAnalysisError(
+      response,
+      `Device calibration delete returned ${response.status}.`
+    );
+  }
 }

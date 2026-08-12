@@ -14,7 +14,6 @@ import {
 
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
-import { AssistedSceneCalibrationPanel } from "@/components/video-analysis/AssistedSceneCalibrationPanel";
 import type {
   ActiveCameraDiagnostics,
   VirtualPitchSceneProps,
@@ -559,8 +558,6 @@ export default function VirtualPitchLabPage() {
           {calibrated && showCameraDiagnostics && <Card className="shadow-none"><p className="mb-4 text-xs font-bold uppercase tracking-[0.14em] text-white/40">Bridge diagnostics</p><CameraDiagnosticsPanel camera={activePayload?.camera ?? null} diagnostics={diagnostics} activeCamera={activeCameraDiagnostics} requestedCamera={sourceMode} activeCanvasCount={activeCanvasCount} /></Card>}
         </aside>
       </div>
-
-      {sourceMode === "auto-registration" && advancedOpen && analysisId.trim() && <section className="mt-5 border border-white/10 bg-white/[0.02] p-4 sm:p-5"><div className="mb-4"><p className="text-xs font-black uppercase text-[#ffe761]">Advanced Calibration</p><p className="mt-1 text-sm text-white/45">Manual anchors remain separate from the automatic result and are changed only by your actions here.</p></div><AssistedSceneCalibrationPanel key={analysisId.trim()} analysisId={analysisId.trim()} /></section>}
     </div>
   );
 }

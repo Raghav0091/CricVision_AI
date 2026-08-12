@@ -1,3 +1,5 @@
+import type { CricketPitchGeometry } from "@/lib/wicketCalibration/types";
+
 export const REPLAY_SCHEMA_VERSION = "1.0" as const;
 export const REPLAY_COORDINATE_SYSTEM = "CRICVISION_PITCH_V1" as const;
 export const REPLAY_DISTANCE_UNIT = "metre" as const;
@@ -134,6 +136,8 @@ export type ReplayPayloadV1 = {
   distance_unit: typeof REPLAY_DISTANCE_UNIT;
   time_unit: typeof REPLAY_TIME_UNIT;
   measurement_validity: MeasurementValidity;
+  /** The pitch the pose was solved against. Absent means regulation. */
+  pitch_geometry?: CricketPitchGeometry | null;
   camera: ReplayCamera;
   playback: ReplayPlayback;
   trajectory: ReplayTrajectorySample[];

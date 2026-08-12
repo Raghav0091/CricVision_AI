@@ -79,7 +79,7 @@ class CameraIntrinsicsCandidate(RegistrationModel):
     distortion_coefficients: list[float] = Field(min_length=5, max_length=14)
     source: Literal[
         "trusted_clip_metadata",
-        "trusted_device_profile",
+        "device_calibration",
         "video_focal_metadata",
         "bounded_image_hypothesis",
     ]

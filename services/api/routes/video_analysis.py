@@ -29,6 +29,10 @@ from ..schemas.wicket_box_calibration import (
     WicketBoxCalibrationRegisterRequest,
     WicketBoxCalibrationRegisterResponse,
 )
+from ..schemas.bat_camera_pose import (
+    BatPoseCalibrationRequest,
+    BatPoseCalibrationResponse,
+)
 from ..services.ball_detector_registry import (
     BallDetectorModelMissing,
     list_ball_detector_models,
@@ -72,6 +76,10 @@ from ..services.wicket_box_calibration_service import (
     detect_wicket_box_calibration,
     load_wicket_box_calibration,
     register_wicket_box_calibration,
+)
+from ..services.bat_camera_pose_service import (
+    load_bat_camera_pose,
+    run_bat_pose_calibration,
 )
 
 
@@ -209,6 +217,72 @@ def accept_analysis_wicket_box_calibration(
             status_code=exc.status_code,
             detail=exc.message,
         ) from exc
+
+
+@router.get(
+    "/{analysis_id}/bat-pose-calibration",
+    response_model=BatPoseCalibrationResponse,
+)
+def get_analysis_bat_pose_calibration(
+    analysis_id: str,
+) -> BatPoseCalibrationResponse:
+    """Return persisted bat-pose calibration, if a session has one."""
+    calibration = load_bat_camera_pose(analysis_id)
+    return BatPoseCalibrationResponse(
+        success=calibration is not None,
+        status="calibrated" if calibration is not None else "bats_not_found",
+        analysis_id=analysis_id,
+        message=(
+            "Bat-pose calibration found."
+            if calibration is not None
+            else "No bat-pose calibration has been saved for this session."
+        ),
+        detections=None,
+        calibration=calibration,
+    )
+
+
+@router.post(
+    "/{analysis_id}/bat-pose-calibration/solve",
+    response_model=BatPoseCalibrationResponse,
+)
+def solve_analysis_bat_pose_calibration(
+    analysis_id: str,
+    request: BatPoseCalibrationRequest,
+) -> BatPoseCalibrationResponse:
+    """Detect a bat at each end of a submitted frame and solve camera pose.
+
+    Fallback calibration path for sessions without real stumps — see
+    `bat_camera_pose_service` for the accuracy caveats (assumed bat length,
+    reduced lateral precision versus stump calibration).
+    """
+    guides = (
+        request.box_layout.model_dump() if request.box_layout is not None else None
+    )
+    manual_boxes = (
+        request.manual_boxes.model_dump() if request.manual_boxes is not None else None
+    )
+    try:
+        result = run_bat_pose_calibration(
+            analysis_id,
+            frame_data_url=request.frame_data_url,
+            frame_width=request.frame_width,
+            frame_height=request.frame_height,
+            guides=guides,
+            bat_height_m=request.bat_height_m,
+            manual_boxes=manual_boxes,
+            bat_detector_model_key=request.bat_detector_model_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return BatPoseCalibrationResponse(
+        success=result["success"],
+        status=result["status"],
+        analysis_id=analysis_id,
+        message=result["message"],
+        detections=result["detections"],
+        calibration=result["calibration"],
+    )
 
 
 @router.get(

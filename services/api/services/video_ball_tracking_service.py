@@ -128,6 +128,11 @@ def validate_video_ball_tracking_input(analysis_id: str) -> None:
             "Every-frame detections are missing. Run Ball Detection first.",
             status_code=409,
         )
+    # Calibration is deliberately NOT required. Image-space tracking — joining
+    # the detected ball positions into a path — is useful on its own, and is
+    # what this pipeline is now for. Without calibration the replay payload
+    # stays IMAGE_SPACE_ONLY and metrics stay null, which is correct: there is
+    # no way to convert pixels into metres. The track is still produced.
 
 
 def invalidate_tracking_after_calibration_change(analysis_id: str) -> None:

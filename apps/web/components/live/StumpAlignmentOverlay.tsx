@@ -1,9 +1,13 @@
-import type { BoxLayout, PitchOverlay, StumpDetection, VirtualStumpGeometry } from "@/lib/types";
+import type { BoxLayout, PitchOverlay, PixelPoint, StumpDetection, VirtualStumpEnd, VirtualStumpGeometry } from "@/lib/types";
 
 
+// Measured from reference footage, normalised to the preview box. Both boxes
+// share a horizontal centre of ~0.5015 — keep that symmetry if these are ever
+// retuned. UPLOAD_ALIGNMENT_BOXES below is a separate layout for still images
+// and is deliberately not derived from these.
 export const CAMERA_ALIGNMENT_BOXES: BoxLayout = {
-  striker: { x: 0.43, y: 0.22, width: 0.14, height: 0.24 },
-  non_striker: { x: 0.35, y: 0.66, width: 0.30, height: 0.28 }
+  striker: { x: 0.347, y: 0.339, width: 0.309, height: 0.202 },
+  non_striker: { x: 0.199, y: 0.586, width: 0.605, height: 0.265 }
 };
 
 
@@ -14,16 +18,211 @@ export const UPLOAD_ALIGNMENT_BOXES: BoxLayout = {
 
 
 type DetectionMap = Record<"striker" | "non_striker", StumpDetection>;
+type Point = { x: number; y: number };
+
+export type MappingLandmarks = { raw: PixelPoint[]; accepted: PixelPoint[] };
+
+const GUIDE_RED = "#E0201F";
+const LANDMARK_ACCEPTED_BLUE = "#1A3FD6";
+
+// Regulation wicket: outer stump centres sit +/- 95.25 mm from the middle, so
+// the centre-to-centre span of the outer pair is 0.1905 m against a maximum
+// stump diameter of 0.0381 m. Drawn thickness is that true ratio against the
+// measured pixel span — see cricket_pitch_geometry.py, which is the single
+// source of truth for these dimensions. Exaggerating them hides misalignment.
+const STUMP_DIAMETER_TO_OUTER_SPAN = 0.0381 / 0.1905;
 
 
 function AlignmentBox({ label, box }: { label: string; box: { x: number; y: number; width: number; height: number } }) {
   return (
     <div
-      className="absolute rounded-md border-2 border-dashed border-signal shadow-[0_0_18px_rgba(255,85,79,0.32)]"
-      style={{ left: `${box.x * 100}%`, top: `${box.y * 100}%`, width: `${box.width * 100}%`, height: `${box.height * 100}%` }}
+      className="absolute border-2 border-dashed"
+      style={{
+        left: `${box.x * 100}%`,
+        top: `${box.y * 100}%`,
+        width: `${box.width * 100}%`,
+        height: `${box.height * 100}%`,
+        borderColor: GUIDE_RED
+      }}
     >
-      <span className="absolute -top-7 left-0 whitespace-nowrap rounded bg-signal px-2 py-1 text-[10px] font-black uppercase tracking-wide text-white">{label}</span>
+      <span className="absolute left-1/2 top-0 -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded-sm bg-[#D9D9D9] px-2 py-0.5 text-[10px] font-bold text-black">
+        {label}
+      </span>
     </div>
+  );
+}
+
+
+function lerpPoint(a: Point, b: Point, t: number): Point {
+  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+}
+
+
+// ponytail: length zones (yorker/full/good/short) are analysis graphics, not
+// setup graphics. During live calibration the operator is checking that the
+// wicket sits on the real stumps, and coloured bands with 13px labels bury
+// exactly the thing they need to see. They belong on the replay, not here.
+
+
+// Regulation crease geometry, in metres. Source of truth is
+// packages/cricket_vision/calibration/cricket_pitch_geometry.py — these are
+// mirrored here only as ratios against the corridor, which is exactly one
+// wicket wide (WICKET_WIDTH_M) and one pitch long (PITCH_LENGTH_M).
+const PITCH_LENGTH_M = 20.12;
+const WICKET_WIDTH_M = 0.2286;
+const POPPING_CREASE_OFFSET_M = 1.22;
+const RETURN_CREASE_OFFSET_M = 1.32;
+
+// Lateral extent expressed in corridor half-widths: the corridor half-width is
+// WICKET_WIDTH_M / 2, so a return crease at 1.32m sits 11.55 half-widths out.
+const RETURN_CREASE_K = RETURN_CREASE_OFFSET_M / (WICKET_WIDTH_M / 2);
+// Longitudinal offset as a fraction of pitch length.
+const CREASE_T = POPPING_CREASE_OFFSET_M / PITCH_LENGTH_M;
+
+
+// The full crease box at one end: the popping crease in front of the stumps and
+// the two return creases running back past them. The bowling crease itself is
+// drawn from crease_guides, which already sits on the stump line.
+//
+// ponytail: positions are interpolated linearly along the corridor rather than
+// projected through a camera matrix, so they drift slightly at the far end.
+// PitchGrid already makes the same approximation; both become exact for free
+// once the overlay is driven by a solved pose instead of stump bboxes.
+function CreaseBox({ corridor, end }: { corridor: PitchOverlay["pitch_corridor"]; end: "striker" | "non_striker" }) {
+  if (corridor.length !== 4) return null;
+  const [nonStrikerLeft, strikerLeft, strikerRight, nonStrikerRight] = corridor;
+
+  // t runs 0 at the striker end to 1 at the non-striker end.
+  const edgesAt = (t: number) => ({
+    left: lerpPoint(strikerLeft, nonStrikerLeft, t),
+    right: lerpPoint(strikerRight, nonStrikerRight, t)
+  });
+  // k is measured in corridor half-widths either side of the centre line.
+  const pointAt = (t: number, k: number): Point => {
+    const { left, right } = edgesAt(t);
+    const centre = { x: (left.x + right.x) / 2, y: (left.y + right.y) / 2 };
+    return { x: centre.x + k * (right.x - centre.x), y: centre.y + k * (right.y - centre.y) };
+  };
+
+  const atStump = end === "striker" ? 0 : 1;
+  const inward = end === "striker" ? 1 : -1;
+  const popping = atStump + inward * CREASE_T;
+  const behind = atStump - inward * CREASE_T;
+
+  const poppingLeft = pointAt(popping, -RETURN_CREASE_K);
+  const poppingRight = pointAt(popping, RETURN_CREASE_K);
+
+  return (
+    <g stroke="rgba(255,255,255,0.85)" strokeWidth="3" strokeLinecap="round" vectorEffect="non-scaling-stroke">
+      <line x1={poppingLeft.x} y1={poppingLeft.y} x2={poppingRight.x} y2={poppingRight.y} />
+      {[-RETURN_CREASE_K, RETURN_CREASE_K].map((k) => {
+        const front = pointAt(popping, k);
+        const back = pointAt(behind, k);
+        return <line key={`return-${end}-${k}`} x1={front.x} y1={front.y} x2={back.x} y2={back.y} />;
+      })}
+    </g>
+  );
+}
+
+
+// Faint grid over the mapped pitch surface, signalling the ground plane has
+// been solved. Divisions are interpolated across the four corridor corners, so
+// the grid inherits the same camera perspective as the corridor itself. Kept
+// deliberately dim — it is a confirmation cue, not the subject of the frame.
+function PitchGrid({ corridor }: { corridor: PitchOverlay["pitch_corridor"] }) {
+  if (corridor.length !== 4) return null;
+  const [nonStrikerLeft, strikerLeft, strikerRight, nonStrikerRight] = corridor;
+  const LONG_DIVISIONS = 10;
+  const LAT_DIVISIONS = 4;
+
+  const longLines = Array.from({ length: LONG_DIVISIONS + 1 }, (_, i) => {
+    const t = i / LONG_DIVISIONS;
+    return { left: lerpPoint(strikerLeft, nonStrikerLeft, t), right: lerpPoint(strikerRight, nonStrikerRight, t) };
+  });
+  const latLines = Array.from({ length: LAT_DIVISIONS + 1 }, (_, j) => {
+    const t = j / LAT_DIVISIONS;
+    return { near: lerpPoint(strikerLeft, strikerRight, t), far: lerpPoint(nonStrikerLeft, nonStrikerRight, t) };
+  });
+
+  return (
+    <g opacity="0.28">
+      {longLines.map((line, i) => (
+        <line
+          key={`grid-long-${i}`}
+          x1={line.left.x}
+          y1={line.left.y}
+          x2={line.right.x}
+          y2={line.right.y}
+          stroke="#4ADE80"
+          // Fade toward the striker end so the far half does not collapse into
+          // a moire band once the lines project closer than a pixel apart.
+          strokeOpacity={0.25 + 0.75 * (i / LONG_DIVISIONS)}
+          strokeWidth="1"
+          vectorEffect="non-scaling-stroke"
+        />
+      ))}
+      {latLines.map((line, i) => (
+        <line
+          key={`grid-lat-${i}`}
+          x1={line.near.x}
+          y1={line.near.y}
+          x2={line.far.x}
+          y2={line.far.y}
+          stroke="#4ADE80"
+          strokeOpacity="0.5"
+          strokeWidth="1"
+          vectorEffect="non-scaling-stroke"
+        />
+      ))}
+    </g>
+  );
+}
+
+
+// One wicket: three gold cylinders plus the two bails bridging them. Each
+// cylinder is a 4-point silhouette (top and base can differ in x under
+// perspective) capped by an ellipse, which reads as a solid round object
+// without needing a 3D renderer.
+function VirtualWicket({ end, wicket }: { end: string; wicket: VirtualStumpEnd | null | undefined }) {
+  const stumps = wicket?.stumps ?? [];
+  if (stumps.length < 3) return null;
+  const outerSpan = Math.abs(stumps[2].top.x - stumps[0].top.x) || 1;
+  const thickness = Math.max(2, outerSpan * STUMP_DIAMETER_TO_OUTER_SPAN);
+  const half = thickness / 2;
+  const capRy = Math.max(1, thickness * 0.3);
+
+  return (
+    <g>
+      {stumps.map((stump) => (
+        <g key={`${end}-${stump.name}`}>
+          <polygon
+            points={[
+              `${stump.top.x - half},${stump.top.y}`,
+              `${stump.top.x + half},${stump.top.y}`,
+              `${stump.base.x + half},${stump.base.y}`,
+              `${stump.base.x - half},${stump.base.y}`
+            ].join(" ")}
+            fill="url(#stump-gold)"
+          />
+          <ellipse cx={stump.top.x} cy={stump.top.y} rx={half} ry={capRy} fill="#F2C75C" />
+        </g>
+      ))}
+      {(wicket?.bails ?? []).map((bail) => {
+        const bailHeight = Math.max(1.5, thickness * 0.55);
+        return (
+          <polygon
+            key={`${end}-${bail.name}`}
+            points={[
+              `${bail.start.x},${bail.start.y - bailHeight}`,
+              `${bail.end.x},${bail.end.y - bailHeight}`,
+              `${bail.end.x},${bail.end.y}`,
+              `${bail.start.x},${bail.start.y}`
+            ].join(" ")}
+            fill="url(#stump-gold)"
+          />
+        );
+      })}
+    </g>
   );
 }
 
@@ -36,6 +235,7 @@ export function StumpAlignmentOverlay({
   frameWidth,
   frameHeight,
   showAlignment = true,
+  mappingLandmarks,
   setupComplete = false
 }: {
   detections?: DetectionMap | null;
@@ -45,9 +245,10 @@ export function StumpAlignmentOverlay({
   frameWidth?: number;
   frameHeight?: number;
   showAlignment?: boolean;
+  mappingLandmarks?: MappingLandmarks | null;
   setupComplete?: boolean;
 }) {
-  const canDrawResults = Boolean(frameWidth && frameHeight && detections);
+  const canDrawResults = Boolean(frameWidth && frameHeight && (detections || mappingLandmarks));
   return (
     <div className="pointer-events-none absolute inset-0">
       {showAlignment && (
@@ -60,7 +261,14 @@ export function StumpAlignmentOverlay({
         <svg
           className="absolute inset-0 h-full w-full"
           viewBox={`0 0 ${frameWidth} ${frameHeight}`}
-          preserveAspectRatio="none"
+          // "slice" scales the frame uniformly and center-crops it to fill the
+          // container — matching the <video>'s object-cover behavior. "none"
+          // (the old value) stretched x/y independently, which is invisible
+          // when the container's aspect ratio is close to the frame's but
+          // badly squishes/distorts everything (stumps included) on the
+          // full-screen live camera view, where the container is much taller
+          // than the captured frame.
+          preserveAspectRatio="xMidYMid slice"
           aria-label="Detected and estimated stump geometry"
         >
           <defs>
@@ -68,99 +276,64 @@ export function StumpAlignmentOverlay({
               <feGaussianBlur stdDeviation="2.5" result="blur" />
               <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
             </filter>
+            <linearGradient id="stump-gold" x1="0" x2="1" y1="0" y2="0">
+              <stop offset="0%" stopColor="#E8B33A" />
+              <stop offset="100%" stopColor="#C98F24" />
+            </linearGradient>
           </defs>
+
+          {/* SVG has no z-buffer: far wicket, then the ground corridor, then
+              the near wicket, so the near stumps occlude the pitch surface. */}
+          <VirtualWicket end="striker" wicket={virtualStumps?.striker} />
+
           {pitchOverlay?.pitch_corridor.length === 4 && (
             <polygon
               points={pitchOverlay.pitch_corridor.map((point) => `${point.x},${point.y}`).join(" ")}
-              fill="rgba(226, 183, 72, 0.16)"
-              stroke="rgba(255, 225, 132, 0.75)"
-              strokeWidth="2"
-              vectorEffect="non-scaling-stroke"
+              fill="#8E93C8"
+              fillOpacity="0.42"
             />
           )}
-          {pitchOverlay?.center_line.length === 2 && (
-            <line
-              x1={pitchOverlay.center_line[0].x}
-              y1={pitchOverlay.center_line[0].y}
-              x2={pitchOverlay.center_line[1].x}
-              y2={pitchOverlay.center_line[1].y}
-              stroke="rgba(255,255,255,0.8)"
-              strokeWidth="2"
-              strokeDasharray="8 8"
-              vectorEffect="non-scaling-stroke"
-            />
-          )}
+          {pitchOverlay?.pitch_corridor.length === 4 && <PitchGrid corridor={pitchOverlay.pitch_corridor} />}
+          {/* ponytail: no centre line. It runs straight down the corridor the
+              virtual stumps sit in, so it hides the one alignment cue that
+              matters — whether the gold wicket is seated on the real one. */}
           {pitchOverlay && (["striker", "non_striker"] as const).map((end) => {
             const guide = pitchOverlay.crease_guides[end];
-            if (guide.length !== 2) return null;
-            return <line key={`${end}-crease`} x1={guide[0].x} y1={guide[0].y} x2={guide[1].x} y2={guide[1].y} stroke="rgba(255,255,255,0.72)" strokeWidth="2" vectorEffect="non-scaling-stroke" />;
-          })}
-          {(["striker", "non_striker"] as const).map((end) => {
-            const detection = detections?.[end];
-            const bbox = detection?.bbox;
-            if (!detection?.found || !bbox) return null;
             return (
-              <g key={`${end}-detection`}>
-                <rect
-                  x={bbox.x}
-                  y={bbox.y}
-                  width={bbox.width}
-                  height={bbox.height}
-                  fill="rgba(183,243,75,0.08)"
-                  stroke="#b7f34b"
-                  strokeWidth="2"
-                  rx="5"
-                  strokeDasharray="7 5"
-                  vectorEffect="non-scaling-stroke"
-                />
-                <text x={bbox.x + 5} y={Math.max(16, bbox.y - 7)} fill="#b7f34b" fontSize="14" fontWeight="700">
-                  {`${end} ${(detection.confidence * 100).toFixed(0)}%`}
-                </text>
+              <g key={`${end}-creases`}>
+                {/* Bowling crease — already sits on the stump line. */}
+                {guide.length === 2 && (
+                  <line
+                    x1={guide[0].x}
+                    y1={guide[0].y}
+                    x2={guide[1].x}
+                    y2={guide[1].y}
+                    stroke="rgba(255,255,255,0.85)"
+                    strokeWidth="3"
+                    strokeLinecap="round"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                )}
+                <CreaseBox corridor={pitchOverlay.pitch_corridor} end={end} />
               </g>
             );
           })}
-          {virtualStumps && (["striker", "non_striker"] as const).flatMap((end) =>
-            (virtualStumps[end]?.stumps ?? []).map((stump) => (
-              <line
-                key={`${end}-${stump.name}`}
-                x1={stump.top.x}
-                y1={stump.top.y}
-                x2={stump.base.x}
-                y2={stump.base.y}
-                stroke="#f6cf62"
-                strokeWidth="8"
-                strokeLinecap="round"
-                vectorEffect="non-scaling-stroke"
-                filter="url(#wicket-glow)"
-              />
-            ))
-          )}
-          {virtualStumps && (["striker", "non_striker"] as const).flatMap((end) =>
-            (virtualStumps[end]?.bails ?? []).map((bail) => (
-              <line
-                key={`${end}-${bail.name}`}
-                x1={bail.start.x}
-                y1={bail.start.y}
-                x2={bail.end.x}
-                y2={bail.end.y}
-                stroke="#ffdf7e"
-                strokeWidth="7"
-                strokeLinecap="round"
-                vectorEffect="non-scaling-stroke"
-                filter="url(#wicket-glow)"
-              />
-            ))
-          )}
+
+          <VirtualWicket end="non_striker" wicket={virtualStumps?.non_striker} />
+
+          {/* Mapping stage: raw detection (red) and smoothed/accepted (blue)
+              landmarks drawn together so the user watches them converge. */}
+          {mappingLandmarks?.raw.map((point, index) => (
+            <circle key={`raw-${index}`} cx={point.x} cy={point.y} r="5" fill={GUIDE_RED} />
+          ))}
+          {mappingLandmarks?.accepted.map((point, index) => (
+            <circle key={`accepted-${index}`} cx={point.x} cy={point.y} r="5" fill={LANDMARK_ACCEPTED_BLUE} />
+          ))}
         </svg>
       )}
-      {virtualStumps && (
+      {setupComplete && virtualStumps && (
         <span className="absolute bottom-3 right-3 rounded bg-ink/80 px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-[#ffe761]">
           Estimated from bounding box
-        </span>
-      )}
-      {setupComplete && (
-        <span className="absolute left-3 top-3 rounded-full border border-lime/40 bg-ink/85 px-3 py-1.5 text-[11px] font-black uppercase tracking-wide text-lime shadow-lg">
-          Setup Complete
         </span>
       )}
     </div>

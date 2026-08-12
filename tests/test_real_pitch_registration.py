@@ -4,9 +4,14 @@ import json
 import math
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 
+from packages.cricket_vision.calibration.cricket_pitch_geometry import (
+    CricketPitchDimensions,
+)
+from services.api.schemas.virtual_pitch import VirtualCamera
 from services.api.schemas.real_pitch_registration import (
     RealPitchRegistrationResult,
     RegistrationDiagnostics,
@@ -40,7 +45,12 @@ from services.api.services.real_pitch_registration_service import (
 )
 from services.api.services.virtual_pitch_service import (
     build_synthetic_camera,
+    build_virtual_pitch_specification,
     project_virtual_pitch,
+)
+from services.api.services.wicket_box_calibration_service import (
+    MAX_WICKET_RMSE_PX,
+    _mandatory_physical_validation_passed,
 )
 
 
@@ -61,8 +71,17 @@ def _setup_frame(index: int = 4, *, selected: bool = False) -> SetupFrameCandida
     )
 
 
-def _synthetic_wicket(end: str, role: str, *, noise_px: float = 0.0) -> WicketObservation:
-    projection = project_virtual_pitch(build_synthetic_camera("centred_bowler_end"))
+def _synthetic_wicket(
+    end: str,
+    role: str,
+    *,
+    noise_px: float = 0.0,
+    projection=None,
+) -> WicketObservation:
+    if projection is None:
+        projection = project_virtual_pitch(
+            build_synthetic_camera("centred_bowler_end")
+        )
     pixels = {
         item.semantic_id: item.pixel_point
         for item in projection.projected_landmarks
@@ -183,9 +202,17 @@ def _synthetic_wicket(end: str, role: str, *, noise_px: float = 0.0) -> WicketOb
     )
 
 
-def _synthetic_observation(*, noise_px: float = 0.0) -> WicketObservationResult:
-    near = _synthetic_wicket("bowler", "near", noise_px=noise_px)
-    far = _synthetic_wicket("striker", "far", noise_px=noise_px)
+def _synthetic_observation(
+    *,
+    noise_px: float = 0.0,
+    projection=None,
+) -> WicketObservationResult:
+    near = _synthetic_wicket(
+        "bowler", "near", noise_px=noise_px, projection=projection
+    )
+    far = _synthetic_wicket(
+        "striker", "far", noise_px=noise_px, projection=projection
+    )
     raw = []
     for frame_index in (4, 5, 6):
         for wicket in (near, far):
@@ -235,13 +262,22 @@ def _synthetic_observation(*, noise_px: float = 0.0) -> WicketObservationResult:
     )
 
 
+
+def _sweep_candidate(candidate_id: str, width: int, height: int):
+    """Pin a test to one hypothesis by name, not by list position."""
+    for item in build_intrinsics_candidates(width, height):
+        if item.candidate_id == candidate_id:
+            return item
+    raise AssertionError(f"{candidate_id} is not offered at {width}x{height}.")
+
+
 def _solve(
     observation: WicketObservationResult,
     *,
     assignment: str = "A",
     lateral_mapping: str = "image_left_to_world_left",
 ):
-    intrinsics = build_intrinsics_candidates(1280, 720)[1]
+    intrinsics = _sweep_candidate("fov_60", 1280, 720)
     correspondences = build_registration_correspondences(
         observation,
         assignment_hypothesis=assignment,
@@ -397,7 +433,7 @@ def test_six_complete_manual_anchors_can_seed_assisted_pose() -> None:
         "A",
         "image_left_to_world_left",
         4,
-        build_intrinsics_candidates(1280, 720)[1],
+        _sweep_candidate("fov_60", 1280, 720),
         assisted,
         np.zeros((720, 1280, 3), dtype=np.uint8),
         observation,
@@ -417,8 +453,10 @@ def test_six_complete_manual_anchors_can_seed_assisted_pose() -> None:
 
 def test_intrinsics_are_bounded_centred_and_zero_distortion() -> None:
     candidates = build_intrinsics_candidates(1280, 720)
-    assert len(candidates) == 3
-    assert [item.horizontal_fov_degrees for item in candidates] == [45, 60, 75]
+    # The 45-degree horizontal hypothesis is a 50.9-degree diagonal on 16:9,
+    # narrower than any phone main camera, so it is no longer offered.
+    assert len(candidates) == 2
+    assert [item.horizontal_fov_degrees for item in candidates] == [60, 75]
     assert all(item.principal_point_x_px == 640 for item in candidates)
     assert all(item.principal_point_y_px == 360 for item in candidates)
     assert all(item.distortion_coefficients == [0.0] * 5 for item in candidates)
@@ -558,3 +596,132 @@ def test_result_schema_round_trip_is_strict_and_metric_locked() -> None:
         RealPitchRegistrationResult.model_validate(
             payload.model_dump(mode="json") | {"metrics_locked": False}
         )
+
+
+def _look_at_camera(
+    position: tuple[float, float, float],
+    target: tuple[float, float, float],
+    *,
+    fov_degrees: float = 60.0,
+    width: int = 1280,
+    height: int = 720,
+) -> VirtualCamera:
+    """Build a camera outside the fixed synthetic set, for short-pitch rigs."""
+    eye = np.asarray(position, dtype=np.float64)
+    focal = width / (2 * math.tan(math.radians(fov_degrees) / 2))
+    forward = np.asarray(target, dtype=np.float64) - eye
+    forward /= np.linalg.norm(forward)
+    right = np.cross(forward, np.array([0.0, 0.0, 1.0]))
+    right /= np.linalg.norm(right)
+    down = np.cross(forward, right)
+    rotation = np.vstack([right, down, forward])
+    translation = -rotation @ eye
+    rotation_vector, _ = cv2.Rodrigues(rotation)
+    return VirtualCamera(
+        name="short_pitch_rig",
+        description="Synthetic camera viewing a declared short pitch.",
+        image_width=width,
+        image_height=height,
+        camera_matrix=[
+            [focal, 0.0, width / 2],
+            [0.0, focal, height / 2],
+            [0.0, 0.0, 1.0],
+        ],
+        distortion_coefficients=[0.0] * 5,
+        rotation_vector=rotation_vector.reshape(-1).tolist(),
+        rotation_matrix=rotation.tolist(),
+        translation_vector=translation.tolist(),
+        camera_position_world=eye.tolist(),
+        target_world=list(target),
+        near_m=0.05,
+        far_m=150.0,
+        horizontal_fov_degrees=fov_degrees,
+    )
+
+
+SHORT_PITCH = CricketPitchDimensions(
+    pitch_length_m=4.0,
+    popping_crease_distance_m=1.0,
+)
+SHORT_PITCH_CAMERA_POSITION = (0.0, -2.5, 1.4)
+
+
+def _short_pitch_observation() -> WicketObservationResult:
+    """Project a declared 4 m pitch through a known camera."""
+    camera = _look_at_camera(SHORT_PITCH_CAMERA_POSITION, (0.0, 2.0, 0.3))
+    projection = project_virtual_pitch(
+        camera, build_virtual_pitch_specification(SHORT_PITCH)
+    )
+    return _synthetic_observation(projection=projection)
+
+
+def _solve_short_pitch(dimensions: CricketPitchDimensions | None):
+    observation = _short_pitch_observation()
+    correspondences = build_registration_correspondences(
+        observation,
+        assignment_hypothesis="A",
+        lateral_mapping="image_left_to_world_left",
+        dimensions=dimensions,
+    )
+    candidate = solve_pose_candidate(
+        "short_pitch",
+        "A",
+        "image_left_to_world_left",
+        4,
+        _sweep_candidate("fov_60", 1280, 720),
+        correspondences,
+        np.zeros((720, 1280, 3), dtype=np.uint8),
+        observation,
+        dimensions=dimensions,
+    )
+    # The real /live path enriches the candidate with perturbation
+    # uncertainty before the acceptance gate reads it.
+    return candidate.model_copy(
+        update={
+            "uncertainty": _perturbation_uncertainty(
+                candidate,
+                correspondences,
+                1280,
+                720,
+                minimum_pointlike_anchors=MIN_ASSISTED_POINTLIKE_ANCHORS,
+                dimensions=dimensions,
+            )
+        }
+    )
+
+
+def test_registration_solves_short_pitch() -> None:
+    """A declared 4 m pitch recovers the true camera to within 5 cm."""
+    candidate = _solve_short_pitch(SHORT_PITCH)
+
+    assert candidate.solver_success
+    assert candidate.eligible_for_selection
+    assert candidate.classification != "REGISTRATION_FAILED"
+    assert candidate.camera_world_position is not None
+    recovered = np.asarray(candidate.camera_world_position, dtype=np.float64)
+    expected = np.asarray(SHORT_PITCH_CAMERA_POSITION, dtype=np.float64)
+    assert float(np.linalg.norm(recovered - expected)) <= 0.05
+    # The pose is good enough to clear the gate /live actually applies.
+    assert _mandatory_physical_validation_passed(candidate)[0]
+
+
+def test_short_pitch_pixels_are_rejected_against_regulation_geometry() -> None:
+    """The exact bug declared geometry fixes.
+
+    Solving short-pitch pixels against 20.12 m still returns *a* pose, but a
+    meaningless one: the residual blows past the acceptance gate, which is why
+    /live reported "Registration failed for all pose candidates".
+    """
+    declared = _solve_short_pitch(SHORT_PITCH)
+    regulation = _solve_short_pitch(None)
+
+    passed, reasons = _mandatory_physical_validation_passed(regulation)
+    assert not passed
+    assert any("reprojection error too high" in reason for reason in reasons)
+    assert regulation.reprojection_rmse_px > MAX_WICKET_RMSE_PX
+    assert declared.reprojection_rmse_px < MAX_WICKET_RMSE_PX
+    # The recovered camera is wrong by far more than the 5 cm the declared
+    # geometry achieves, so the pose is not merely noisier - it is a fiction.
+    recovered = np.asarray(regulation.camera_world_position, dtype=np.float64)
+    expected = np.asarray(SHORT_PITCH_CAMERA_POSITION, dtype=np.float64)
+    assert float(np.linalg.norm(recovered - expected)) > 0.5
